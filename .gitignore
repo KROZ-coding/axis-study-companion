@@ -1,0 +1,45 @@
+# 本地配置、凭据和缓存
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+*.pem
+*.key
+*.p12
+id_rsa*
+.mimosa/
+.zcode/
+.DS_Store
+Thumbs.db
+~$*
+
+# 赛事原件、报名材料与老师截图仅在本地保留
+*.doc
+*.docx
+*.pdf
+*.rar
+*.zip
+/老师提供的前端展示/
+
+# 数据、数据库、日志和生成结果
+/data/
+/datasets/
+/uploads/
+/outputs/
+/artifacts/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# 后续开发环境与构建产物
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+dist/
+build/
+coverage/
