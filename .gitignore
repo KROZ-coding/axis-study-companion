@@ -21,6 +21,9 @@ Thumbs.db
 *.rar
 *.zip
 /老师提供的前端展示/
+/赛题数据/
+/本地参赛工作包/
+/gui-test-screenshots/
 
 # 数据、数据库、日志和生成结果
 /data/
