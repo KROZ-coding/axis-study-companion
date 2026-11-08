@@ -39,6 +39,14 @@ Thumbs.db
 # 后续开发环境与构建产物
 .venv/
 venv/
+server/.venv/
+server/data/
+server/uploads/
+server/outputs/
+server/artifacts/
+server/.env
+server/.env.*
+!server/.env.example
 __pycache__/
 *.py[cod]
 .pytest_cache/
