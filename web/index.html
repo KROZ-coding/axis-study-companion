@@ -3,61 +3,67 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>智慧学伴 · 学情诊断与个性化学习</title>
+  <title>智慧学伴 · 七年级数学</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
   <a class="skip" href="#main">跳到主要内容</a>
+  <div id="boot-status" class="boot-status" role="status">正在读取学习记录…</div>
   <section id="entry" class="entry" aria-labelledby="entry-title" hidden>
     <header class="entry-head">
-      <p class="wordmark">智慧学伴 <span class="wordmark-sub">七年级数学 · 学情诊断</span></p>
-      <span class="tag-sample">虚构样例</span>
+      <p class="wordmark">智慧学伴 <span class="wordmark-sub">七年级数学</span></p>
+      <span class="sample-note">虚构样例演示</span>
     </header>
+    <div class="entry-intro">
+      <h1 id="entry-title">从一道错题，找到下一步。</h1>
+      <p>看清作答依据，把学习建议落到具体材料。</p>
+    </div>
     <div class="entry-body">
-      <div class="sheet" id="sheet">
-        <p class="sheet-meta">作业 · 第三章 一元一次方程 <span class="tag-sample">样例 · 虚构学生</span></p>
-        <h1 id="entry-title" class="visually-hidden">一次错误，可以追到知识点、材料和下一题</h1>
-        <p class="hand hand-stem">解方程：3(x − 2) = 2x + 1</p>
+      <div class="sheet">
+        <p class="sheet-meta">一元一次方程 · 作答示例</p>
+        <p class="hand hand-stem">3(x − 2) = 2x + 1</p>
         <ol class="hand hand-steps">
           <li>3(x − 2) = 2x + 1</li>
-          <li><span id="wrong-step">3x − 2 = 2x + 1</span></li>
+          <li><span id="wrong-step" class="wrong-step">3x − 2 = 2x + 1</span></li>
           <li>x = 3</li>
         </ol>
       </div>
-      <ol class="notes" aria-label="批改痕迹">
-        <li class="note" data-n="1"><span class="note-k">错步</span><span class="note-v">第 2 行：3 只乘了 x，没有乘 −2</span></li>
-        <li class="note" data-n="2"><span class="note-k">错误类型</span><span class="note-v">去括号漏乘</span></li>
-        <li class="note" data-n="3"><span class="note-k">知识点</span><span class="note-v">去括号 · 七上 2.2</span></li>
-        <li class="note" data-n="4"><span class="note-k">建议材料</span><span class="note-v">去括号：括号外的数要乘遍每一项</span></li>
+      <ol class="notes" aria-label="作答分析">
+        <li class="note"><span class="note-k">错在这一步</span><p class="note-v mark">3 也要乘括号里的 −2。</p></li>
+        <li class="note"><span class="note-k">对应知识点</span><p class="note-v">去括号 <span class="ref">七上 2.2</span></p></li>
+        <li class="note"><span class="note-k">接下来</span><p class="note-v">对照讲解，再用一道题验证。</p></li>
       </ol>
-      <svg class="trace" id="trace" aria-hidden="true"></svg>
     </div>
     <footer class="entry-foot">
-      <p class="entry-claim">一次错误，可以追到知识点、材料和下一题。</p>
+      <p class="muted">学生、作答与材料均为虚构样例。</p>
       <div class="entry-actions">
-        <button class="btn btn-primary" data-enter="teacher">教师进入</button>
-        <button class="btn" data-enter="student">学生进入</button>
+        <button class="btn btn-primary" data-enter="teacher">查看班级学情</button>
+        <button class="btn" data-enter="student">进入我的学习</button>
       </div>
     </footer>
   </section>
   <div id="shell" class="shell" hidden>
     <header class="topbar">
-      <button class="wordmark wordmark-btn" data-go="entry" title="回到入口">智慧学伴 <span class="wordmark-sub">七年级数学</span></button>
-      <span class="tag-sample">虚构样例</span>
-      <span class="top-role" id="top-role" aria-live="polite"></span>
-      <div class="demo" role="group" aria-label="演示状态控件">
-        <span class="demo-label">演示状态</span>
-        <button class="btn btn-sm" id="demo-role"></button>
-        <label class="demo-field">状态
-          <select id="demo-state">
-            <option value="normal">正常</option>
-            <option value="loading">加载中</option>
-            <option value="empty">空</option>
-            <option value="error">失败</option>
-          </select>
-        </label>
-        <label class="demo-field"><input type="checkbox" id="demo-reduce"> 减少动态</label>
+      <button class="wordmark wordmark-btn" data-go="entry" aria-label="智慧学伴，回到入口">智慧学伴 <span class="wordmark-sub">七年级数学</span></button>
+      <span class="sample-note">虚构样例</span>
+      <span class="top-role" id="top-role"></span>
+      <div class="top-actions">
+        <button class="link role-switch" id="demo-role"></button>
+        <details class="settings" id="settings">
+          <summary>演示设置</summary>
+          <div class="settings-panel">
+            <label for="demo-state">页面状态</label>
+            <select id="demo-state">
+              <option value="normal">正常</option>
+              <option value="loading">演示加载</option>
+              <option value="empty">演示空数据</option>
+              <option value="error">演示失败</option>
+            </select>
+            <label class="motion-setting"><input type="checkbox" id="demo-reduce"> 减少动态效果</label>
+            <p class="muted" id="motion-hint">同时遵循系统的动态效果偏好。</p>
+          </div>
+        </details>
       </div>
     </header>
     <nav class="sidenav" id="sidenav" aria-label="栏目"></nav>

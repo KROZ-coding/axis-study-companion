@@ -1,7 +1,9 @@
 (async function () {
   'use strict';
 
-  const response = await fetch('/api/study/sample', { headers: { Accept: 'application/json' } });
+  const response = await fetch('/api/study/sample', {
+    headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000),
+  });
   if (!response.ok) throw new Error('样例数据加载失败');
   const data = await response.json();
   const XB = window.XB = {};
@@ -33,16 +35,16 @@
     document.body.replaceChildren();
     const message = document.createElement('main');
     message.setAttribute('role', 'alert');
-    message.className = 'state';
-    message.textContent = '智慧学伴样例数据暂不可用，请检查服务后刷新。';
+    message.className = 'boot-status';
+    message.textContent = '学习记录暂时无法读取。请刷新重试。';
     document.body.append(message);
   }
 })().catch((error) => {
   document.body.replaceChildren();
   const message = document.createElement('main');
   message.setAttribute('role', 'alert');
-  message.className = 'state';
-  message.textContent = '智慧学伴样例数据暂不可用，请检查服务后刷新。';
+  message.className = 'boot-status';
+  message.textContent = '学习记录暂时无法读取。请刷新重试。';
   document.body.append(message);
   console.error(error);
 });
