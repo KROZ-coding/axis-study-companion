@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from collections import Counter
 from datetime import date, timedelta
 from typing import Any
 
+from .study.content import resolve_scope
+from .study.insights import (
+    MIN_N, RULE, STATUS, build_insights, focus_report as _focus, status_for as _status,
+    student_report as scoped_student_report,
+)
+
 AS_OF = date(2026, 11, 3)
-MIN_N = 3
-RULE = "有效记录少于 3 条显示“依据不足”；正确率低于 50% 为薄弱，50% 至 80% 为待巩固，80% 及以上为已掌握。"
 
 TOPICS = [
     {"id": "T1", "name": "有理数"},
@@ -44,21 +47,6 @@ PRACTICE = {
     "K7": {"id": "P-701", "stem": "方程 x/2 − 1 = x/3 两边同乘 6，得？", "options": ["3x − 1 = 2x", "3x − 6 = 2x", "3x − 6 = x", "x − 6 = 2x"], "answer": 1, "why": "每一项都乘 6，−1 也要变成 −6。"},
     "K8": {"id": "P-801", "stem": "3 支笔和 2 本本子共 16 元，本子每本 2 元。设笔每支 x 元，方程是？", "options": ["3x + 2 = 16", "3x + 4 = 16", "3x = 16 + 4", "2x + 3 = 16"], "answer": 1, "why": "2 本本子共 4 元，所以 3x + 4 = 16。"},
 }
-
-STATUS = {
-    "weak": {"label": "薄弱", "rank": 0},
-    "shaky": {"label": "待巩固", "rank": 1},
-    "none": {"label": "依据不足", "rank": 2},
-    "ok": {"label": "已掌握", "rank": 3},
-}
-
-
-def _status(n: int, right: int) -> str:
-    if n < MIN_N:
-        return "none"
-    rate = right / n
-    return "weak" if rate < 0.5 else "shaky" if rate < 0.8 else "ok"
-
 
 def _make_materials() -> list[dict[str, Any]]:
     items_by_kp: dict[str, list[dict[str, Any]]] = {kp["id"]: [] for kp in KPS}
@@ -140,74 +128,19 @@ def build_sample() -> dict[str, Any]:
     for index, record in enumerate(records, start=1):
         record["id"] = f"R-{index:04d}"
 
-    raw_count = len(raw_records)
-    records_by_student_kp: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for record in records:
-        records_by_student_kp.setdefault((record["sid"], record["kp"]), []).append(record)
-
-    stats: dict[str, dict[str, dict[str, Any]]] = {}
-    for student in students:
-        stats[student["id"]] = {}
-        for kp in KPS:
-            rows = records_by_student_kp.get((student["id"], kp["id"]), [])
-            wrongs = [row for row in rows if not row["correct"]]
-            counts = Counter(row["item"] for row in wrongs)
-            top_item = max(counts, key=lambda item_id: (counts[item_id], max(i for i, row in enumerate(wrongs) if row["item"] == item_id))) if counts else None
-            stats[student["id"]][kp["id"]] = {
-                "sid": student["id"], "kp": kp["id"], "n": len(rows), "right": sum(row["correct"] for row in rows),
-                "status": _status(len(rows), sum(row["correct"] for row in rows)), "records": rows, "wrongs": wrongs,
-                "topItem": top_item, "topCount": counts[top_item] if top_item else 0, "lastWrong": wrongs[-1] if wrongs else None,
-            }
-
-    materials = _make_materials()
-    material_by_item = {item["forItem"]: item for item in materials if item["type"] == "讲解" and item["forItem"]}
-    material_by_kp = {
-        kp["id"]: next(material for material in materials if material["kp"] == kp["id"] and material["type"] == "练习")
-        for kp in KPS
-    }
-    suggestions: dict[str, dict[str, dict[str, Any]]] = {}
-    recommended: dict[str, list[str]] = {}
-    for student in students:
-        suggestions[student["id"]] = {}
-        for kp in KPS:
-            stat = stats[student["id"]][kp["id"]]
-            suggestion = material_by_item.get(stat["topItem"]) or material_by_kp[kp["id"]]
-            suggestions[student["id"]][kp["id"]] = suggestion
-        best = _focus(stats[student["id"]], [kp["id"] for kp in KPS])
-        if best["focus"]:
-            material_id = suggestions[student["id"]][best["focus"]["kp"]]["id"]
-            recommended.setdefault(material_id, []).append(student["id"])
-
-    return {
+    data = {
         "className": "七年级（样例）1班", "me": "S07", "asOf": AS_OF.isoformat(), "minN": MIN_N, "rule": RULE,
         "topics": TOPICS, "kps": KPS, "items": ITEMS, "practice": PRACTICE, "students": students,
-        "records": records, "materials": materials, "stats": stats, "suggestions": suggestions,
-        "recommended": recommended, "status": STATUS, "rawCount": raw_count,
-        "dupRemoved": raw_count - len(records), "sampleLabel": "虚构样例数据",
+        "records": records, "materials": _make_materials(), "status": STATUS, "rawCount": len(raw_records),
+        "dupRemoved": len(raw_records) - len(records), "sampleLabel": "虚构样例数据",
     }
-
-
-def _focus(student_stats: dict[str, dict[str, Any]], kp_ids: list[str]) -> dict[str, Any]:
-    stats = [student_stats[kp_id] for kp_id in kp_ids]
-
-    def rate(stat: dict[str, Any]) -> float:
-        return stat["right"] / stat["n"] if stat["n"] else 1.0
-
-    need = sorted(
-        (stat for stat in stats if stat["status"] in {"weak", "shaky"}),
-        key=lambda stat: (STATUS[stat["status"]]["rank"], rate(stat), -stat["n"]),
-    )
-    none = [stat for stat in stats if stat["status"] == "none"]
-    overall = need[0]["status"] if need else "none" if none else "ok"
-    return {"focus": need[0] if need else None, "need": need, "none": none, "stats": stats, "overall": overall}
+    data.update(build_insights(data, resolve_scope(data)))
+    return data
 
 
 def student_report(sid: str, kp_ids: list[str] | None = None) -> dict[str, Any]:
-    data = SAMPLE
-    if sid not in data["stats"]:
-        raise KeyError(sid)
-    selected = kp_ids or [kp["id"] for kp in data["kps"]]
-    return _focus(data["stats"][sid], selected)
+    """Legacy sample adapter; new callers pass their dataset to study.insights."""
+    return scoped_student_report(SAMPLE, sid, kp_ids=kp_ids)
 
 
 SAMPLE = build_sample()
