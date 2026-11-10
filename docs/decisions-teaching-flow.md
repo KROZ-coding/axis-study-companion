@@ -146,3 +146,5 @@ Invoke-RestMethod "$base/followups/$($followup.id)/report.json" -Headers $teache
 运行 `server/.venv/Scripts/python.exe -I server/tests/run_tests.py`。测试入口在导入应用前隔离临时目录、关闭模块级默认持久化并清空模型配置；持久化用例各自创建临时库。实际测试结果见本地部署说明。
 
 本轮未改造前端，没有新任务页浏览器验收或桌面/手机截图。正式登录、通知、课表、赛事数据导入、外部模型和独立教学效果评测不在本次实现范围。
+
+后续产品模型选择已于 2026-11-10 确认：教师回复、出题和审题使用 Poke API 的 `gpt-5.6-sol`（`high`），学生侧 AI 功能使用 `gpt-5.5`（`high`）。配置与未接入边界见[模型分工与接入约定](模型分工与接入约定.md)。
