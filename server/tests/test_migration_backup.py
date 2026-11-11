@@ -30,6 +30,18 @@ from app.report_store import SNAPSHOT_SCHEMA_VERSION
 from app.runtime import Runtime
 
 
+_USER_VERSION_PRAGMAS = {
+    1: "PRAGMA user_version=1",
+    2: "PRAGMA user_version=2",
+}
+_APPLICATION_ID_PRAGMAS = {
+    0: "PRAGMA application_id=0",
+    application_id_from_text("AIQ2"): "PRAGMA application_id=0x41495132",
+    application_id_from_text("AXCP"): "PRAGMA application_id=0x41584350",
+    application_id_from_text("ZZZZ"): "PRAGMA application_id=0x5A5A5A5A",
+}
+
+
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="migration-test-")
@@ -163,7 +175,7 @@ class BackupTests(unittest.TestCase):
                     else application_id_from_text("AIQ2") if name == "jobs"
                     else 0
                 ),
-                tables=frozenset({f"{name}_marker"}),
+                tables=frozenset({"marker"}),
             ) for name in REQUIRED_DATABASES
         }
         self.database_paths = {}
@@ -171,10 +183,10 @@ class BackupTests(unittest.TestCase):
             path = self.live / f"{name}.sqlite3"
             connection = sqlite3.connect(path)
             try:
-                connection.execute(f"CREATE TABLE {name}_marker (id INTEGER PRIMARY KEY, value TEXT)")
-                connection.execute("INSERT INTO " + name + "_marker(value) VALUES (?)", (f"{name}-data",))
-                connection.execute(f"PRAGMA user_version={contract.user_version}")
-                connection.execute(f"PRAGMA application_id={contract.application_id}")
+                connection.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY, value TEXT)")
+                connection.execute("INSERT INTO marker(value) VALUES (?)", (f"{name}-data",))
+                connection.execute(_USER_VERSION_PRAGMAS[contract.user_version])
+                connection.execute(_APPLICATION_ID_PRAGMAS[contract.application_id])
                 connection.commit()
             finally:
                 connection.close()
@@ -234,7 +246,7 @@ class BackupTests(unittest.TestCase):
             path = restored / "databases" / f"{name}.sqlite3"
             with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], contract.user_version)
-                self.assertEqual(connection.execute(f"SELECT value FROM {name}_marker").fetchone()[0], f"{name}-data")
+                self.assertEqual(connection.execute("SELECT value FROM marker").fetchone()[0], f"{name}-data")
         self.assertEqual({name: path.read_bytes() for name, path in self.database_paths.items()}, before)
 
         root_manager = BackupManager(
@@ -258,7 +270,7 @@ class BackupTests(unittest.TestCase):
                 connection.execute("PRAGMA wal_autocheckpoint=0")
                 self.assertEqual(connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0], 0)
                 source_bytes[name] = path.read_bytes()
-                connection.execute(f"INSERT INTO {name}_marker(value) VALUES (?)", (f"{name}-wal-only",))
+                connection.execute("INSERT INTO marker(value) VALUES (?)", (f"{name}-wal-only",))
                 # Live validation must also observe schema metadata committed only to WAL.
                 connection.execute("PRAGMA user_version=3")
                 connection.commit()
@@ -291,7 +303,7 @@ class BackupTests(unittest.TestCase):
                 self.assertEqual(path.stat().st_size, entry["size"])
                 with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as connection:
                     self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
-                    self.assertEqual(connection.execute(f"SELECT value FROM {name}_marker ORDER BY id").fetchall(),
+                    self.assertEqual(connection.execute("SELECT value FROM marker ORDER BY id").fetchall(),
                                      [(f"{name}-data",), (f"{name}-wal-only",)])
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
                     self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -438,7 +450,7 @@ class BackupTests(unittest.TestCase):
     def test_bad_application_id_and_unversioned_nonempty_database_fail_closed(self) -> None:
         wrong = application_id_from_text("ZZZZ")
         with closing(sqlite3.connect(self.database_paths["content"])) as connection:
-            connection.execute(f"PRAGMA application_id={wrong}")
+            connection.execute(_APPLICATION_ID_PRAGMAS[wrong])
         with self.assertRaisesRegex(BackupError, "application_id"):
             self.manager.export_bytes()
 

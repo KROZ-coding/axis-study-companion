@@ -52,6 +52,7 @@ class CompanionStoreTests(unittest.TestCase):
         self.assertEqual(self.store.journal_mode, "wal")
         with self.store.connect() as db:
             self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
             self.assertEqual(db.execute("PRAGMA application_id").fetchone()[0], APPLICATION_ID)
             self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -67,7 +68,7 @@ class CompanionStoreTests(unittest.TestCase):
 
         newer = Path(self.directory.name) / "newer.sqlite3"
         with closing(sqlite3.connect(newer)) as db:
-            db.execute(f"PRAGMA application_id={APPLICATION_ID}")
+            db.execute("PRAGMA application_id=0x41584350")
             db.execute("PRAGMA user_version=2")
         with self.assertRaisesRegex(RuntimeError, "identity or schema"):
             CompanionStore(newer)
@@ -222,6 +223,8 @@ class CompanionStoreTests(unittest.TestCase):
         with self.assertRaises(NotFound):
             self.store.get_response("missing-response", "student-1")
         posted = self.post(task_id="task-1", question_version_id="q1:1")
+        with self.assertRaises(NotFound):
+            self.store.get_response(posted["response_id"], "student-2")
         self.store.append_delta(posted["response_id"], 1, "private answer", call_id="call", generation=1)
         self.store.complete_response(posted["response_id"], "private answer", call_id="call", generation=1)
         collection = self.store.create_collection("student-1", "Saved", request_id="collection")
@@ -285,6 +288,63 @@ class CompanionStoreTests(unittest.TestCase):
             self.store.post_discussion_message(thread["id"], "reader", "no", author_role="teacher", request_id="forged", can_manage=False)
         with self.assertRaises(ValueError):
             self.store.post_discussion_message(thread["id"], "teacher-1", "altered preset", author_role="teacher", request_id="unsafe", preset_key="try_first", results_released=False, can_manage=True)
+
+    def test_static_filters_preserve_scope_order_and_pagination(self):
+        threads = [self.store.create_discussion_thread(
+            student, "course-1", classroom, task, f"attempt-{index}", "q1:1", 1,
+            created_by="teacher-1", request_id=f"thread-{index}")
+            for index, (student, classroom, task) in enumerate((
+                ("student-1", "class-1", "task-1"),
+                ("student-1", "class-2", "task-2"),
+                ("student-2", "class-1", "task-1")))]
+        with self.store.connect() as db:
+            db.executemany("UPDATE discussion_threads SET updated_at=? WHERE id=?",
+                           [(index + 1, row["id"]) for index, row in enumerate(threads)])
+        self.assertEqual([row["id"] for row in self.store.list_discussion_threads(student_id="student-1")],
+                         [threads[1]["id"], threads[0]["id"]])
+        self.assertEqual([row["id"] for row in self.store.list_discussion_threads(class_id="class-1", task_id="task-1", limit=1)],
+                         [threads[2]["id"]])
+        self.assertEqual([row["id"] for row in self.store.list_discussion_threads(student_id="student-1", class_id="class-1", task_id="task-1")],
+                         [threads[0]["id"]])
+        self.assertEqual(self.store.list_discussion_threads(student_id="student-1' OR 1=1 --"), [])
+        with self.assertRaises(ValueError):
+            self.store.list_discussion_threads(task_id="task-1")
+
+        notifications = [self.store.create_notification(
+            "student-1", "grade", "task", "task-1", business_key=f"grade-{index}", payload={})
+            for index in range(3)]
+        with self.store.connect() as db:
+            db.executemany("UPDATE notifications SET created_at=? WHERE id=?",
+                           [(index + 1, row["id"]) for index, row in enumerate(notifications)])
+        self.store.mark_notification_read(notifications[1]["id"], "student-1")
+        self.assertEqual([row["id"] for row in self.store.list_notifications("student-1", limit=1, offset=1)],
+                         [notifications[1]["id"]])
+        self.assertEqual([row["id"] for row in self.store.list_notifications("student-1", unread_only=True)],
+                         [notifications[2]["id"], notifications[0]["id"]])
+        self.assertEqual([row["id"] for row in self.store.list_notifications("student-1", unread_only=True, limit=1, offset=1)],
+                         [notifications[0]["id"]])
+        self.assertEqual(self.store.list_notifications("student-2", unread_only=True), [])
+
+        collection = self.store.create_collection("student-1", "Saved", request_id="hold-collection")
+        scopes = (("all", None), ("user", "student-1"),
+                  ("conversation", self.conversation["id"]),
+                  ("collection", collection["id"]), ("discussion_thread", threads[0]["id"]))
+        holds = [self.store.create_legal_hold(scope, resource_id, created_by="admin", reason="review",
+                                             request_id=f"hold-{index}")
+                 for index, (scope, resource_id) in enumerate(scopes)]
+        with self.store.connect() as db:
+            db.executemany("UPDATE legal_holds SET created_at=? WHERE id=?",
+                           [(index + 1, row["id"]) for index, row in enumerate(holds)])
+            db.execute("UPDATE legal_holds SET expires_at=? WHERE id=?", (100, holds[0]["id"]))
+        self.store.release_legal_hold(holds[1]["id"], actor_id="admin", reason="closed")
+        self.assertEqual([row["id"] for row in self.store.list_legal_holds(now=100)],
+                         [row["id"] for row in reversed(holds[2:])])
+        self.assertEqual([row["id"] for row in self.store.list_legal_holds(now=100, active_only=False)],
+                         [row["id"] for row in reversed(holds)])
+        for scope in ("conversation", "collection", "discussion_thread"):
+            with self.subTest(scope=scope), self.assertRaises(NotFound):
+                self.store.create_legal_hold(scope, "missing", created_by="admin", reason="review",
+                                             request_id=f"missing-{scope}")
 
     def test_retention_holds_audit_preview_and_no_fact_deletion(self):
         old = self.conversation["id"]

@@ -92,7 +92,6 @@ class CompanionStore:
         db = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
-        db.execute(f"PRAGMA busy_timeout={int(self.busy_timeout * 1000)}")
         db.execute("PRAGMA synchronous=NORMAL")
         return db
 
@@ -152,7 +151,7 @@ class CompanionStore:
                 version = self._check_database(db)
                 if version == 0:
                     self._migration_1(db)
-                    db.execute(f"PRAGMA application_id={APPLICATION_ID}")
+                    db.execute("PRAGMA application_id=0x41584350")
                     db.execute("PRAGMA user_version=1")
                 db.commit()
             except BaseException:
@@ -360,8 +359,16 @@ class CompanionStore:
 
     @staticmethod
     def _owned(db: sqlite3.Connection, table: str, resource_id: str, user_id: str) -> sqlite3.Row:
-        # Table names are selected exclusively by repository methods, never by a request.
-        row = db.execute(f"SELECT * FROM {table} WHERE id=? AND user_id=?", (resource_id, user_id)).fetchone()
+        queries = {
+            "conversations": "SELECT * FROM conversations WHERE id=? AND user_id=?",
+            "messages": "SELECT * FROM messages WHERE id=? AND user_id=?",
+            "collections": "SELECT * FROM collections WHERE id=? AND user_id=?",
+            "collection_items": "SELECT * FROM collection_items WHERE id=? AND user_id=?",
+            "notes": "SELECT * FROM notes WHERE id=? AND user_id=?",
+            "memories": "SELECT * FROM memories WHERE id=? AND user_id=?",
+            "notifications": "SELECT * FROM notifications WHERE id=? AND user_id=?",
+        }
+        row = db.execute(queries[table], (resource_id, user_id)).fetchone()
         if row is None:
             raise NotFound("resource not found")
         return row
@@ -532,12 +539,11 @@ class CompanionStore:
 
     @staticmethod
     def _response_row(db: sqlite3.Connection, response_id: str, user_id: str | None = None) -> sqlite3.Row:
-        sql, args = ("SELECT r.*,m.task_id,m.question_version_id,c.course_id,'student' purpose FROM responses r "
-                     "JOIN messages m ON m.id=r.message_id JOIN conversations c ON c.id=r.conversation_id WHERE r.id=?"), [response_id]
-        if user_id is not None:
-            sql += " AND r.user_id=?"
-            args.append(user_id)
-        row = db.execute(sql, args).fetchone()
+        row = db.execute(
+            "SELECT r.*,m.task_id,m.question_version_id,c.course_id,'student' purpose FROM responses r "
+            "JOIN messages m ON m.id=r.message_id JOIN conversations c ON c.id=r.conversation_id "
+            "WHERE r.id=? AND (? IS NULL OR r.user_id=?)",
+            (response_id, user_id, user_id)).fetchone()
         if row is None:
             raise NotFound("response not found")
         return row
@@ -977,13 +983,12 @@ class CompanionStore:
         self._integer(limit, "limit", 1, 500)
         if student_id is None and class_id is None:
             raise ValueError("a student or class scope is required")
-        filters, args = [], []
-        for field, value in (("student_id", student_id), ("class_id", class_id), ("task_id", task_id)):
-            if value is not None:
-                filters.append(f"{field}=?")
-                args.append(value)
         with self.connect() as db:
-            rows = db.execute(f"SELECT * FROM discussion_threads WHERE {' AND '.join(filters)} ORDER BY updated_at DESC,id LIMIT ?", (*args, limit)).fetchall()
+            rows = db.execute(
+                "SELECT * FROM discussion_threads WHERE (? IS NULL OR student_id=?) "
+                "AND (? IS NULL OR class_id=?) AND (? IS NULL OR task_id=?) "
+                "ORDER BY updated_at DESC,id LIMIT ?",
+                (student_id, student_id, class_id, class_id, task_id, task_id, limit)).fetchall()
             return [self._public(row) for row in rows]
 
     @staticmethod
@@ -1084,8 +1089,8 @@ class CompanionStore:
         if type(unread_only) is not bool:
             raise ValueError("unread_only must be bool")
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM notifications WHERE user_id=?" + (" AND read_at IS NULL" if unread_only else "") + " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
-                              (user_id, limit, offset)).fetchall()
+            rows = db.execute("SELECT * FROM notifications WHERE user_id=? AND (?=0 OR read_at IS NULL) ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+                              (user_id, unread_only, limit, offset)).fetchall()
         return [self._project_notification(row, user_id, answer_policy) for row in rows]
 
     def mark_notification_read(self, notification_id: str, user_id: str, *,
@@ -1141,8 +1146,12 @@ class CompanionStore:
             now = time.time()
             if expires_at is not None and expires_at <= now:
                 raise ValueError("hold expiry must be in the future")
-            tables = {"conversation": "conversations", "collection": "collections", "discussion_thread": "discussion_threads"}
-            if scope in tables and db.execute(f"SELECT 1 FROM {tables[scope]} WHERE id=?", (resource_id,)).fetchone() is None:
+            queries = {
+                "conversation": "SELECT 1 FROM conversations WHERE id=?",
+                "collection": "SELECT 1 FROM collections WHERE id=?",
+                "discussion_thread": "SELECT 1 FROM discussion_threads WHERE id=?",
+            }
+            if scope in queries and db.execute(queries[scope], (resource_id,)).fetchone() is None:
                 raise NotFound("hold resource not found")
             record_id = uuid4().hex
             db.execute("INSERT INTO legal_holds(id,scope,resource_id,reason,created_by,request_id,request_hash,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1155,8 +1164,8 @@ class CompanionStore:
         if type(active_only) is not bool:
             raise ValueError("active_only must be bool")
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM legal_holds" + (" WHERE released_at IS NULL AND (expires_at IS NULL OR expires_at>?)" if active_only else "") + " ORDER BY created_at DESC,id",
-                              (current,) if active_only else ()).fetchall()
+            rows = db.execute("SELECT * FROM legal_holds WHERE (?=0 OR (released_at IS NULL AND (expires_at IS NULL OR expires_at>?))) ORDER BY created_at DESC,id",
+                              (active_only, current)).fetchall()
             return [self._public(row) for row in rows]
 
     def release_legal_hold(self, hold_id: str, *, actor_id: str, reason: str) -> dict[str, Any]:
@@ -1181,20 +1190,19 @@ class CompanionStore:
             all_held = any(hold["scope"] == "all" for hold in holds)
             held = {(hold["scope"], hold["resource_id"]) for hold in holds}
             entries = []
-            specs = {
-                "conversations": ("SELECT c.id,c.user_id,c.id conversation_id,NULL collection_id,NULL discussion_thread_id FROM conversations c WHERE c.status='archived' AND c.updated_at<? AND NOT EXISTS(SELECT 1 FROM responses r WHERE r.conversation_id=c.id AND r.status IN ('pending','streaming'))", ()),
-                "messages": ("SELECT m.id,m.user_id,m.conversation_id,NULL collection_id,NULL discussion_thread_id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.status='archived' AND m.created_at<?", ()),
-                "responses": ("SELECT r.id,r.user_id,r.conversation_id,NULL collection_id,NULL discussion_thread_id FROM responses r JOIN conversations c ON c.id=r.conversation_id WHERE c.status='archived' AND r.status IN ('completed','failed','cancelled') AND r.updated_at<?", ()),
-                "events": ("SELECT CAST(e.event_id AS TEXT) id,r.user_id,r.conversation_id,NULL collection_id,NULL discussion_thread_id FROM events e JOIN responses r ON r.id=e.response_id JOIN conversations c ON c.id=r.conversation_id WHERE c.status='archived' AND r.status IN ('completed','failed','cancelled') AND e.created_at<?", ()),
-                "collections": ("SELECT id,user_id,NULL conversation_id,id collection_id,NULL discussion_thread_id FROM collections WHERE status='archived' AND updated_at<?", ()),
-                "notes": ("SELECT n.id,n.user_id,m.conversation_id,i.collection_id,NULL discussion_thread_id FROM notes n JOIN collection_items i ON i.id=n.collection_item_id JOIN collections c ON c.id=i.collection_id LEFT JOIN messages m ON m.id=i.message_id WHERE c.status='archived' AND n.updated_at<?", ()),
-                "memories": ("SELECT me.id,me.user_id,m.conversation_id,NULL collection_id,NULL discussion_thread_id FROM memories me LEFT JOIN messages m ON m.id=me.message_id WHERE me.status='archived' AND me.updated_at<?", ()),
-                "discussion_threads": ("SELECT id,student_id user_id,NULL conversation_id,NULL collection_id,id discussion_thread_id FROM discussion_threads WHERE updated_at<?", ()),
-                "notifications": ("SELECT id,user_id,NULL conversation_id,NULL collection_id,NULL discussion_thread_id FROM notifications WHERE read_at IS NOT NULL AND created_at<?", ()),
+            queries = {
+                "conversations": "SELECT c.id,c.user_id,c.id conversation_id,NULL collection_id,NULL discussion_thread_id FROM conversations c WHERE c.status='archived' AND c.updated_at<? AND NOT EXISTS(SELECT 1 FROM responses r WHERE r.conversation_id=c.id AND r.status IN ('pending','streaming')) ORDER BY id",
+                "messages": "SELECT m.id,m.user_id,m.conversation_id,NULL collection_id,NULL discussion_thread_id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.status='archived' AND m.created_at<? ORDER BY id",
+                "responses": "SELECT r.id,r.user_id,r.conversation_id,NULL collection_id,NULL discussion_thread_id FROM responses r JOIN conversations c ON c.id=r.conversation_id WHERE c.status='archived' AND r.status IN ('completed','failed','cancelled') AND r.updated_at<? ORDER BY id",
+                "events": "SELECT CAST(e.event_id AS TEXT) id,r.user_id,r.conversation_id,NULL collection_id,NULL discussion_thread_id FROM events e JOIN responses r ON r.id=e.response_id JOIN conversations c ON c.id=r.conversation_id WHERE c.status='archived' AND r.status IN ('completed','failed','cancelled') AND e.created_at<? ORDER BY id",
+                "collections": "SELECT id,user_id,NULL conversation_id,id collection_id,NULL discussion_thread_id FROM collections WHERE status='archived' AND updated_at<? ORDER BY id",
+                "notes": "SELECT n.id,n.user_id,m.conversation_id,i.collection_id,NULL discussion_thread_id FROM notes n JOIN collection_items i ON i.id=n.collection_item_id JOIN collections c ON c.id=i.collection_id LEFT JOIN messages m ON m.id=i.message_id WHERE c.status='archived' AND n.updated_at<? ORDER BY id",
+                "memories": "SELECT me.id,me.user_id,m.conversation_id,NULL collection_id,NULL discussion_thread_id FROM memories me LEFT JOIN messages m ON m.id=me.message_id WHERE me.status='archived' AND me.updated_at<? ORDER BY id",
+                "discussion_threads": "SELECT id,student_id user_id,NULL conversation_id,NULL collection_id,id discussion_thread_id FROM discussion_threads WHERE updated_at<? ORDER BY id",
+                "notifications": "SELECT id,user_id,NULL conversation_id,NULL collection_id,NULL discussion_thread_id FROM notifications WHERE read_at IS NOT NULL AND created_at<? ORDER BY id",
             }
             for policy in policies:
-                sql, _ = specs[policy["resource_type"]]
-                rows = db.execute(sql + " ORDER BY id", (current - policy["retention_days"] * 86400,)).fetchall()
+                rows = db.execute(queries[policy["resource_type"]], (current - policy["retention_days"] * 86400,)).fetchall()
                 eligible, blocked = [], 0
                 for row in rows:
                     is_held = all_held or any((scope, row[field]) in held for scope, field in

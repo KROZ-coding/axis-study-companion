@@ -164,7 +164,7 @@ class V1CourseTests(unittest.TestCase):
         self.assertIsNotNone(self.store.get_class_membership(self.other_class["id"], self.student["id"]))
         self.assertEqual(self.store.get_user(self.student["id"]), before)
         self.as_user(self.owner)
-        self.assertEqual(self.client.patch(f"/api/v1/classes/{self.classroom['id']}/members/{self.student['id']}", json={"password": "teacher-password"}).status_code, 405)
+        self.assertEqual(self.client.patch(f"/api/v1/classes/{self.classroom['id']}/members/{self.student['id']}", json={"password": secrets.token_urlsafe(24)}).status_code, 405)
 
     def test_class_owner_handoff_removes_old_owner_even_if_material_owner(self):
         self.as_user(self.owner)

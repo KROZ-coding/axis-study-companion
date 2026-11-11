@@ -35,18 +35,25 @@ class ContentStoreTests(unittest.TestCase):
         self.assertEqual(self.store.journal_mode,"wal")
         with self.store.connect() as db:
             self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0],1)
+            self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0],15000)
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertTrue({"material_files","import_batches","source_blocks","material_issues","confirmations","confirmation_blocks","course_requirements","knowledge_points","knowledge_prerequisites","content_jobs"} <= tables)
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute("INSERT INTO requirement_blocks VALUES ('missing','missing')")
         self.assertEqual(ContentStore(self.path).schema_version,1)
 
+    def test_busy_timeout_comes_from_connection_timeout(self):
+        store = ContentStore(self.path,timeout=0.125)
+        with store.connect() as db:
+            self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0],125)
+
     def test_newer_and_unversioned_foreign_databases_are_rejected_without_modification(self):
+        version_sql = {0: "PRAGMA user_version=0", 99: "PRAGMA user_version=99"}
         for name,version in (("future",99),("foreign",0)):
             path = Path(self.directory.name)/(name+".sqlite3")
             with closing(sqlite3.connect(path)) as db:
                 db.execute("CREATE TABLE foreign_data(value TEXT)")
-                db.execute(f"PRAGMA user_version={version}")
+                db.execute(version_sql[version])
                 db.commit()
             before = path.read_bytes()
             with self.assertRaises(RuntimeError):
@@ -113,6 +120,21 @@ class ContentStoreTests(unittest.TestCase):
             self.store.update_draft(material["id"],actor_id="teacher",expected_revision=1,title="stale")
         self._confirm(material)
 
+    def test_draft_field_updates_bind_values_and_roll_back_together(self):
+        material = self._import(license_code="unknown",rights_confirmed=False)
+        title = "课程 ' \" ; -- ?"
+        note = "已获许可 ' \" ; -- ?"
+        updated = self.store.update_draft(material["id"],actor_id="teacher",expected_revision=1,
+            title=title,license_code="permission",license_note=note,rights_confirmed=True,
+            allow_generation=False,allow_retrieval=False,allow_student_view=False,external_processing_allowed=False)
+        for name,value in {"title":title,"license_code":"permission","license_note":note,"rights_confirmed":True,
+                "allow_generation":False,"allow_retrieval":False,"allow_student_view":False,"external_processing_allowed":False}.items():
+            self.assertEqual(updated[name],value)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            self.store.update_draft(material["id"],actor_id="teacher",expected_revision=updated["revision"],
+                title="must roll back",license_code="own",license_note=object())
+        self.assertEqual(self.store.get_material(material["id"]),updated)
+
     def test_shared_owner_confirmation_public_attestation_and_answer_projection(self):
         parsed = {"status":"parsed","format":"txt","blocks":[{"anchor":"p:1","kind":"text","text":"public lesson"},{"anchor":"p:2","kind":"answer","text":"secret answer"}],"issues":[]}
         material = self._import(parsed=parsed,visibility="shared")
@@ -140,6 +162,43 @@ class ContentStoreTests(unittest.TestCase):
         self.assertEqual(self.store.search_confirmed("course","100%",class_id="class-a")[0]["id"],block["id"])
         self.assertEqual(self.store.search_confirmed("course","_",class_id="class-a"),[])
         self.assertEqual(self.store.search_confirmed("course","lesson",class_id="class-b"),[])
+
+    def test_confirmed_source_json_selection_preserves_order_and_all_or_nothing(self):
+        course = "course ' \" ; -- ?"
+        material = self._import(course_id=course)
+        self._confirm(material)
+        ids = [block["id"] for block in reversed(self.store.list_blocks(material["id"]))]
+        for purpose in ("generation","retrieval"):
+            with self.subTest(purpose=purpose):
+                result = self.store.confirmed_sources(course,ids,purpose=purpose)
+                self.assertEqual([block["id"] for block in result],ids)
+                with self.assertRaises(PermissionError):
+                    self.store.confirmed_sources(course,[ids[0],"missing ' \" ] ; -- ?"],purpose=purpose)
+                with self.assertRaises(PermissionError):
+                    self.store.confirmed_sources("another course",ids,purpose=purpose)
+        for invalid in ([],[ids[0],ids[0]],["missing"]*501):
+            with self.subTest(invalid_count=len(invalid)),self.assertRaises(ValueError):
+                self.store.confirmed_sources(course,invalid,purpose="retrieval")
+        with self.assertRaises(ValueError):
+            self.store.confirmed_sources(course,ids,purpose="retrieval OR 1=1")
+
+    def test_confirmed_source_json_selection_accepts_500_blocks_in_requested_order(self):
+        parsed = {"status":"parsed","format":"txt","issues":[],"blocks":[
+            {"anchor":f"p:{index}","kind":"text","text":f"lesson {index}"} for index in range(500)]}
+        material = self._import(parsed=parsed)
+        self._confirm(material)
+        ids = [block["id"] for block in reversed(self.store.list_blocks(material["id"]))]
+        result = self.store.confirmed_sources("course",ids,purpose="retrieval")
+        self.assertEqual([block["id"] for block in result],ids)
+
+    def test_generation_permission_does_not_grant_retrieval_permission(self):
+        material = self._import(allow_retrieval=False)
+        self._confirm(material)
+        ids = [block["id"] for block in self.store.list_blocks(material["id"])]
+        self.assertEqual([block["id"] for block in self.store.confirmed_sources("course",ids,purpose="generation")],ids)
+        with self.assertRaises(PermissionError):
+            self.store.confirmed_sources("course",ids,purpose="retrieval")
+        self.assertEqual(self.store.search_confirmed("course","first"),[])
 
     def test_manual_ocr_transcription_requires_human_text_and_keeps_anchor_and_original_hash(self):
         content = b"\x89PNG\r\n\x1a\nprivate-image"
@@ -174,6 +233,35 @@ class ContentStoreTests(unittest.TestCase):
             self.store.confirm_curriculum("knowledge",point["id"],actor_id="owner")
         with self.assertRaises(ContentConflict):
             self.store.set_prerequisites(points[2]["id"],[],actor_id="teacher")
+
+    def test_curriculum_fixed_queries_preserve_draft_author_and_course_filters(self):
+        material = self._import(); self._confirm(material)
+        source_ids = [self.store.list_blocks(material["id"])[0]["id"]]
+        author = "teacher ' \" ; -- ?"
+        for kind in ("requirement","knowledge"):
+            with self.subTest(kind=kind):
+                if kind == "requirement":
+                    create = lambda text,creator: self.store.add_requirement("course",text,created_by=creator,source_block_ids=source_ids)
+                    list_records = self.store.list_requirements
+                else:
+                    create = lambda text,creator: self.store.add_knowledge_point("course",text,text,created_by=creator,source_block_ids=source_ids)
+                    list_records = self.store.list_knowledge_points
+                confirmed = create("confirmed","teacher")
+                own = create("own draft",author)
+                other = create("other draft","another teacher")
+                self.store.confirm_curriculum(kind,confirmed["id"],actor_id="owner")
+                for options,expected in (({},[confirmed]),({"created_by":author},[confirmed]),
+                        ({"include_drafts":True},[confirmed,own,other]),
+                        ({"include_drafts":True,"created_by":""},[confirmed,own,other]),
+                        ({"include_drafts":True,"created_by":author},[confirmed,own])):
+                    result = list_records("course",**options)
+                    self.assertEqual([item["id"] for item in result],[item["id"] for item in expected])
+                    self.assertTrue(all(item["source_block_ids"] == source_ids for item in result))
+                self.assertEqual(list_records("another course",include_drafts=True),[])
+                with self.assertRaises(KeyError):
+                    self.store.confirm_curriculum(kind,"missing ' ; --",actor_id="owner")
+                with self.assertRaises(ContentConflict):
+                    self.store.confirm_curriculum(kind,confirmed["id"],actor_id="owner")
 
     def test_worker_generation_and_lease_guards_reject_old_callbacks(self):
         job = self.store.create_job("question_generate",course_id="course",owner_id="teacher",payload={})

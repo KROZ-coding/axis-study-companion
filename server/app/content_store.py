@@ -21,6 +21,7 @@ class ContentConflict(ValueError):
 class ContentStore:
     SCHEMA_VERSION = 1
     _MIGRATIONS = {1: "_migration_1"}
+    _SCHEMA_VERSION_SQL = {1: "PRAGMA user_version=1"}
     LICENSES = frozenset({"own", "permission", "cc0", "cc_by", "cc_by_sa", "unknown", "restricted"})
 
     def __init__(self, db_path: str | Path, *, timeout: float = 15.0) -> None:
@@ -36,7 +37,6 @@ class ContentStore:
         db = sqlite3.connect(str(self.db_path), timeout=self.timeout, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
-        db.execute(f"PRAGMA busy_timeout={int(self.timeout * 1000)}")
         db.execute("PRAGMA synchronous=NORMAL")
         return db
 
@@ -90,7 +90,7 @@ class ContentStore:
                 while version < self.SCHEMA_VERSION:
                     version += 1
                     getattr(self, self._MIGRATIONS[version])(db)
-                    db.execute(f"PRAGMA user_version={version}")
+                    db.execute(self._SCHEMA_VERSION_SQL[version])
                 db.commit()
             except BaseException:
                 db.rollback()
@@ -305,14 +305,13 @@ class ContentStore:
                 (course_id,limit,offset))]  # type: ignore[misc]
 
     def list_blocks(self, file_id: str, *, confirmed_only: bool = False, student: bool = False) -> list[dict[str, Any]]:
-        sql = "SELECT b.* FROM source_blocks b JOIN material_files f ON f.id=b.file_id WHERE b.file_id=?"
-        if confirmed_only or student:
-            sql += " AND b.status='confirmed'"
-        if student:
-            sql += " AND b.student_visible=1 AND b.kind IN ('text','table') AND f.allow_student_view=1 AND f.rights_confirmed=1"
-        sql += " ORDER BY b.ordinal"
         with self.connect() as db:
-            return [self._block(r) for r in db.execute(sql, (file_id,))]
+            return [self._block(r) for r in db.execute("""SELECT b.* FROM source_blocks b
+                JOIN material_files f ON f.id=b.file_id WHERE b.file_id=?
+                  AND (?=0 OR b.status='confirmed')
+                  AND (?=0 OR (b.student_visible=1 AND b.kind IN ('text','table')
+                               AND f.allow_student_view=1 AND f.rights_confirmed=1))
+                ORDER BY b.ordinal""", (file_id,int(bool(confirmed_only or student)),int(bool(student))))]
 
     def list_issues(self, file_id: str) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -355,8 +354,18 @@ class ContentStore:
                 raise ValueError("source permission or attribution required")
             if "title" in changes and not str(changes["title"]).strip():
                 raise ValueError("title required")
+            update_queries = {
+                "title": "UPDATE material_files SET title=? WHERE id=?",
+                "license_code": "UPDATE material_files SET license_code=? WHERE id=?",
+                "license_note": "UPDATE material_files SET license_note=? WHERE id=?",
+                "rights_confirmed": "UPDATE material_files SET rights_confirmed=? WHERE id=?",
+                "allow_generation": "UPDATE material_files SET allow_generation=? WHERE id=?",
+                "allow_retrieval": "UPDATE material_files SET allow_retrieval=? WHERE id=?",
+                "allow_student_view": "UPDATE material_files SET allow_student_view=? WHERE id=?",
+                "external_processing_allowed": "UPDATE material_files SET external_processing_allowed=? WHERE id=?",
+            }
             for name, value in changes.items():
-                db.execute(f"UPDATE material_files SET {name}=? WHERE id=?", (value,file_id))
+                db.execute(update_queries[name], (value,file_id))
             if effective["rights_confirmed"]:
                 db.execute("""UPDATE material_issues SET status='resolved',resolution='许可由上传者确认',resolved_by=?,resolved_at=?
                               WHERE file_id=? AND code='source_permission_required' AND status='open'""", (actor_id,time.time(),file_id))
@@ -461,14 +470,20 @@ class ContentStore:
         """Only this projection may enter generation/retrieval. Explicitly selected sources are all-or-nothing."""
         if purpose not in {"generation","retrieval"} or not block_ids or len(set(block_ids)) != len(block_ids) or len(block_ids) > 500:
             raise ValueError("invalid confirmed source selection")
-        flag = "allow_generation" if purpose == "generation" else "allow_retrieval"
-        placeholders = ",".join("?" for _ in block_ids)
-        with self.connect() as db:
-            rows = list(db.execute(f"""SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code,f.license_note,f.visibility,f.owner_id,f.revision source_revision,
+        queries = {
+            "generation": """SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code,f.license_note,f.visibility,f.owner_id,f.revision source_revision,
                         f.rights_confirmed,f.allow_generation,f.allow_retrieval,f.allow_student_view,f.external_processing_allowed
                     FROM source_blocks b JOIN material_files f ON f.id=b.file_id
-                    WHERE b.id IN ({placeholders}) AND f.course_id=? AND b.status='confirmed'
-                        AND f.rights_confirmed=1 AND f.{flag}=1""", (*block_ids,course_id)))
+                    WHERE b.id IN (SELECT value FROM json_each(?)) AND f.course_id=? AND b.status='confirmed'
+                        AND f.rights_confirmed=1 AND f.allow_generation=1""",
+            "retrieval": """SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code,f.license_note,f.visibility,f.owner_id,f.revision source_revision,
+                        f.rights_confirmed,f.allow_generation,f.allow_retrieval,f.allow_student_view,f.external_processing_allowed
+                    FROM source_blocks b JOIN material_files f ON f.id=b.file_id
+                    WHERE b.id IN (SELECT value FROM json_each(?)) AND f.course_id=? AND b.status='confirmed'
+                        AND f.rights_confirmed=1 AND f.allow_retrieval=1""",
+        }
+        with self.connect() as db:
+            rows = list(db.execute(queries[purpose], (self._json(list(block_ids)),course_id)))
         result = []
         for row in rows:
             if row["class_id"] is not None and row["class_id"] != class_id:
@@ -488,16 +503,15 @@ class ContentStore:
         if not query.strip() or len(query) > 200 or not 1 <= limit <= 100:
             raise ValueError("invalid source search")
         # Literal matching: '%' and '_' are not wildcard instructions.
-        sql = """SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code
+        with self.connect() as db:
+            return [self._block(r) for r in db.execute("""SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code
                  FROM source_blocks b JOIN material_files f ON f.id=b.file_id
                  WHERE f.course_id=? AND (f.class_id IS NULL OR f.class_id=?)
                    AND b.status='confirmed' AND f.rights_confirmed=1 AND f.allow_retrieval=1
-                   AND f.license_code NOT IN ('unknown','restricted') AND instr(lower(b.text),lower(?))>0"""
-        if student:
-            sql += " AND b.student_visible=1 AND f.allow_student_view=1 AND f.visibility='shared' AND b.kind IN ('text','table')"
-        sql += " ORDER BY f.created_at,b.ordinal LIMIT ?"
-        with self.connect() as db:
-            return [self._block(r) for r in db.execute(sql,(course_id,class_id,query.strip(),limit))]
+                   AND f.license_code NOT IN ('unknown','restricted') AND instr(lower(b.text),lower(?))>0
+                   AND (?=0 OR (b.student_visible=1 AND f.allow_student_view=1
+                                AND f.visibility='shared' AND b.kind IN ('text','table')))
+                 ORDER BY f.created_at,b.ordinal LIMIT ?""",(course_id,class_id,query.strip(),int(bool(student)),limit))]
 
     def delete_draft(self, file_id: str, *, actor_id: str, expected_revision: int) -> None:
         with self.transaction() as db:
@@ -522,14 +536,10 @@ class ContentStore:
         return self.list_requirements(course_id,include_drafts=True,created_by=created_by)[-1]
 
     def list_requirements(self, course_id: str, *, include_drafts: bool = False, created_by: str | None = None) -> list[dict[str, Any]]:
-        sql, params = "SELECT * FROM course_requirements WHERE course_id=?", [course_id]
-        if not include_drafts:
-            sql += " AND status='confirmed'"
-        elif created_by:
-            sql += " AND (status='confirmed' OR created_by=?)"
-            params.append(created_by)
         with self.connect() as db:
-            result = [dict(r) for r in db.execute(sql+" ORDER BY created_at,id",params)]
+            result = [dict(r) for r in db.execute("""SELECT * FROM course_requirements WHERE course_id=?
+                AND (status='confirmed' OR (?=1 AND (?=0 OR created_by=?)))
+                ORDER BY created_at,id""",(course_id,int(bool(include_drafts)),int(bool(created_by)),created_by))]
             for item in result:
                 item["source_block_ids"] = [r[0] for r in db.execute("SELECT block_id FROM requirement_blocks WHERE requirement_id=?", (item["id"],))]
         return result
@@ -546,14 +556,10 @@ class ContentStore:
         return next(i for i in self.list_knowledge_points(course_id,include_drafts=True,created_by=created_by) if i["id"] == record_id)
 
     def list_knowledge_points(self, course_id: str, *, include_drafts: bool = False, created_by: str | None = None) -> list[dict[str, Any]]:
-        sql, params = "SELECT * FROM knowledge_points WHERE course_id=?", [course_id]
-        if not include_drafts:
-            sql += " AND status='confirmed'"
-        elif created_by:
-            sql += " AND (status='confirmed' OR created_by=?)"
-            params.append(created_by)
         with self.connect() as db:
-            result = [dict(r) for r in db.execute(sql+" ORDER BY created_at,id",params)]
+            result = [dict(r) for r in db.execute("""SELECT * FROM knowledge_points WHERE course_id=?
+                AND (status='confirmed' OR (?=1 AND (?=0 OR created_by=?)))
+                ORDER BY created_at,id""",(course_id,int(bool(include_drafts)),int(bool(created_by)),created_by))]
             for item in result:
                 item["source_block_ids"] = [r[0] for r in db.execute("SELECT block_id FROM knowledge_sources WHERE knowledge_id=?",(item["id"],))]
                 item["prerequisite_ids"] = [r[0] for r in db.execute("SELECT prerequisite_id FROM knowledge_prerequisites WHERE knowledge_id=?",(item["id"],))]
@@ -587,20 +593,34 @@ class ContentStore:
     def confirm_curriculum(self, kind: str, record_id: str, *, actor_id: str) -> None:
         if kind not in {"requirement","knowledge"}:
             raise ValueError("unknown curriculum kind")
-        table, link, key = ("course_requirements","requirement_blocks","requirement_id") if kind == "requirement" else ("knowledge_points","knowledge_sources","knowledge_id")
+        queries = {
+            "requirement": (
+                "SELECT * FROM course_requirements WHERE id=?",
+                "SELECT 1 FROM requirement_blocks WHERE requirement_id=?",
+                "SELECT 1 FROM requirement_blocks l JOIN source_blocks b ON b.id=l.block_id WHERE l.requirement_id=? AND b.status<>'confirmed'",
+                "UPDATE course_requirements SET status='confirmed',confirmed_by=?,confirmed_at=? WHERE id=?",
+            ),
+            "knowledge": (
+                "SELECT * FROM knowledge_points WHERE id=?",
+                "SELECT 1 FROM knowledge_sources WHERE knowledge_id=?",
+                "SELECT 1 FROM knowledge_sources l JOIN source_blocks b ON b.id=l.block_id WHERE l.knowledge_id=? AND b.status<>'confirmed'",
+                "UPDATE knowledge_points SET status='confirmed',confirmed_by=?,confirmed_at=? WHERE id=?",
+            ),
+        }
+        select_query, source_query, unconfirmed_query, update_query = queries[kind]
         with self.transaction() as db:
-            row = db.execute(f"SELECT * FROM {table} WHERE id=?", (record_id,)).fetchone()
+            row = db.execute(select_query, (record_id,)).fetchone()
             if row is None:
                 raise KeyError(record_id)
             if row["status"] != "draft":
                 raise ContentConflict("curriculum already confirmed")
-            if not db.execute(f"SELECT 1 FROM {link} WHERE {key}=?",(record_id,)).fetchone():
+            if not db.execute(source_query,(record_id,)).fetchone():
                 raise ValueError("curriculum must have confirmed sources")
-            if db.execute(f"SELECT 1 FROM {link} l JOIN source_blocks b ON b.id=l.block_id WHERE l.{key}=? AND b.status<>'confirmed'",(record_id,)).fetchone():
+            if db.execute(unconfirmed_query,(record_id,)).fetchone():
                 raise ContentConflict("curriculum has unconfirmed sources")
             if kind == "knowledge" and db.execute("SELECT 1 FROM knowledge_prerequisites p JOIN knowledge_points k ON k.id=p.prerequisite_id WHERE p.knowledge_id=? AND k.status<>'confirmed'",(record_id,)).fetchone():
                 raise ContentConflict("confirm prerequisites first")
-            db.execute(f"UPDATE {table} SET status='confirmed',confirmed_by=?,confirmed_at=? WHERE id=?",(actor_id,time.time(),record_id))
+            db.execute(update_query,(actor_id,time.time(),record_id))
 
     def create_job(self, kind: str, *, course_id: str, owner_id: str, payload: Mapping[str, Any],
                    class_id: str | None = None, job_id: str | None = None) -> dict[str, Any]:
@@ -671,8 +691,11 @@ class ContentStore:
     @staticmethod
     def _write_job_result(db: sqlite3.Connection, job_id: str, *, expected_revision: int,
                           stage: str, status: str, state_json: str, error: str | None = None) -> None:
-        cursor = db.execute("""UPDATE content_jobs SET stage=?,status=?,state_json=?,error=?,revision=revision+1,updated_at=?
-            WHERE id=? AND revision=? AND status IN ('pending','running')""",(stage,status,state_json,error,time.time(),job_id,expected_revision))
+        cursor = db.execute("""UPDATE content_jobs SET stage=:stage,status=:status,state_json=:state_json,
+            error=:error,revision=revision+1,updated_at=:updated_at
+            WHERE id=:job_id AND revision=:expected_revision AND status IN ('pending','running')""",
+            {"stage": stage, "status": status, "state_json": state_json, "error": error,
+             "updated_at": time.time(), "job_id": job_id, "expected_revision": expected_revision})
         if cursor.rowcount != 1:
             raise ContentConflict("stale or terminal content job result")
 

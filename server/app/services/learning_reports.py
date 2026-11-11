@@ -233,13 +233,12 @@ def _authorized_task(store: Any, db: sqlite3.Connection, task_id: str, actor_id:
 
 
 def _goals_and_tasks(store: Any, db: sqlite3.Connection, scope: Mapping[str, Any], actor_id: str):
-    clauses, parameters = [], []
-    for field in ("goal_id", "class_id", "course_id"):
-        if field in scope:
-            clauses.append(f"g.{'id' if field == 'goal_id' else field}=?")
-            parameters.append(scope[field])
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    candidates = db.execute("SELECT g.* FROM learning_goals g" + where + " ORDER BY g.id", parameters).fetchall()
+    candidates = db.execute(
+        """SELECT g.* FROM learning_goals g WHERE (? = 0 OR g.id=?)
+           AND (? = 0 OR g.class_id=?) AND (? = 0 OR g.course_id=?) ORDER BY g.id""",
+        ("goal_id" in scope, scope.get("goal_id"), "class_id" in scope, scope.get("class_id"),
+         "course_id" in scope, scope.get("course_id")),
+    ).fetchall()
     goals, tasks = {}, []
     for raw in candidates:
         goal = dict(raw)
@@ -251,10 +250,10 @@ def _goals_and_tasks(store: Any, db: sqlite3.Connection, scope: Mapping[str, Any
             goal_authorized = True
         except (LookupError, PermissionError):
             pass
-        subject_clause = " AND student_id=?" if scope.get("student_id") else ""
-        subject = (scope["student_id"],) if scope.get("student_id") else ()
-        task_rows = db.execute("SELECT id FROM learning_tasks WHERE goal_id=?" + subject_clause + " ORDER BY id",
-                               (goal["id"], *subject)).fetchall()
+        task_rows = db.execute(
+            """SELECT id FROM learning_tasks WHERE goal_id=? AND (? = 0 OR student_id=?) ORDER BY id""",
+            (goal["id"], bool(scope.get("student_id")), scope.get("student_id")),
+        ).fetchall()
         accepted = []
         for row in task_rows:
             task = _authorized_task(store, db, row["id"], actor_id)
@@ -309,11 +308,10 @@ def _teacher_judgments(db: sqlite3.Connection, pairs: set[tuple[str, str]]) -> l
 def _question_bank(store: Any, db: sqlite3.Connection, scope: Mapping[str, Any], actor_id: str) -> dict[str, Any]:
     # Without a platform checker a standalone LearningStore may only expose the
     # actor's own authoring records, never every author in an arbitrary course.
-    owner_clause = " AND owner_id=?" if getattr(store, "_access_checker", None) is None else ""
-    parameters = (scope["course_id"], actor_id) if owner_clause else (scope["course_id"],)
     versions = db.execute(
-        "SELECT * FROM question_versions WHERE course_id=? AND status NOT IN ('quarantined','retired')" + owner_clause
-        + " ORDER BY question_id,version", parameters,
+        """SELECT * FROM question_versions WHERE course_id=? AND status NOT IN ('quarantined','retired')
+           AND (? = 0 OR owner_id=?) ORDER BY question_id,version""",
+        (scope["course_id"], getattr(store, "_access_checker", None) is None, actor_id),
     ).fetchall()
     questions, source_rows, usage = [], {}, {}
     for raw in versions:

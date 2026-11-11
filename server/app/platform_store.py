@@ -26,6 +26,7 @@ class PlatformStore:
 
     SCHEMA_VERSION = 2
     _MIGRATIONS = {1: "_migration_1", 2: "_migration_2"}
+    _SCHEMA_VERSION_SQL = {1: "PRAGMA user_version = 1", 2: "PRAGMA user_version = 2"}
     _USER_FIELDS = {
         "username", "display_name", "password_hash", "role", "status",
         "phone", "student_number",
@@ -76,7 +77,6 @@ class PlatformStore:
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute(f"PRAGMA busy_timeout = {max(0, int(self.timeout * 1000))}")
             connection.execute("PRAGMA synchronous = NORMAL")
         except BaseException:
             connection.close()
@@ -116,7 +116,7 @@ class PlatformStore:
                 if migration is None:
                     raise RuntimeError(f"no migration registered for schema version {target}")
                 getattr(self, migration)(connection)
-                connection.execute(f"PRAGMA user_version = {target}")
+                connection.execute(self._SCHEMA_VERSION_SQL[target])
                 version = target
             connection.commit()
         except BaseException:
@@ -385,16 +385,11 @@ class PlatformStore:
             ).fetchone())
 
     def list_users(self, *, role: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
-        clauses, values = [], []
-        if role is not None:
-            clauses.append("role = ?")
-            values.append(role)
-        if status is not None:
-            clauses.append("status = ?")
-            values.append(status)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._using_connection() as connection:
-            rows = connection.execute(f"SELECT * FROM users{where} ORDER BY username COLLATE NOCASE, id", values)
+            rows = connection.execute(
+                """SELECT * FROM users WHERE (? IS NULL OR role = ?) AND (? IS NULL OR status = ?)
+                   ORDER BY username COLLATE NOCASE, id""", (role, role, status, status),
+            )
             return [dict(row) for row in rows]
 
     def update_user(self, user_id: str, **changes: Any) -> dict[str, Any] | None:
@@ -408,9 +403,27 @@ class PlatformStore:
             if field in values and isinstance(values[field], str):
                 values[field] = values[field].strip()
         values["updated_at"] = self._now()
-        assignments = ", ".join(f"{field} = ?" for field in values)
+        # Presence flags preserve explicit NULL writes and their constraint checks.
         with self._using_connection(write=True) as connection:
-            cursor = connection.execute(f"UPDATE users SET {assignments} WHERE id = ?", (*values.values(), user_id))
+            cursor = connection.execute(
+                """UPDATE users SET
+                   username = CASE WHEN ? THEN ? ELSE username END,
+                   display_name = CASE WHEN ? THEN ? ELSE display_name END,
+                   password_hash = CASE WHEN ? THEN ? ELSE password_hash END,
+                   role = CASE WHEN ? THEN ? ELSE role END,
+                   status = CASE WHEN ? THEN ? ELSE status END,
+                   phone = CASE WHEN ? THEN ? ELSE phone END,
+                   student_number = CASE WHEN ? THEN ? ELSE student_number END,
+                   updated_at = ? WHERE id = ?""",
+                ("username" in values, values.get("username"),
+                 "display_name" in values, values.get("display_name"),
+                 "password_hash" in values, values.get("password_hash"),
+                 "role" in values, values.get("role"),
+                 "status" in values, values.get("status"),
+                 "phone" in values, values.get("phone"),
+                 "student_number" in values, values.get("student_number"),
+                 values["updated_at"], user_id),
+            )
             if cursor.rowcount == 0:
                 return None
             if {"password_hash", "status", "role"}.intersection(changes):
@@ -589,12 +602,12 @@ class PlatformStore:
             return self._dict(connection.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone())
 
     def list_courses(self, *, teacher_id: str | None = None) -> list[dict[str, Any]]:
-        sql, values = "SELECT c.* FROM courses c", ()
-        if teacher_id is not None:
-            sql += " WHERE c.teacher_id = ? OR EXISTS (SELECT 1 FROM course_collaborators cc WHERE cc.course_id = c.id AND cc.teacher_id = ?)"
-            values = (teacher_id, teacher_id)
         with self._using_connection() as connection:
-            return [dict(row) for row in connection.execute(sql + " ORDER BY c.name COLLATE NOCASE, c.id", values)]
+            return [dict(row) for row in connection.execute(
+                """SELECT c.* FROM courses c WHERE ? IS NULL OR c.teacher_id = ? OR EXISTS (
+                       SELECT 1 FROM course_collaborators cc WHERE cc.course_id = c.id AND cc.teacher_id = ?
+                   ) ORDER BY c.name COLLATE NOCASE, c.id""", (teacher_id, teacher_id, teacher_id),
+            )]
 
     def update_course(self, course_id: str, **changes: Any) -> dict[str, Any] | None:
         unknown = changes.keys() - self._COURSE_FIELDS
@@ -607,9 +620,20 @@ class PlatformStore:
             if field in values and isinstance(values[field], str):
                 values[field] = values[field].strip()
         values["updated_at"] = self._now()
-        assignments = ", ".join(f"{field} = ?" for field in values)
         with self._using_connection(write=True) as connection:
-            cursor = connection.execute(f"UPDATE courses SET {assignments} WHERE id = ?", (*values.values(), course_id))
+            cursor = connection.execute(
+                """UPDATE courses SET
+                   name = CASE WHEN ? THEN ? ELSE name END,
+                   term = CASE WHEN ? THEN ? ELSE term END,
+                   teacher_id = CASE WHEN ? THEN ? ELSE teacher_id END,
+                   class_code = CASE WHEN ? THEN ? ELSE class_code END,
+                   updated_at = ? WHERE id = ?""",
+                ("name" in values, values.get("name"),
+                 "term" in values, values.get("term"),
+                 "teacher_id" in values, values.get("teacher_id"),
+                 "class_code" in values, values.get("class_code"),
+                 values["updated_at"], course_id),
+            )
             if cursor.rowcount == 0:
                 return None
             return self._dict(connection.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone())
@@ -1048,14 +1072,11 @@ class PlatformStore:
     def list_audit_events(self, *, limit: int = 100, actor_user_id: str | None = None) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
-        sql, values = "SELECT * FROM audit_events", []
-        if actor_user_id is not None:
-            sql += " WHERE actor_user_id = ?"
-            values.append(actor_user_id)
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
-        values.append(limit)
         with self._using_connection() as connection:
-            result = [dict(row) for row in connection.execute(sql, values)]
+            result = [dict(row) for row in connection.execute(
+                """SELECT * FROM audit_events WHERE (? IS NULL OR actor_user_id = ?)
+                   ORDER BY created_at DESC, id DESC LIMIT ?""", (actor_user_id, actor_user_id, limit),
+            )]
         for row in result:
             row["payload"] = json.loads(row["payload_json"])
         return result

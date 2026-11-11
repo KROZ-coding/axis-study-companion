@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import secrets
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -23,7 +24,7 @@ DNS = [(2, 1, 6, "", ("93.184.216.34", 443))]
 
 def provider(name="teacher", channel="teacher", model="gpt-5.6-sol", **changes):
     values = dict(name=name, channel=channel, model=model, base_url="https://relay.example/v1",
-                  api_key="fixture-secret", max_concurrency=2, queue_size=4, priority=10, quota_group=name)
+                  api_key=secrets.token_urlsafe(24), max_concurrency=2, queue_size=4, priority=10, quota_group=name)
     values.update(changes)
     return LLMProvider(**values)
 
@@ -158,7 +159,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_legacy_shared_wrong_group_or_model_fallback(self):
         configs = (
             settings(provider("shared", "shared")),
-            Settings(llm_providers=(), llm_base_url="https://relay.example/v1", llm_api_key="fixture", llm_model="gpt-5.6-sol"),
+            Settings(llm_providers=(), llm_base_url="https://relay.example/v1", llm_api_key=secrets.token_urlsafe(24), llm_model="gpt-5.6-sol"),
             settings(provider("student", "student", "gpt-5.6-terra")),
             settings(provider(model="gpt-6-sol"), provider("shared", "shared")),
             settings(provider("wrong", "teacher", "gpt-5.6-terra"), provider("correct")),
@@ -183,19 +184,20 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_retry_or_failover_after_upstream_error(self):
         requests = []
+        first = provider("first")
 
         def failure(request):
             requests.append(request)
-            return httpx.Response(429, json={"error": {"message": "fixture-secret must never escape"}})
+            return httpx.Response(429, json={"error": {"message": first.api_key + " must never escape"}})
 
-        gateway = ModelGateway(settings(provider("first"), provider("second", priority=20)), transport=httpx.MockTransport(failure))
+        gateway = ModelGateway(settings(first, provider("second", priority=20)), transport=httpx.MockTransport(failure))
         with self.assertRaises(GatewayError) as caught:
             await self.complete(gateway)
         self.assertEqual(len(requests), 1)
         error = caught.exception
         self.assertEqual((error.code, error.request_sent, error.unknown_outcome), ("rate_limited", True, False))
         self.assertTrue(error.cost_pending)
-        self.assertNotIn("fixture-secret", str(error))
+        self.assertNotIn(first.api_key, str(error))
         self.assertEqual(error.provider, "first")
 
     async def test_redirect_is_not_followed(self):

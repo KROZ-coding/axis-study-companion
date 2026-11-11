@@ -323,22 +323,33 @@ class Flow:
             return connection.execute(query, parameters).fetchall()
 
     @contextmanager
-    def fault(self, domain, table, condition):
-        # A missing function fails at statement preparation, including rows whose
-        # WHEN condition is false. abs(INT64_MIN) instead raises OperationalError
-        # only while executing this specific event, without changing app code.
-        name = "platform_flow_fault_" + secrets.token_hex(8)
+    def fault(self, domain, target):
+        # Bind the target as data. DDL and identifiers remain fixed even when
+        # the selected job ID was returned by a real HTTP request.
+        self.check(domain in {"platform", "learning"}, "unsupported fault database")
         path = self.data / (domain + ".sqlite3")
         self.check(path.is_relative_to(self.root), "fault database must be isolated")
         with closing(sqlite3.connect(path, timeout=10)) as connection:
-            connection.execute(f'CREATE TRIGGER "{name}" BEFORE INSERT ON "{table}" WHEN {condition} BEGIN SELECT abs(-9223372036854775808); END')
-            connection.commit()
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("CREATE TABLE platform_flow_fault_target (target TEXT NOT NULL)")
+                connection.execute("INSERT INTO platform_flow_fault_target(target) VALUES (?)", (target,))
+                if domain == "platform":
+                    connection.execute("""CREATE TRIGGER platform_flow_fault BEFORE INSERT ON audit_events
+                        WHEN NEW.event_type=(SELECT target FROM platform_flow_fault_target)
+                        BEGIN SELECT abs(-9223372036854775808); END""")
+                else:
+                    connection.execute("""CREATE TRIGGER platform_flow_fault BEFORE INSERT ON grading_outbox
+                        WHEN NEW.job_id=(SELECT target FROM platform_flow_fault_target)
+                        BEGIN SELECT abs(-9223372036854775808); END""")
         try:
             yield
         finally:
             with closing(sqlite3.connect(path, timeout=10)) as connection:
-                connection.execute(f'DROP TRIGGER "{name}"')
-                connection.commit()
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute("DROP TRIGGER platform_flow_fault")
+                    connection.execute("DROP TABLE platform_flow_fault_target")
 
     def unavailable(self, response):
         detail = response.json().get("detail", {})
@@ -388,7 +399,7 @@ class Flow:
         if inject_fault:
             before = self.task(actor, task_id)
             counts = self.submission_counts(task_id, payload["request_id"])
-            with self.fault("learning", "grading_outbox", f"NEW.job_id='grade:{task_id}:1'"):
+            with self.fault("learning", f"grade:{task_id}:1"):
                 self.unavailable(self.request(actor, "POST", f"/api/v1/tasks/{task_id}/submit", 503, json=payload))
                 self.check(self.task(actor, task_id) == before, "failed submit changed task, draft, version or attempts")
                 self.check(self.submission_counts(task_id, payload["request_id"]) == counts, "failed submit committed attempt/items/outbox/idempotency")
@@ -463,7 +474,7 @@ class Flow:
             self.api("teacher", "POST", "/api/v1/auth/login", 403, json={"username": "flow_teacher", "password": self.passwords["teacher"]})
             before = self.api("admin", "GET", "/api/v1/auth/teacher-applications")
             path = f"/api/v1/auth/teacher-applications/{application['id']}/approve"
-            with self.fault("platform", "audit_events", "NEW.event_type='teacher_application_approved'"):
+            with self.fault("platform", "teacher_application_approved"):
                 self.unavailable(self.request("admin", "POST", path, 503))
                 self.check(self.api("admin", "GET", "/api/v1/auth/teacher-applications") == before, "teacher approval failed to roll back")
             self.api("admin", "POST", path)
@@ -475,7 +486,7 @@ class Flow:
             self.api("teacher", "POST", path, 403, json={"approve": True})
             before_courses = self.api("admin", "GET", "/api/v1/courses")
             before_applications = self.api("admin", "GET", "/api/v1/course-applications")
-            with self.fault("platform", "audit_events", "NEW.event_type='course_application_approved'"):
+            with self.fault("platform", "course_application_approved"):
                 self.unavailable(self.request("admin", "POST", path, 503, json={"approve": True}))
                 self.check(self.api("admin", "GET", "/api/v1/courses") == before_courses, "failed course approval committed a course")
                 self.check(self.api("admin", "GET", "/api/v1/course-applications") == before_applications, "failed course approval changed application")
@@ -490,7 +501,7 @@ class Flow:
             before = self.api("teacher", "GET", f"/api/v1/classes/{self.class_id}/members")
             counts = self.platform_counts()
             payload = {"username": "flow_student", "display_name": "Synthetic Student", "course_id": self.course_id, "class_id": self.class_id}
-            with self.fault("platform", "audit_events", "NEW.event_type='student_created'"):
+            with self.fault("platform", "student_created"):
                 self.unavailable(self.request("teacher", "POST", "/api/v1/auth/students", 503, json=payload))
                 self.check(self.api("teacher", "GET", f"/api/v1/classes/{self.class_id}/members") == before, "failed student creation changed roster")
                 self.check(self.platform_counts() == counts, "failed student creation committed user/memberships/code/audit")
@@ -503,7 +514,7 @@ class Flow:
                 payload = {"code": created["activation_code"], "password": self.passwords[actor]}
                 if actor == "student":
                     before = self.sql("platform", "SELECT status,authorization_version FROM users WHERE id=?", (created["student_id"],))
-                    with self.fault("platform", "audit_events", "NEW.event_type='account_activated'"):
+                    with self.fault("platform", "account_activated"):
                         self.unavailable(self.request("anonymous", "POST", "/api/v1/auth/activate", 503, json=payload))
                         self.check(self.sql("platform", "SELECT status,authorization_version FROM users WHERE id=?", (created["student_id"],)) == before, "failed activation changed account")
                         self.check(self.sql("platform", "SELECT consumed_at FROM activation_codes WHERE user_id=?", (created["student_id"],)) == [(None,)], "failed activation consumed code")
@@ -763,8 +774,8 @@ class Flow:
 
         with self.stage("stop_before_backup"):
             self.stop_server()
-            self.check(not self.sql("platform", "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'platform_flow_fault_%'"), "fault trigger left in source DB")
-            self.check(not self.sql("learning", "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'platform_flow_fault_%'"), "learning fault trigger left in source DB")
+            self.check(not self.sql("platform", "SELECT name FROM sqlite_master WHERE name IN ('platform_flow_fault','platform_flow_fault_target')"), "fault objects left in source DB")
+            self.check(not self.sql("learning", "SELECT name FROM sqlite_master WHERE name IN ('platform_flow_fault','platform_flow_fault_target')"), "learning fault objects left in source DB")
 
         with self.stage("six_database_backup_inspect_restore") as row:
             from app.backup import BackupManager
@@ -836,8 +847,11 @@ class Flow:
             self.stop_server()
 
     def platform_counts(self):
-        return tuple(self.sql("platform", f"SELECT COUNT(*) FROM {table}")[0][0] for table in
-                     ("users", "course_memberships", "class_memberships", "activation_codes", "audit_events"))
+        return tuple(self.sql("platform", query)[0][0] for query in (
+            "SELECT COUNT(*) FROM users", "SELECT COUNT(*) FROM course_memberships",
+            "SELECT COUNT(*) FROM class_memberships", "SELECT COUNT(*) FROM activation_codes",
+            "SELECT COUNT(*) FROM audit_events",
+        ))
 
     def finish(self):
         try:

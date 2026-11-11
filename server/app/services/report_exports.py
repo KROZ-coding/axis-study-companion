@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any
-from xml.dom import minidom
+from defusedxml import minidom
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from ..report_store import SNAPSHOT_SCHEMA_VERSION, canonical_json, content_hash, normalize_scope
@@ -495,7 +495,7 @@ def _xlsx_export(snapshot: dict[str, Any], manifest: dict[str, Any]) -> bytes:
         for name in sorted(original.namelist()):
             content = original.read(name)
             if name == "docProps/core.xml":
-                with minidom.parseString(content) as core:
+                with minidom.parseString(content, forbid_dtd=True, forbid_entities=True, forbid_external=True) as core:
                     for property_name in ("created", "modified"):
                         elements = core.getElementsByTagNameNS("http://purl.org/dc/terms/", property_name)
                         if len(elements) != 1:
@@ -509,7 +509,7 @@ def _xlsx_export(snapshot: dict[str, Any], manifest: dict[str, Any]) -> bytes:
             if name.startswith("xl/externalLinks/"):
                 raise ValueError("report workbook contains external links")
             if name.endswith(".rels"):
-                with minidom.parseString(content) as relationships:
+                with minidom.parseString(content, forbid_dtd=True, forbid_entities=True, forbid_external=True) as relationships:
                     if any(item.getAttribute("TargetMode") == "External" for item in relationships.getElementsByTagNameNS(
                         "http://schemas.openxmlformats.org/package/2006/relationships", "Relationship",
                     )):

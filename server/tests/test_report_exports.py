@@ -14,7 +14,7 @@ import re
 import sys
 import time
 import unittest
-from xml.etree import ElementTree
+from defusedxml.ElementTree import fromstring
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import load_workbook
@@ -223,7 +223,11 @@ class ReportExportsTests(unittest.TestCase):
                                 self.assertEqual(entry.external_attr, 0o600 << 16)
                                 self.assertEqual(entry.extra, b"")
                                 self.assertEqual(entry.comment, b"")
-                            core = ElementTree.fromstring(archive.read("docProps/core.xml"))
+                            core_xml = archive.read("docProps/core.xml")
+                            self.assertLessEqual(len(core_xml), 1024 * 1024)
+                            self.assertNotIn(b"<!DOCTYPE", core_xml.upper())
+                            self.assertNotIn(b"<!ENTITY", core_xml.upper())
+                            core = fromstring(core_xml, forbid_dtd=True, forbid_entities=True, forbid_external=True)
                             for property_name in ("created", "modified"):
                                 values = core.findall(f"{{http://purl.org/dc/terms/}}{property_name}")
                                 self.assertEqual(len(values), 1)

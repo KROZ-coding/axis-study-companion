@@ -120,7 +120,6 @@ class ReportStore:
         connection = sqlite3.connect(str(self.db_path), timeout=self.timeout, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute(f"PRAGMA busy_timeout={max(0, int(self.timeout * 1000))}")
         connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 

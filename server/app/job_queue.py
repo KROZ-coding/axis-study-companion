@@ -381,7 +381,7 @@ class JobQueue:
         try:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys=ON")
-            db.execute(f"PRAGMA busy_timeout={int(self.busy_timeout * 1000)}")
+            # sqlite3.connect(timeout=...) already configures busy_timeout.
             # Call intent must survive a committed transaction before a send.
             db.execute("PRAGMA synchronous=FULL")
         except BaseException:
@@ -416,32 +416,37 @@ class JobQueue:
             elif state == "legacy":
                 self._migrate_legacy(db)
             if state != "current":
-                db.execute(f"PRAGMA user_version={self.SCHEMA_VERSION}")
-                db.execute(f"PRAGMA application_id={self.APPLICATION_ID}")
+                db.execute("PRAGMA user_version=2")
+                db.execute("PRAGMA application_id=1095323954")
         with closing(self._connect()) as db:
             if str(db.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower() != "wal":
                 raise QueueSchemaError("SQLite WAL mode could not be enabled")
 
     @classmethod
     def _migrate_legacy(cls, db: sqlite3.Connection) -> None:
-        # All identifiers and DDL here are module constants. Never execute SQL
-        # read from the old database or infer compatibility from partial columns.
-        tables = ("queue_meta", "budgets", "jobs", "steps", "events", "upstream_calls", "call_charges")
-        for statement in _LEGACY_SCHEMA:
-            match = re.match(r"CREATE INDEX (\w+)", statement)
-            if match:
-                db.execute(f'DROP INDEX "{match.group(1)}"')
-        for table in tables:
-            db.execute(f'ALTER TABLE "{table}" RENAME TO "legacy_{table}"')
+        # Fixed migration DDL never incorporates database or request values.
+        db.execute("DROP INDEX jobs_ready_idx")
+        db.execute("DROP INDEX jobs_lease_idx")
+        db.execute("DROP INDEX events_job_idx")
+        db.execute("DROP INDEX upstream_calls_job_idx")
+        db.execute("DROP INDEX call_charges_job_idx")
+        db.execute("ALTER TABLE queue_meta RENAME TO legacy_queue_meta")
+        db.execute("ALTER TABLE budgets RENAME TO legacy_budgets")
+        db.execute("ALTER TABLE jobs RENAME TO legacy_jobs")
+        db.execute("ALTER TABLE steps RENAME TO legacy_steps")
+        db.execute("ALTER TABLE events RENAME TO legacy_events")
+        db.execute("ALTER TABLE upstream_calls RENAME TO legacy_upstream_calls")
+        db.execute("ALTER TABLE call_charges RENAME TO legacy_call_charges")
         cls._create_schema(db)
         db.execute("UPDATE queue_meta SET next_ticket=(SELECT next_ticket FROM legacy_queue_meta WHERE id=1) WHERE id=1")
         db.execute("INSERT INTO budgets(account_id,available_units,reserved_units) SELECT account_id,available_units,0 FROM legacy_budgets")
-        common = (
-            "job_id,queue_order,kind,payload_json,status,created_at,updated_at,available_at,attempts,max_attempts,paid,"
-            "budget_account_id,budget_limit,budget_spent,reservation_active,lease_owner,lease_until,generation,"
-            "cancel_requested,reconciliation_required,last_error"
-        )
-        db.execute(f"INSERT INTO jobs({common}) SELECT {common} FROM legacy_jobs")
+        db.execute("""INSERT INTO jobs(
+            job_id,queue_order,kind,payload_json,status,created_at,updated_at,available_at,attempts,max_attempts,paid,
+            budget_account_id,budget_limit,budget_spent,reservation_active,lease_owner,lease_until,generation,
+            cancel_requested,reconciliation_required,last_error)
+            SELECT job_id,queue_order,kind,payload_json,status,created_at,updated_at,available_at,attempts,max_attempts,paid,
+            budget_account_id,budget_limit,budget_spent,reservation_active,lease_owner,lease_until,generation,
+            cancel_requested,reconciliation_required,last_error FROM legacy_jobs""")
         db.execute("""UPDATE jobs SET budget_reserved=(SELECT CASE WHEN l.reservation_active=1
             THEN MAX(0,l.budget_reserved-MAX(0,l.budget_spent-l.reservation_baseline)) ELSE 0 END
             FROM legacy_jobs l WHERE l.job_id=jobs.job_id),purpose=CASE WHEN kind='grading' THEN 'grading' ELSE '' END""")
@@ -469,8 +474,13 @@ class JobQueue:
             cls._bind_scopes(db, job, call["call_id"], call["budget_day"], call["reserved_units"], call["created_at"], enforce=False)
             if call["cost_units"] is not None:
                 cls._settle_scopes(db, call["call_id"], call["cost_units"], call["updated_at"])
-        for table in reversed(tables):
-            db.execute(f'DROP TABLE "legacy_{table}"')
+        db.execute("DROP TABLE legacy_call_charges")
+        db.execute("DROP TABLE legacy_upstream_calls")
+        db.execute("DROP TABLE legacy_events")
+        db.execute("DROP TABLE legacy_steps")
+        db.execute("DROP TABLE legacy_jobs")
+        db.execute("DROP TABLE legacy_budgets")
+        db.execute("DROP TABLE legacy_queue_meta")
         if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise QueueSchemaError("legacy migration produced invalid references")
 
@@ -753,11 +763,15 @@ class JobQueue:
         ready_at = None if available_at is None else _time(available_at)
         with self._transaction() as db:
             now = time.time()
-            columns = ["job_id", "queue_order", "kind", "payload_json", "status", "created_at", "updated_at", "available_at",
-                       "max_attempts", "paid", "budget_account_id", "budget_limit", "emergency_limit", "purpose", "budget_day", *options]
             values = (job_id, self._ticket(db), kind, encoded, "queued", now, now, now if ready_at is None else ready_at,
-                      max_attempts, int(paid), budget_account_id, budget_limit, emergency_limit, purpose, day, *options.values())
-            db.execute(f"INSERT INTO jobs({','.join(columns)}) VALUES({','.join('?' for _ in columns)})", values)
+                      max_attempts, int(paid), budget_account_id, budget_limit, emergency_limit, purpose, day,
+                      options["student_id"], options["course_id"], options["class_id"], options["teaching_scope"],
+                      options["project_id"], options["model_name"], options["model_version"], options["price_version"], options["input_version"])
+            db.execute("""INSERT INTO jobs(
+                job_id,queue_order,kind,payload_json,status,created_at,updated_at,available_at,
+                max_attempts,paid,budget_account_id,budget_limit,emergency_limit,purpose,budget_day,
+                student_id,course_id,class_id,teaching_scope,project_id,model_name,model_version,price_version,input_version)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values)
             for position, name in enumerate(step_names):
                 db.execute("INSERT INTO steps(job_id,name,position,status) VALUES(?,?,?,'pending')", (job_id, name, position))
             if budget_account_id is not None:
@@ -775,16 +789,10 @@ class JobQueue:
             raise ValueError("invalid job status")
         if kind is not None and kind not in _PRIORITY:
             raise ValueError("invalid job kind")
-        clauses, params = [], []
-        if status is not None:
-            clauses.append("status=?")
-            params.append(status)
-        if kind is not None:
-            clauses.append("kind=?")
-            params.append(kind)
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with closing(self._connect()) as db:
-            rows = db.execute(f"SELECT * FROM jobs{where} ORDER BY created_at,job_id LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+            rows = db.execute("""SELECT * FROM jobs
+                WHERE (? IS NULL OR status=?) AND (? IS NULL OR kind=?)
+                ORDER BY created_at,job_id LIMIT ? OFFSET ?""", (status, status, kind, kind, limit, offset)).fetchall()
         return tuple(self._job(row) for row in rows)
 
     def list_steps(self, job_id: str) -> tuple[Step, ...]:
@@ -1289,16 +1297,11 @@ class BudgetLedger:
     def snapshot(self, *, scope_type: str | None = None, scope_id: str | None = None) -> tuple[BudgetLimit, ...]:
         if scope_type is not None and scope_type not in _SCOPES:
             raise ValueError("invalid scope_type")
-        clauses, params = [], []
-        if scope_type is not None:
-            clauses.append("scope_type=?")
-            params.append(scope_type)
-        if scope_id is not None:
-            clauses.append("scope_id=?")
-            params.append(_text(scope_id, "scope_id"))
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        scope_id = None if scope_id is None else _text(scope_id, "scope_id")
         with closing(self.queue._connect()) as db:
-            rows = db.execute(f"SELECT * FROM budget_limits{where} ORDER BY scope_type,scope_id,course_key,class_key,period_key", params).fetchall()
+            rows = db.execute("""SELECT * FROM budget_limits
+                WHERE (? IS NULL OR scope_type=?) AND (? IS NULL OR scope_id=?)
+                ORDER BY scope_type,scope_id,course_key,class_key,period_key""", (scope_type, scope_type, scope_id, scope_id)).fetchall()
         return tuple(self._limit(row) for row in rows)
 
     def list_limits(self) -> tuple[BudgetLimit, ...]:

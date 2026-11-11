@@ -78,13 +78,13 @@ class V1AuthTests(unittest.TestCase):
     def account_state(self, store, user_id):
         result = {"user": store.get_user(user_id)}
         with store.connect() as connection:
-            for table, order in (
-                ("sessions", "token_hash"), ("activation_codes", "code_hash"),
-                ("course_memberships", "course_id"), ("class_memberships", "class_id"),
+            for table, query in (
+                ("sessions", "SELECT * FROM sessions WHERE user_id = ? ORDER BY token_hash"),
+                ("activation_codes", "SELECT * FROM activation_codes WHERE user_id = ? ORDER BY code_hash"),
+                ("course_memberships", "SELECT * FROM course_memberships WHERE user_id = ? ORDER BY course_id"),
+                ("class_memberships", "SELECT * FROM class_memberships WHERE user_id = ? ORDER BY class_id"),
             ):
-                result[table] = [dict(row) for row in connection.execute(
-                    f"SELECT * FROM {table} WHERE user_id = ? ORDER BY {order}", (user_id,),
-                )]
+                result[table] = [dict(row) for row in connection.execute(query, (user_id,))]
         return result
 
     def audit_events(self, store, event_type):

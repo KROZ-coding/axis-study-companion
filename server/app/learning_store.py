@@ -98,7 +98,6 @@ class _LearningStoreCore:
         db = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
-        db.execute(f"PRAGMA busy_timeout={int(self.busy_timeout * 1000)}")
         db.execute("PRAGMA synchronous=NORMAL")
         return db
 
@@ -729,11 +728,10 @@ class _LearningStoreCore:
         if status is not None and status not in self._QUESTION_STATUSES:
             raise ValueError("invalid question version status")
         with self._using_connection() as db:
-            clauses, params = ["owner_id=?", "question_id=?"], [actor_id, question_id]
-            if status is not None:
-                clauses.append("status=?")
-                params.append(status)
-            rows = db.execute("SELECT * FROM question_versions WHERE " + " AND ".join(clauses) + " ORDER BY version", params).fetchall()
+            rows = db.execute(
+                """SELECT * FROM question_versions WHERE owner_id=? AND question_id=?
+                   AND (? IS NULL OR status=?) ORDER BY version""", (actor_id, question_id, status, status),
+            ).fetchall()
             return [{**dict(row), "content": json.loads(row["content_json"])} for row in rows]
 
     def create_task(
@@ -1016,18 +1014,13 @@ class _LearningStoreCore:
             raise ValueError("invalid outbox status")
         if type(limit) is not int or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
-        clauses, params = [], []
-        if status != "all":
-            clauses.append("status=?")
-            params.append(status)
         if before_id is not None:
-            clauses.append("job_id<?")
-            params.append(self._text(before_id, "before_id", maximum=200))
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            before_id = self._text(before_id, "before_id", maximum=200)
         with self._using_connection() as db:
             rows = db.execute(
-                "SELECT * FROM grading_outbox" + where + " ORDER BY created_at,job_id LIMIT ?",
-                (*params, limit),
+                """SELECT * FROM grading_outbox WHERE (? = 'all' OR status=?)
+                   AND (? IS NULL OR job_id<?) ORDER BY created_at,job_id LIMIT ?""",
+                (status, status, before_id, before_id, limit),
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -1334,13 +1327,10 @@ class _LearningStoreCore:
             student_id = self._id(student_id, "student_id")
         with self._using_connection() as db:
             self._goal_row(db, goal_id, actor_id)
-            clauses, params = ["t.goal_id=?"], [goal_id]
-            if student_id is not None:
-                clauses.append("t.student_id=?")
-                params.append(student_id)
             rows = db.execute(
-                "SELECT e.*,t.student_id FROM task_events e JOIN learning_tasks t ON t.id=e.task_id WHERE "
-                + " AND ".join(clauses) + " ORDER BY e.occurred_at,e.id", params,
+                """SELECT e.*,t.student_id FROM task_events e JOIN learning_tasks t ON t.id=e.task_id
+                   WHERE t.goal_id=? AND (? IS NULL OR t.student_id=?) ORDER BY e.occurred_at,e.id""",
+                (goal_id, student_id, student_id),
             ).fetchall()
             return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
 

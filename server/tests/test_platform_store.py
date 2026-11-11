@@ -211,11 +211,12 @@ class PlatformStoreTests(unittest.TestCase):
         self.assertEqual(PlatformStore(path).schema_version, PlatformStore.SCHEMA_VERSION)
 
     def test_legacy_and_newer_databases_are_refused_without_writes(self):
+        version_sql = {0: "PRAGMA user_version = 0", 999: "PRAGMA user_version = 999"}
         for name, version in (("store.sqlite3", 0), ("future.sqlite3", 999)):
             path = self.root / name
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute("CREATE TABLE store(id INTEGER PRIMARY KEY, blob BLOB)")
-                connection.execute(f"PRAGMA user_version = {version}")
+                connection.execute(version_sql[version])
             original = path.read_bytes()
             with patch("app.platform_store.sqlite3.connect", wraps=sqlite3.connect) as connect:
                 with self.assertRaises(RuntimeError):
@@ -223,6 +224,65 @@ class PlatformStoreTests(unittest.TestCase):
                 self.assertEqual(connect.call_count, 1)
                 self.assertIn("mode=ro", connect.call_args.args[0])
             self.assertEqual(path.read_bytes(), original)
+
+    def test_fixed_updates_preserve_missing_null_false_and_atomicity(self):
+        owner = self.user("owner", phone="123", student_number="student-number")
+        course = self.store.create_course("Course", "2026", owner["id"], class_code="code")
+        self.store.create_session("update-session", owner["id"], 9_999_999_999)
+        self.assertEqual(self.store.update_user(owner["id"]), owner)
+        self.assertEqual(self.store.update_course(course["id"]), course)
+        self.assertIsNone(self.store.update_user("missing", display_name="Name"))
+        self.assertIsNone(self.store.update_course("missing", name="Name"))
+        updated = self.store.update_user(owner["id"], display_name=" New name ", phone=False)
+        self.assertEqual(updated["display_name"], "New name")
+        self.assertEqual(updated["phone"], "0")
+        self.assertEqual(updated["student_number"], owner["student_number"])
+        self.assertEqual(updated["authorization_version"], owner["authorization_version"])
+        self.assertIsNotNone(self.store.get_session("update-session"))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.update_user(owner["id"], password_hash="new-hash", phone=None)
+        self.assertEqual(self.store.get_user(owner["id"]), updated)
+        self.assertIsNotNone(self.store.get_session("update-session"))
+        changed_course = self.store.update_course(course["id"], name=" New course ", term=False, class_code="")
+        self.assertEqual(changed_course["name"], "New course")
+        self.assertEqual(changed_course["term"], "0")
+        self.assertEqual(changed_course["class_code"], "")
+        self.assertEqual(changed_course["teacher_id"], owner["id"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.update_course(course["id"], name="Rejected", teacher_id=None)
+        self.assertEqual(self.store.get_course(course["id"]), changed_course)
+        with self.assertRaises(RuntimeError):
+            with self.store.transaction():
+                self.store.update_user(owner["id"], password_hash="new-hash")
+                self.store.update_course(course["id"], name="Rolled back")
+                self.assertIsNone(self.store.get_session("update-session"))
+                raise RuntimeError("rollback updates and revocation")
+        self.assertEqual(self.store.get_user(owner["id"]), updated)
+        self.assertEqual(self.store.get_course(course["id"]), changed_course)
+        self.assertIsNotNone(self.store.get_session("update-session"))
+
+    def test_fixed_list_queries_preserve_optional_filters_and_order(self):
+        owner, collaborator = self.user("Alpha"), self.user("beta")
+        student = self.user("student", "student", status="pending")
+        self.assertEqual([row["id"] for row in self.store.list_users()], [owner["id"], collaborator["id"], student["id"]])
+        self.assertEqual(len(self.store.list_users(role="teacher")), 2)
+        self.assertEqual([row["id"] for row in self.store.list_users(status="pending")], [student["id"]])
+        self.assertEqual(self.store.list_users(role="teacher", status="pending"), [])
+        self.assertEqual(self.store.list_users(role=""), [])
+        self.assertEqual(self.store.list_users(status=""), [])
+        first = self.store.create_course("Alpha", "2026", owner["id"])
+        second = self.store.create_course("beta", "2026", collaborator["id"])
+        self.store.set_course_collaborator(first["id"], collaborator["id"], "read", granted_by=owner["id"])
+        self.assertEqual([row["id"] for row in self.store.list_courses()], [first["id"], second["id"]])
+        self.assertEqual([row["id"] for row in self.store.list_courses(teacher_id=owner["id"])], [first["id"]])
+        self.assertEqual([row["id"] for row in self.store.list_courses(teacher_id=collaborator["id"])], [first["id"], second["id"]])
+        self.assertEqual(self.store.list_courses(teacher_id=""), [])
+        self.store.record_audit_event("owner_event", owner["id"], created_at=1)
+        self.store.record_audit_event("system_event", created_at=2)
+        self.assertEqual([row["event_type"] for row in self.store.list_audit_events()], ["system_event", "owner_event"])
+        self.assertEqual([row["event_type"] for row in self.store.list_audit_events(actor_user_id=owner["id"])], ["owner_event"])
+        self.assertEqual(self.store.list_audit_events(actor_user_id=""), [])
+        self.assertEqual(len(self.store.list_audit_events(limit=1)), 1)
 
     def test_database_path_uses_one_server_relative_root(self):
         from types import SimpleNamespace
