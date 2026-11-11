@@ -21,6 +21,9 @@ Thumbs.db
 *.rar
 *.zip
 /老师提供的前端展示/
+/赛题数据/
+/本地参赛工作包/
+/gui-test-screenshots/
 
 # 数据、数据库、日志和生成结果
 /data/
@@ -36,6 +39,14 @@ Thumbs.db
 # 后续开发环境与构建产物
 .venv/
 venv/
+server/.venv/
+server/data/
+server/uploads/
+server/outputs/
+server/artifacts/
+server/.env
+server/.env.*
+!server/.env.example
 __pycache__/
 *.py[cod]
 .pytest_cache/

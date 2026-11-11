@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>智慧学伴 · 演示（样例数据）</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">跳到主要内容</a>
+
+  <!-- 入口：一张作业、一道错例、一条批改痕迹 -->
+  <section id="entry" class="entry" aria-labelledby="entry-title" hidden>
+    <header class="entry-head">
+      <p class="wordmark">智慧学伴 <span class="wordmark-sub">七年级数学 · 学情诊断</span></p>
+      <span class="tag-sample">样例数据</span>
+    </header>
+
+    <div class="entry-body">
+      <div class="sheet" id="sheet">
+        <p class="sheet-meta">作业 · 第三章 一元一次方程 <span class="tag-sample">样例 · 虚构学生</span></p>
+        <h1 id="entry-title" class="visually-hidden">一次错误，可以追到知识点、材料和下一题</h1>
+        <p class="hand hand-stem">解方程：3(x − 2) = 2x + 1</p>
+        <ol class="hand hand-steps">
+          <li>3(x − 2) = 2x + 1</li>
+          <li><span id="wrong-step">3x − 2 = 2x + 1</span></li>
+          <li>x = 3</li>
+        </ol>
+      </div>
+
+      <ol class="notes" aria-label="批改痕迹">
+        <li class="note" data-n="1"><span class="note-k">错步</span><span class="note-v">第 2 行：3 只乘了 x，没有乘 −2</span></li>
+        <li class="note" data-n="2"><span class="note-k">错误类型</span><span class="note-v">去括号漏乘</span></li>
+        <li class="note" data-n="3"><span class="note-k">知识点</span><span class="note-v">去括号 · 七上 2.2</span></li>
+        <li class="note" data-n="4"><span class="note-k">建议材料</span><span class="note-v">去括号：括号外的数要乘遍每一项</span></li>
+      </ol>
+      <svg class="trace" id="trace" aria-hidden="true"></svg>
+    </div>
+
+    <footer class="entry-foot">
+      <p class="entry-claim">一次错误，可以追到知识点、材料和下一题。</p>
+      <div class="entry-actions">
+        <button class="btn btn-primary" data-enter="teacher">教师进入</button>
+        <button class="btn" data-enter="student">学生进入</button>
+      </div>
+    </footer>
+  </section>
+
+  <!-- 工作台外壳：切换角色时不重载 -->
+  <div id="shell" class="shell" hidden>
+    <header class="topbar">
+      <button class="wordmark wordmark-btn" data-go="entry" title="回到入口">智慧学伴 <span class="wordmark-sub">七年级数学</span></button>
+      <span class="tag-sample">样例数据</span>
+      <span class="top-role" id="top-role" aria-live="polite"></span>
+      <div class="demo" role="group" aria-label="演示控件，不属于产品功能">
+        <span class="demo-label">演示控件</span>
+        <button class="btn btn-sm" id="demo-role"></button>
+        <label class="demo-field">状态
+          <select id="demo-state">
+            <option value="normal">正常</option>
+            <option value="loading">加载中</option>
+            <option value="empty">空</option>
+            <option value="error">失败</option>
+          </select>
+        </label>
+        <label class="demo-field"><input type="checkbox" id="demo-reduce"> 减少动态</label>
+      </div>
+    </header>
+    <nav class="sidenav" id="sidenav" aria-label="栏目"></nav>
+    <main id="main" class="main" tabindex="-1"></main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="data.js"></script>
+  <script src="model.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
