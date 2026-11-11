@@ -92,7 +92,7 @@ def _llm_providers() -> tuple[LLMProvider, ...]:
         base_url = str(value.get("base_url") or "").strip().rstrip("/")
         model = str(value.get("model") or "").strip()
         key_env = str(value.get("api_key_env") or "").strip()
-        if not name or name in names or channel not in {"student", "teacher", "grading", "shared"}:
+        if not name or name in names or channel not in {"student", "teacher", "grading", "summary", "shared"}:
             raise ValueError(f"LLM_PROVIDERS_JSON entry {index} has an invalid name or channel")
         if not base_url or not model or not key_env.isidentifier():
             raise ValueError(f"LLM_PROVIDERS_JSON entry {index} requires base_url, model and api_key_env")
@@ -125,6 +125,11 @@ def _llm_providers() -> tuple[LLMProvider, ...]:
 class Settings:
     app_name: str = os.getenv("APP_NAME", "智慧学伴 API")
     app_env: str = os.getenv("APP_ENV", "development")
+    demo_enabled: bool = _bool("STUDY_DEMO_ENABLED", False)
+    worker_enabled: bool = _bool("STUDY_WORKER_ENABLED", True)
+    worker_poll_seconds: float = 0.5
+    worker_lease_seconds: float = 120.0
+    worker_concurrency: int = max(1, min(16, int(os.getenv("STUDY_WORKER_CONCURRENCY", "2"))))
     maxkb_url: str = os.getenv("MAXKB_URL", "").rstrip("/")
     maxkb_api_key: str = os.getenv("MAXKB_API_KEY", "")
     maxkb_dataset_ids: tuple[str, ...] = tuple(
@@ -174,7 +179,14 @@ class Settings:
     llm_token_output_estimate: int = max(0, int(os.getenv("LLM_TOKEN_OUTPUT_ESTIMATE", "512")))
     llm_max_tokens: int = max(0, int(os.getenv("LLM_MAX_TOKENS", "0")))
     llm_providers: tuple[LLMProvider, ...] = _llm_providers()
-    llm_reasoning_effort: str = os.getenv("LLM_REASONING_EFFORT", "").strip()
+    llm_reasoning_effort: str = os.getenv("LLM_REASONING_EFFORT", "high").strip()
+    llm_interaction_timeout_seconds: float = float(os.getenv("LLM_INTERACTION_TIMEOUT_SECONDS", "180"))
+    llm_batch_timeout_seconds: float = float(os.getenv("LLM_BATCH_TIMEOUT_SECONDS", "360"))
+    llm_interaction_max_tokens: int = int(os.getenv("LLM_INTERACTION_MAX_TOKENS", "4096"))
+    llm_batch_max_tokens: int = int(os.getenv("LLM_BATCH_MAX_TOKENS", "8192"))
+    llm_prices_json: str = os.getenv("LLM_PRICES_JSON", "")
+    budget_currency: str = os.getenv("BUDGET_CURRENCY", "site-credit")
+    default_call_budget_units: int = 100000
     knowledge_dir: str = os.getenv("KNOWLEDGE_DIR", "")
     knowledge_index_path: str = os.getenv("KNOWLEDGE_INDEX_PATH", "")
     knowledge_top_k: int = int(os.getenv("KNOWLEDGE_TOP_K", "4"))
@@ -189,7 +201,7 @@ class Settings:
         if not self.llm_providers:
             return bool(self.llm_base_url and self.llm_api_key and self.llm_model)
         channels = {channel, "shared"}
-        if channel == "grading":
+        if channel in {"grading", "summary"}:
             channels.add("student")
         return any(provider.channel in channels for provider in self.llm_providers)
 

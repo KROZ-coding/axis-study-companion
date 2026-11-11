@@ -44,7 +44,7 @@ class TeachingFlowTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix="teaching-api-test-")
         self.addCleanup(self.directory.cleanup)
         self.config = Settings(
-            app_env="test", data_dir=self.directory.name, persistence_enabled=True,
+            app_env="test", demo_enabled=True, worker_enabled=False, data_dir=self.directory.name, persistence_enabled=True,
             llm_providers=(), llm_base_url="", llm_api_key="", llm_model="",
             maxkb_url="", maxkb_api_key="", maxkb_dataset_ids=(),
         )
@@ -154,7 +154,7 @@ class TeachingFlowTests(unittest.TestCase):
         return response
 
     def test_import_application_is_memory_only_and_opens_no_sqlite(self):
-        self.assertFalse(import_application.state.store.persistence_enabled)
+        self.assertIsNone(import_application.state.store)
         self.assertFalse(Path(_IMPORT_DATA.name, "store.sqlite3").exists())
         self.review(students=("S07",))
         self.assertTrue(Path(self.directory.name, "store.sqlite3").is_file())

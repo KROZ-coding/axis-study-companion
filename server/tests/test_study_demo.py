@@ -24,7 +24,7 @@ from app.utils.url_security import pin_remote_url, validate_remote_url
 
 class StudyDemoTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.config = Settings(app_env="test", persistence_enabled=False, llm_providers=(), llm_base_url="", llm_api_key="", llm_model="")
+        self.config = Settings(app_env="test", demo_enabled=True, worker_enabled=False, persistence_enabled=False, llm_providers=(), llm_base_url="", llm_api_key="", llm_model="")
         self.app = create_app(self.config)
         self.client = TestClient(self.app)
 
@@ -101,7 +101,7 @@ class StudyDemoTests(unittest.TestCase):
 
     def test_practice_restores_from_fresh_application(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            config = Settings(app_env="development", persistence_enabled=True, data_dir=directory)
+            config = Settings(app_env="development", demo_enabled=True, worker_enabled=False, persistence_enabled=True, data_dir=directory)
             with TestClient(create_app(config)) as first:
                 response = first.post("/api/study/practice/S07/P-501", json={"answer_index": 1})
                 self.assertEqual(response.status_code, 200)
