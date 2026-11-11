@@ -6,6 +6,10 @@
 
 本仓库承接 [`KROZ-coding/audit-companion`](https://github.com/KROZ-coding/audit-companion) 的 FastAPI 开发基础，并在其上新增七年级数学虚构样例诊断演示。上游代码来源提交：`d01ab02d287641e5c62b731a7941b9a5c4e07b29`。上游许可为 PolyForm Noncommercial 1.0.0；完整声明见根目录 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
 
+## 后续制作方案
+
+当前产品方向以[产品与前后端技术总方案](docs/智慧学伴产品与前后端技术总方案.md)为准，配套[需求覆盖与多轮复核清单](docs/需求覆盖与复核清单.md)区分已确认需求、现有实现、设计建议及待验证条件。下一步先做可点击核心原型，再接入真实师生账号、AI学习与题库等能力；文档中的新功能不代表当前代码已经实现。
+
 ## 当前可运行内容
 
 - FastAPI 同源应用，默认地址 `http://127.0.0.1:8000/`。
