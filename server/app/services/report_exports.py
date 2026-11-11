@@ -494,6 +494,12 @@ def _xlsx_export(snapshot: dict[str, Any], manifest: dict[str, Any]) -> bytes:
     with ZipFile(io.BytesIO(payload)) as original, ZipFile(stable, "w", compression=ZIP_DEFLATED) as archive:
         for name in sorted(original.namelist()):
             content = original.read(name)
+            if name == "docProps/core.xml" or name.endswith(".rels"):
+                if len(content) > 1024 * 1024:
+                    raise ValueError("report workbook metadata exceeds the XML size limit")
+                declarations = content.upper()
+                if b"<!DOCTYPE" in declarations or b"<!ENTITY" in declarations:
+                    raise ValueError("report workbook metadata contains forbidden XML declarations")
             if name == "docProps/core.xml":
                 with minidom.parseString(content, forbid_dtd=True, forbid_entities=True, forbid_external=True) as core:
                     for property_name in ("created", "modified"):
