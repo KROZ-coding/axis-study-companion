@@ -14,6 +14,8 @@ import re
 import sys
 import time
 import unittest
+from unittest.mock import patch
+from defusedxml.common import DTDForbidden
 from defusedxml.ElementTree import fromstring
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -235,6 +237,75 @@ class ReportExportsTests(unittest.TestCase):
                                 self.assertEqual(values[0].get("{http://www.w3.org/2001/XMLSchema-instance}type"),
                                                  "dcterms:W3CDTF")
                             self.assertFalse(any(name.startswith("xl/externalLinks/") for name in archive.namelist()))
+
+    def render_with_relationship(self, snapshot, relationships):
+        from openpyxl import Workbook
+        save = Workbook.save
+
+        def save_with_relationship(workbook, buffer):
+            save(workbook, buffer)
+            changed = io.BytesIO()
+            with ZipFile(io.BytesIO(buffer.getvalue())) as original, ZipFile(changed, "w") as archive:
+                for entry in original.infolist():
+                    content = relationships if entry.filename == "_rels/.rels" else original.read(entry.filename)
+                    archive.writestr(entry, content)
+            buffer.seek(0)
+            buffer.truncate()
+            buffer.write(changed.getvalue())
+
+        with patch.object(Workbook, "save", save_with_relationship):
+            return render_export(snapshot, "xlsx")
+
+    def test_core_properties_preserve_metadata_and_escape_text(self):
+        snapshot = build_report_snapshot(report_input(), scopes()[1])
+        snapshot["title"] = "中文报告 & <核对> \"引号\" 'apostrophe'"
+        artifact = render_export(snapshot, "xlsx")
+        with ZipFile(io.BytesIO(artifact.content)) as archive:
+            core_xml = archive.read("docProps/core.xml")
+            core = fromstring(core_xml, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+            self.assertEqual(core.find("{http://purl.org/dc/elements/1.1/}title").text, snapshot["title"])
+            self.assertEqual(core.find("{http://purl.org/dc/elements/1.1/}creator").text, "Z.ai")
+            self.assertEqual(core.find("{http://purl.org/dc/elements/1.1/}subject").text,
+                             "Frozen report " + artifact.manifest["snapshot_sha256"])
+            self.assertIn(b'xmlns:dcterms="http://purl.org/dc/terms/"', core_xml)
+        workbook = load_workbook(io.BytesIO(artifact.content))
+        try:
+            self.assertEqual(workbook.properties.title, snapshot["title"])
+            self.assertEqual(workbook.properties.creator, "Z.ai")
+        finally:
+            workbook.close()
+
+    def test_relationship_namespaces_accept_internal_and_reject_external_targets(self):
+        snapshot = build_report_snapshot(report_input(), scopes()[1])
+        default = (b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   b'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+                   b'Target="xl/workbook.xml"/></Relationships>')
+        prefixed = default.replace(b'<Relationships xmlns=', b'<r:Relationships xmlns:r=').replace(
+            b'<Relationship ', b'<r:Relationship ').replace(b'</Relationships>', b'</r:Relationships>')
+        for relationships in (default, prefixed):
+            with self.subTest(prefixed=relationships == prefixed):
+                self.check_xlsx(snapshot, self.render_with_relationship(snapshot, relationships))
+                external = relationships.replace(b'Target="xl/workbook.xml"',
+                                                 b'Target="https://example.invalid/workbook.xml" TargetMode="External"')
+                with self.assertRaisesRegex(ValueError, "external relationships"):
+                    self.render_with_relationship(snapshot, external)
+
+    def test_relationship_xml_rejects_declarations_and_oversized_metadata(self):
+        snapshot = build_report_snapshot(report_input(), scopes()[1])
+        declarations = (
+            b'<!DOCTYPE Relationships><Relationships/>',
+            b'<!DOCTYPE Relationships [<!ENTITY value "sentinel">]><Relationships>&value;</Relationships>',
+            b'<!DOCTYPE Relationships SYSTEM "https://example.invalid/relationship.dtd"><Relationships/>',
+        )
+        for relationships in declarations:
+            with self.subTest(relationships=relationships), self.assertRaisesRegex(ValueError, "forbidden XML declarations"):
+                self.render_with_relationship(snapshot, relationships)
+        utf16 = ('<?xml version="1.0" encoding="utf-16"?><!DOCTYPE Relationships '
+                 '[<!ENTITY value "sentinel">]><Relationships>&value;</Relationships>').encode("utf-16")
+        with self.assertRaises(DTDForbidden):
+            self.render_with_relationship(snapshot, utf16)
+        with self.assertRaisesRegex(ValueError, "XML size limit"):
+            self.render_with_relationship(snapshot, b"<Relationships>" + b" " * (1024 * 1024) + b"</Relationships>")
 
     def test_spreadsheet_formula_injection_is_literal_in_excel_and_csv(self):
         for malicious in ("=HYPERLINK(\"https://example.invalid\")", "+cmd|' /C calc'!A0", "-1+2", "@SUM(A1:A2)", " \t=2+2", "\ttext", "\n=1"):
