@@ -67,6 +67,7 @@ def create_app(config: Settings | None = None, *, study_data: dict | None = None
     hosts = configured_hosts or ["127.0.0.1", "localhost", "testserver"]
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     application.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+    application.mount("/prototype", StaticFiles(directory=WEB_DIR / "prototype", html=True), name="prototype")
     if demo:
         application.include_router(legacy_router)
         application.include_router(teaching_router)
@@ -129,7 +130,8 @@ def create_app(config: Settings | None = None, *, study_data: dict | None = None
         if demo:
             return FileResponse(WEB_DIR / "index.html", media_type="text/html")
         return JSONResponse({"name": "智慧学伴", "mode": "platform", "api": "/api/v1",
-                             "message": "后端服务已启动，前端工作区需单独接入正式 API。"})
+                             "prototype": "/prototype/",
+                             "message": "后端服务已启动。可点击原型在 /prototype/，尚未接入正式 API。"})
 
     return application
 
