@@ -53,6 +53,11 @@ const state = {
   error: "",
   reduce: reduceQuery.matches,
   pointer: { x: 0.62, y: 0.42 },
+  reveal: 0,
+  authStatus: "ready",
+  authAccount: "",
+  yaw: 0.5,
+  pitch: 0.25,
 };
 
 let toastTimer = 0;
@@ -79,52 +84,87 @@ function render() {
   bind();
 }
 
+const AUTH_COPY = {
+  login: {
+    title: "从上次停下的地方继续",
+    lede: "老师回到班级，学生回到自己的题。进哪一边，由账号决定。",
+    submit: "登录",
+  },
+  activate: {
+    title: "第一次来，先设一个密码",
+    lede: "用老师给你的一次性码激活。忘了密码，也从这里重设。",
+    submit: "激活并设置密码",
+  },
+  apply: {
+    title: "申请教师账号",
+    lede: "提交后等待审核，通过前不能进入工作台。",
+    submit: "提交申请",
+  },
+};
+const AUTH_STATUS = { ready: "就绪", checking: "核对中", denied: "未通过", sent: "已提交" };
+
 function renderEntry() {
+  const open = state.reveal > 0.5;
+  state.shifted = open;
   view.innerHTML = `
-    <section class="entry ${state.shifted ? "shifted" : ""}">
-      <div class="entry-copy">
+    <section class="entry ${open ? "shifted" : ""}" style="--reveal:${state.reveal.toFixed(3)}">
+      <div class="orb-hit" aria-hidden="true"></div>
+      <div class="entry-copy" ${open ? "inert" : ""}>
         <p class="mark">智慧学伴</p>
         <h1>把下一道题，放在看得懂的位置。</h1>
         <p class="lede">同一学习目标下，先看每人已有的依据，再决定讲解、练习和提示。这里是可点击原型，内容为虚构样例。</p>
-        ${state.shifted ? "" : '<button class="enter" data-action="shift">进入</button>'}
-        <div><span class="sample-flag">虚构样例 · 不是实时模型</span></div>
+        <span class="sample-flag">虚构样例 · 不是实时模型</span>
       </div>
-      <form class="auth-card" data-action="auth" hidden>
-        <h2>用账号进入</h2>
-        <p class="muted">师生同一入口。身份由账号决定，不能在这里自行选择身份。</p>
-        <div class="tabs" role="tablist">
-          ${tab("login", "登录")}${tab("apply", "教师申请")}${tab("activate", "激活 / 重置")}
-        </div>
-        ${authFields()}
-        <p class="error-line" role="alert">${escapeHtml(state.error)}</p>
-        <div class="row">
-          <button class="btn primary" type="submit">${state.authTab === "apply" ? "提交申请" : state.authTab === "activate" ? "设置密码" : "登录"}</button>
-          <button class="btn" type="button" data-action="back-entry">返回</button>
-        </div>
-      </form>
+      <button class="scroll-hint" type="button" data-action="reveal" ${open ? "inert" : ""}>
+        <span class="wheel" aria-hidden="true"><i></i></span>
+        <span class="hint-main">向下滑动登录</span>
+        <span class="hint-sub">拖动玻璃可以转动它</span>
+      </button>
+      ${authCard(open)}
     </section>`;
-  const form = view.querySelector(".auth-card");
-  if (state.shifted) form.hidden = false;
 }
 
-function tab(id, label) {
-  return `<button class="chip" type="button" role="tab" aria-pressed="${state.authTab === id}" data-tab="${id}">${label}</button>`;
+function authCard(open) {
+  const copy = AUTH_COPY[state.authTab];
+  const busy = state.authStatus === "checking";
+  return `<form class="auth-card ${state.authStatus === "denied" ? "denied" : ""}" data-action="auth" aria-labelledby="auth-title" ${open ? "" : "inert"}>
+      <header class="auth-head">
+        <span class="auth-mark">智慧学伴 · 入口</span>
+        <span class="auth-status" data-status="${state.authStatus}"><i aria-hidden="true"></i><span>${AUTH_STATUS[state.authStatus]}</span></span>
+      </header>
+      <h2 id="auth-title">${copy.title}</h2>
+      <p class="auth-lede">${copy.lede}</p>
+      ${authFields()}
+      <p class="error-line" role="alert">${escapeHtml(state.error)}</p>
+      <button class="btn primary wide" type="submit" ${busy ? "disabled" : ""}>${busy ? "核对中…" : copy.submit}</button>
+      <div class="auth-alt">${authLinks()}</div>
+      <div class="auth-foot">
+        ${state.authTab === "login" ? `<details class="proto-note"><summary>原型账号</summary><p>teacher 进教师工作台，linxia 进学生端，密码随意。一次性码填 000000 看过期，账号或密码填 disabled 看停用。</p></details>` : "<span></span>"}
+        <button class="linkish" type="button" data-action="back-entry">回到开场</button>
+      </div>
+    </form>`;
+}
+
+function authLinks() {
+  if (state.authTab !== "login") return `<button class="linkish" type="button" data-tab="login">已有账号，直接登录</button>`;
+  return `<button class="linkish" type="button" data-tab="activate">第一次来？用一次性码激活</button>
+    <button class="linkish" type="button" data-tab="apply">老师还没有账号</button>`;
 }
 
 function authFields() {
+  const account = escapeHtml(state.authAccount);
   if (state.authTab === "apply") {
-    return `<label class="field">姓名<input name="name" required value="陈宁"></label>
-      <label class="field">学校邮箱<input name="email" type="email" required value="chen@school.example"></label>
+    return `<label class="field">姓名<input name="name" required autocomplete="name" value="陈宁"></label>
+      <label class="field">学校邮箱<input name="email" type="email" required autocomplete="email" value="chen@school.example"></label>
       <label class="field">任教课程<input name="course" required value="七年级数学"></label>`;
   }
   if (state.authTab === "activate") {
-    return `<label class="field">账号<input name="account" required value="linxia"></label>
-      <label class="field">一次性码<input name="code" required placeholder="6 位码"></label>
-      <label class="field">新密码<input name="password" type="password" required minlength="8"></label>`;
+    return `<label class="field">账号<input name="account" required autocomplete="username" value="${account || "linxia"}"></label>
+      <label class="field">一次性码<input name="code" required autocomplete="one-time-code" placeholder="6 位码"></label>
+      <label class="field">新密码<input name="password" type="password" required minlength="8" autocomplete="new-password" placeholder="至少 8 位"></label>`;
   }
-  return `<label class="field">账号<input name="account" required autocomplete="username" placeholder="teacher 或 linxia"></label>
-    <label class="field">密码<input name="password" type="password" required autocomplete="current-password"></label>
-    <p class="muted">原型账号：teacher / linxia。密码随意；输入 expired 看过期码，disabled 看停用。</p>`;
+  return `<label class="field">账号<input name="account" required autocomplete="username" value="${account}" placeholder="老师发给你的账号"></label>
+    <label class="field">密码<input name="password" type="password" required autocomplete="current-password"></label>`;
 }
 
 function renderTeacher() {
@@ -383,7 +423,7 @@ function stateMenu() {
 }
 
 function bind() {
-  view.querySelectorAll("[data-action]").forEach((node) => node.addEventListener("click", onAction));
+  view.querySelectorAll("[data-action]:not(form)").forEach((node) => node.addEventListener("click", onAction));
   view.querySelectorAll("[data-tab]").forEach((node) => node.addEventListener("click", () => {
     if (state.role === "student") {
       state.studentTab = node.dataset.tab;
@@ -434,19 +474,18 @@ function bind() {
 
 function onAction(event) {
   const action = event.currentTarget.dataset.action;
-  if (action === "shift") {
-    state.shifted = true;
-    render();
+  if (action === "reveal") {
+    animateReveal(1);
     return;
   }
   if (action === "back-entry") {
-    state.shifted = false;
     state.error = "";
-    render();
+    state.authStatus = "ready";
+    animateReveal(0);
     return;
   }
   if (action === "logout") {
-    Object.assign(state, { screen: "entry", shifted: false, role: null, drawer: false, sheet: null, error: "" });
+    Object.assign(state, { screen: "entry", shifted: false, reveal: 0, authStatus: "ready", authAccount: "", role: null, drawer: false, sheet: null, error: "" });
     render();
     return;
   }
@@ -535,30 +574,37 @@ function onSubmit(event) {
 }
 
 function submitAuth(data) {
-  const account = String(data.get("account") || data.get("name") || "");
-  const secret = String(data.get("password") || data.get("code") || "");
+  if (state.authStatus === "checking") return;
+  const account = String(data.get("account") || data.get("name") || "").trim();
+  const password = String(data.get("password") || "");
+  const code = String(data.get("code") || "");
+  state.authAccount = String(data.get("account") || "").trim();
+  const fail = (message) => {
+    state.authStatus = "denied";
+    state.error = message;
+    render();
+  };
   if (state.authTab === "apply") {
-    state.error = "申请已提交，审核通过前不能进入工作台。";
+    state.authStatus = "sent";
+    state.error = "";
+    toast("申请已提交，审核通过前不能进入工作台");
     render();
     return;
   }
-  if (secret === "expired") {
-    state.error = "这个一次性码已过期，请向老师再要一个。";
-    render();
-    return;
-  }
-  if (secret === "disabled" || account === "disabled") {
-    state.error = "账号已停用，会话也已失效。";
-    render();
-    return;
-  }
-  state.role = account.startsWith("lin") ? "student" : "teacher";
-  state.who = state.role === "student" ? "林夏" : "陈宁";
-  state.screen = "app";
+  if (state.authTab === "activate" && (code === "expired" || code === "000000")) return fail("这个一次性码已过期，请向老师再要一个。");
+  if (password === "disabled" || account === "disabled") return fail("账号已停用，会话也已失效。");
+  state.authStatus = "checking";
   state.error = "";
-  state.banner = "";
-  toast(state.role === "student" ? "进入林夏的学习" : "进入七（1）班");
   render();
+  window.setTimeout(() => {
+    state.authStatus = "ready";
+    state.role = account.startsWith("lin") ? "student" : "teacher";
+    state.who = state.role === "student" ? "林夏" : "陈宁";
+    state.screen = "app";
+    state.banner = "";
+    toast(state.role === "student" ? "进入林夏的学习" : "进入七（1）班");
+    render();
+  }, state.reduce ? 0 : 650);
 }
 
 function submitPaper() {
@@ -583,53 +629,224 @@ function mountGlass() {
   glass = startGlass(canvas, state.reduce);
 }
 
+let revealTimer = 0;
+
+function setReveal(value) {
+  state.reveal = Math.min(1, Math.max(0, value));
+  const open = state.reveal > 0.5;
+  if (open !== state.shifted || state.screen !== "entry" || !view.querySelector(".entry")) {
+    render();
+    return;
+  }
+  view.querySelector(".entry").style.setProperty("--reveal", state.reveal.toFixed(3));
+}
+
+function animateReveal(target) {
+  cancelAnimationFrame(revealTimer);
+  if (state.reduce) {
+    setReveal(target);
+    return;
+  }
+  const from = state.reveal;
+  const started = performance.now();
+  const step = (now) => {
+    const t = Math.min(1, (now - started) / 700);
+    const eased = t < 0.5 ? 4 * t * t * t : 1 - ((-2 * t + 2) ** 3) / 2;
+    setReveal(from + (target - from) * eased);
+    if (t < 1) revealTimer = requestAnimationFrame(step);
+  };
+  revealTimer = requestAnimationFrame(step);
+}
+
 function startGlass(canvas, reduce) {
-  const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: false });
+  const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true, antialias: true, depth: true });
   if (!gl) {
     canvas.insertAdjacentHTML("afterend", fallbackSvg());
     return { stop() {} };
   }
-  const vertex = `attribute vec2 p; void main(){ gl_Position=vec4(p,0.0,1.0); }`;
-  const fragment = `precision mediump float; uniform vec2 uRes,uPtr; uniform float uTime,uShift;
-    float prism(vec2 uv){ vec2 q=abs(uv); return max(q.x*0.85+uv.y*0.45, -uv.y)-0.34; }
-    void main(){ vec2 uv=(gl_FragCoord.xy-0.5*uRes)/uRes.y; uv.x+=uShift*0.55; uv+= (uPtr-0.5)*0.08;
-      float a=prism(uv*vec2(1.15,1.0)+vec2(0.18,0.02)); float b=prism(uv*vec2(0.8,1.25)-vec2(0.32,0.12));
-      float g=smoothstep(0.02,0.0,a)+0.55*smoothstep(0.025,0.0,b);
-      vec3 ice=mix(vec3(0.91,0.97,0.99), vec3(0.45,0.76,0.86), g);
-      float spec=smoothstep(0.2,0.0,abs(a+0.01+0.015*sin(uTime)));
-      ice+=spec*vec3(0.35,0.45,0.48); gl_FragColor=vec4(ice,0.55+0.3*g); }`;
+  const vertex = `attribute vec3 pos; attribute vec3 normal;
+    uniform mat4 uMvp,uModel; uniform float uTime;
+    varying vec3 vN,vP,vLocal;
+    void main(){
+      float wobble=0.035*sin(uTime*0.8+pos.y*2.4);
+      vec3 morphed=pos*(1.0+wobble);
+      vec4 world=uModel*vec4(morphed,1.0);
+      vP=world.xyz; vN=mat3(uModel)*normal; vLocal=pos;
+      gl_Position=uMvp*vec4(morphed,1.0);
+    }`;
+  const fragment = `precision mediump float;
+    varying vec3 vN,vP,vLocal; uniform vec3 uEye;
+    void main(){
+      vec3 n=normalize(vN); vec3 viewDir=normalize(uEye-vP);
+      vec3 key=normalize(vec3(-0.55,0.75,0.45));
+      vec3 fill=normalize(vec3(0.7,-0.2,0.35));
+      float keyLit=pow(max(dot(n,key),0.0), 1.35);
+      float fillLit=max(dot(n,fill),0.0);
+      vec3 ice=vec3(0.05,0.16,0.24)+vec3(0.55,0.86,0.98)*keyLit+vec3(0.10,0.16,0.20)*fillLit;
+      float fres=pow(1.0-max(dot(n,viewDir),0.0), 2.6);
+      ice=mix(ice, vec3(0.86,0.97,1.0), fres*0.55);
+      float spec=pow(max(dot(reflect(-viewDir,n), key),0.0), 90.0);
+      vec3 color=ice+spec*vec3(1.0,1.0,1.0);
+      float alpha=0.78+0.18*fres;
+      gl_FragColor=vec4(color*alpha, alpha);
+    }`;
   const program = link(gl, vertex, fragment);
   if (!program) return { stop() {} };
+  const solid = crystalGeometry();
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-  const loc = gl.getAttribLocation(program, "p");
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.bufferData(gl.ARRAY_BUFFER, solid.interleaved, gl.STATIC_DRAW);
+  const stride = 24;
+  const posLoc = gl.getAttribLocation(program, "pos");
+  const norLoc = gl.getAttribLocation(program, "normal");
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(norLoc);
+  gl.vertexAttribPointer(norLoc, 3, gl.FLOAT, false, stride, 12);
   gl.useProgram(program);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.enable(gl.DEPTH_TEST);
   const uniforms = {
-    res: gl.getUniformLocation(program, "uRes"),
-    ptr: gl.getUniformLocation(program, "uPtr"),
+    mvp: gl.getUniformLocation(program, "uMvp"),
+    model: gl.getUniformLocation(program, "uModel"),
+    eye: gl.getUniformLocation(program, "uEye"),
     time: gl.getUniformLocation(program, "uTime"),
-    shift: gl.getUniformLocation(program, "uShift"),
   };
   let frame = 0;
   let running = true;
   const draw = (now) => {
     if (!running || !canvas.isConnected) return;
     const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * devicePixelRatio;
-    canvas.height = rect.height * devicePixelRatio;
+    const width = Math.max(1, Math.floor(rect.width * devicePixelRatio));
+    const height = Math.max(1, Math.floor(rect.height * devicePixelRatio));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
     gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.uniform2f(uniforms.res, canvas.width, canvas.height);
-    gl.uniform2f(uniforms.ptr, state.pointer.x, 1 - state.pointer.y);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const aspect = canvas.width / canvas.height;
+    const reveal = state.reveal;
+    const spin = reduce ? 0 : now / 1000;
+    const yaw = state.yaw + spin * 0.16;
+    const pitch = state.pitch + Math.sin(spin * 0.37) * 0.05;
+    const slideX = reveal * -0.95;
+    const model = multiply(translation(slideX, reveal * 0.08, 0), multiply(rotationY(yaw), rotationX(pitch)));
+    const eye = [0, 0.1, 3.4];
+    const viewM = lookAt(eye, [0, 0, 0], [0, 1, 0]);
+    const projection = perspective(0.82, aspect, 0.1, 20);
+    gl.uniformMatrix4fv(uniforms.model, false, model);
+    gl.uniformMatrix4fv(uniforms.mvp, false, multiply(projection, multiply(viewM, model)));
+    gl.uniform3fv(uniforms.eye, eye);
     gl.uniform1f(uniforms.time, reduce ? 0 : now / 1000);
-    gl.uniform1f(uniforms.shift, state.shifted ? 1 : 0);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    if (!reduce) frame = requestAnimationFrame(draw);
+    gl.drawArrays(gl.TRIANGLES, 0, solid.count);
+    frame = requestAnimationFrame(draw);
   };
   frame = requestAnimationFrame(draw);
   return { stop() { running = false; cancelAnimationFrame(frame); } };
+}
+
+function crystalGeometry() {
+  const ring = 6;
+  const cap = [0, 1.25, 0];
+  const base = [0, -1.12, 0];
+  const belt = [];
+  for (let i = 0; i < ring; i += 1) {
+    const angle = (Math.PI * 2 * i) / ring + 0.35;
+    const radius = i % 2 === 0 ? 0.92 : 0.62;
+    belt.push([Math.cos(angle) * radius, i % 2 === 0 ? 0.22 : -0.16, Math.sin(angle) * radius]);
+  }
+  const faces = [];
+  for (let i = 0; i < ring; i += 1) {
+    const next = (i + 1) % ring;
+    faces.push([cap, belt[next], belt[i]]);
+    faces.push([base, belt[i], belt[next]]);
+  }
+  const data = [];
+  const shared = new Map();
+  const keyOf = (vertex) => vertex.map((value) => value.toFixed(3)).join(",");
+  for (const [a, b, c] of faces) {
+    const normal = faceNormal(a, b, c);
+    for (const vertex of [a, b, c]) {
+      const key = keyOf(vertex);
+      const sum = shared.get(key) || [0, 0, 0];
+      shared.set(key, sum.map((value, index) => value + normal[index]));
+    }
+  }
+  for (const [a, b, c] of faces) {
+    for (const vertex of [a, b, c]) data.push(...vertex, ...unit(shared.get(keyOf(vertex))));
+  }
+  return { interleaved: new Float32Array(data), count: faces.length * 3 };
+}
+
+function faceNormal(a, b, c) {
+  const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+  const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+  const x = uy * vz - uz * vy, y = uz * vx - ux * vz, z = ux * vy - uy * vx;
+  const length = Math.hypot(x, y, z) || 1;
+  return [x / length, y / length, z / length];
+}
+
+function unit(vector) {
+  const length = Math.hypot(...vector) || 1;
+  return vector.map((value) => value / length);
+}
+
+function perspective(fov, aspect, near, far) {
+  const f = 1 / Math.tan(fov / 2), nf = 1 / (near - far);
+  return new Float32Array([
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) * nf, -1,
+    0, 0, 2 * far * near * nf, 0,
+  ]);
+}
+
+function lookAt(eye, target, up) {
+  const z = normalize([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
+  const x = normalize(cross(up, z));
+  const y = cross(z, x);
+  return new Float32Array([
+    x[0], y[0], z[0], 0,
+    x[1], y[1], z[1], 0,
+    x[2], y[2], z[2], 0,
+    -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
+  ]);
+}
+
+function translation(x, y, z) {
+  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1]);
+}
+
+function rotationX(angle) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  return new Float32Array([1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]);
+}
+
+function rotationY(angle) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]);
+}
+
+function multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let col = 0; col < 4; col += 1) {
+    for (let row = 0; row < 4; row += 1) {
+      out[col * 4 + row] = a[row] * b[col * 4] + a[4 + row] * b[col * 4 + 1] + a[8 + row] * b[col * 4 + 2] + a[12 + row] * b[col * 4 + 3];
+    }
+  }
+  return out;
+}
+
+function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function normalize(v) {
+  const length = Math.hypot(...v) || 1;
+  return v.map((item) => item / length);
 }
 
 function link(gl, vertexSource, fragmentSource) {
@@ -649,8 +866,45 @@ function fallbackSvg() {
   return `<svg class="fallback" viewBox="0 0 800 600" aria-hidden="true"><polygon points="470,90 650,250 430,430" fill="rgba(255,255,255,.45)" stroke="rgba(31,138,168,.45)"/><polygon points="360,150 560,210 340,390" fill="rgba(170,220,234,.35)"/></svg>`;
 }
 
+let drag = null;
+
+document.addEventListener("pointerdown", (event) => {
+  if (state.screen !== "entry" || event.target.closest("form, button, a, input, textarea")) return;
+  drag = { x: event.clientX, y: event.clientY, yaw: state.yaw, pitch: state.pitch, moved: false };
+});
 document.addEventListener("pointermove", (event) => {
   state.pointer = { x: event.clientX / innerWidth, y: event.clientY / innerHeight };
+  if (!drag) return;
+  const dx = event.clientX - drag.x;
+  const dy = event.clientY - drag.y;
+  if (Math.hypot(dx, dy) > 4) drag.moved = true;
+  state.yaw = drag.yaw + dx * 0.008;
+  state.pitch = Math.max(-0.8, Math.min(0.8, drag.pitch + dy * 0.006));
+});
+document.addEventListener("pointerup", () => {
+  drag = null;
+});
+document.addEventListener("pointercancel", () => {
+  drag = null;
+});
+document.addEventListener("wheel", (event) => {
+  if (state.screen !== "entry" || state.reduce) return;
+  if (event.target.closest(".auth-card")) return;
+  event.preventDefault();
+  setReveal(state.reveal + event.deltaY / 700);
+}, { passive: false });
+let touchY = null;
+document.addEventListener("touchstart", (event) => {
+  if (state.screen === "entry") touchY = event.touches[0].clientY;
+}, { passive: true });
+document.addEventListener("touchmove", (event) => {
+  if (touchY === null || state.screen !== "entry" || state.reduce) return;
+  const next = event.touches[0].clientY;
+  setReveal(state.reveal + (touchY - next) / 420);
+  touchY = next;
+}, { passive: true });
+document.addEventListener("touchend", () => {
+  touchY = null;
 });
 reduceQuery.addEventListener("change", () => {
   state.reduce = reduceQuery.matches;
