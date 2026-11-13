@@ -223,6 +223,16 @@ def free_port() -> int:
         return listener.getsockname()[1]
 
 
+def check_argv(argv: list[str]) -> list[str]:
+    """启动服务进程前的白名单闸门：只允许解释器本身，参数不带控制字符。"""
+    if not argv or argv[0] != sys.executable:
+        raise SystemExit(f"拒绝启动未列入白名单的可执行文件：{argv[0] if argv else '(空)'}")
+    for arg in argv[1:]:
+        if any(ch in arg for ch in "\n\r\x00"):
+            raise SystemExit("参数里出现控制字符，拒绝执行")
+    return argv
+
+
 def wait_health(base: str, process: subprocess.Popen, deadline: float) -> None:
     client = Client(base)
     while time.monotonic() < deadline:
@@ -287,7 +297,8 @@ def main() -> int:
     log_path = data_dir / "server.log"
     log = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
+        check_argv([sys.executable, "-m", "uvicorn", "app.main:app",
+                    "--host", "127.0.0.1", "--port", str(port)]),
         cwd=str(SERVER), env=server_env, stdout=log, stderr=subprocess.STDOUT,
     )
     try:

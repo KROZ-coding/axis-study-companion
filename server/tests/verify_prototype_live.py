@@ -93,11 +93,43 @@ def wait(url: str, process: subprocess.Popen, timeout: float) -> None:
     raise SystemExit(f"等待 {url} 超时")
 
 
+def check_argv(argv: list[str], *, cwd: Path | None = None) -> list[str]:
+    """进程启动前的白名单闸门。
+
+    这个脚本会拉起 python 与 node 各若干次。虽然每次的 argv 都由本文件里的
+    常量拼出来，但把"允许启动什么"写成显式检查，比依赖"我确认过没注入点"
+    更可靠：以后谁改了调用处，注入不进来也休想蒙混过去。
+
+    规则：
+      - 首元素必须是解释器本身（python / node），不接受任意可执行文件名；
+      - 不允许控制字符出现在任何参数里（这里根本不该有）；
+      - 脚本参数若以 .py/.mjs 结尾，必须是已存在的常规文件（按子进程的工作目录解析）。
+    """
+    if not argv:
+        raise SystemExit("空命令")
+    head = argv[0]
+    allowed_heads = {sys.executable, NODE}
+    if head not in allowed_heads:
+        raise SystemExit(f"拒绝启动未列入白名单的可执行文件：{head}")
+    for arg in argv[1:]:
+        if any(ch in arg for ch in "\n\r\x00"):
+            raise SystemExit("参数里出现控制字符，拒绝执行")
+    base = Path(cwd) if cwd is not None else Path.cwd()
+    for arg in argv[1:]:
+        if arg.endswith((".py", ".mjs")):
+            target = Path(arg)
+            if not target.is_absolute():
+                target = base / target
+            if not target.is_file():
+                raise SystemExit(f"脚本不存在或不是常规文件：{arg}")
+    return argv
+
+
 def run(argv: list[str], *, env=None, cwd: Path, title: str) -> None:
-    """统一用参数列表启动子进程：不经过 shell，没有注入面。"""
+    """统一用参数列表启动子进程：不经过 shell，且启动前过一遍白名单。"""
     print(f"\n=== {title} ===")
-    result = subprocess.run(argv, env=env, cwd=str(cwd), text=True, capture_output=True,
-                            shell=False, check=False)
+    result = subprocess.run(check_argv(list(argv), cwd=cwd), env=env, cwd=str(cwd), text=True,
+                            capture_output=True, shell=False, check=False)
     output = (result.stdout or "") + (result.stderr or "")
     # 保留足够长的尾部：失败时脚本会打印页面状态，截太短就只剩一句 timeout
     print(output.strip()[-8000:])
@@ -158,7 +190,8 @@ def main() -> int:
                            "STUDY_DATA_DIR": str(data_dir)})
         # 服务日志直接丢掉：这个脚本只关心测试结论，不落文件也就没有路径问题
         server = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
+            check_argv([sys.executable, "-m", "uvicorn", "app.main:app",
+                        "--host", "127.0.0.1", "--port", str(port)], cwd=SERVER),
             cwd=str(under(SERVER, ROOT)), env=server_env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -186,7 +219,8 @@ def main() -> int:
         static_port = free_port()
         static_base = local_url(static_port)
         static = subprocess.Popen(
-            [sys.executable, "-m", "http.server", str(static_port), "--bind", "127.0.0.1"],
+            check_argv([sys.executable, "-m", "http.server", str(static_port), "--bind", "127.0.0.1"],
+                       cwd=ROOT / "web"),
             cwd=str(under(ROOT / "web", ROOT)), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         try:
