@@ -36,6 +36,7 @@ const state = {
   screen: "entry",
   shifted: false,
   authTab: "login",
+  authRole: "student",
   role: null,
   who: "",
   teacherView: "home",
@@ -61,6 +62,8 @@ const state = {
   authInput: "",
   attempts: 0,
   capsLock: false,
+  serviceError: "",
+  formulaIndex: 0,
   clock: { hm: "--:--", sec: "--", date: "" },
   step: 0,
   anchorA: { x: 900, y: 470 },
@@ -107,6 +110,7 @@ function escapeHtml(value) {
 function render() {
   stage.classList.toggle("show-glass", state.screen === "entry");
   if (state.screen === "entry") renderEntry();
+  else if (state.role === "admin") renderAdmin();
   else if (state.role === "teacher") renderTeacher();
   else renderStudent();
   bind();
@@ -118,27 +122,35 @@ function render() {
 
 const AUTH_COPY = {
   login: {
-    title: "从上次停下的地方继续",
-    lede: "老师回到班级，学生回到自己的题。进哪一边，由账号决定。",
-    submit: "请求进入",
-    placeholder: "输入账号，Enter 确认",
+    title: "回到学习现场",
+    lede: "学生和教师使用各自的正式账号。登录身份由服务核验。",
+    submit: "登录",
+    placeholder: "在这里输入口令",
   },
   activate: {
-    title: "第一次来，先设一个密码",
-    lede: "用老师给你的一次性码激活。忘了密码，也从这里重设。",
-    submit: "激活",
-    placeholder: "账号 · 一次性码 · 新密码",
+    title: "首次激活学生账号",
+    lede: "输入教师提供的一次性码，设置至少 8 位的新密码。",
+    submit: "激活账号",
+    placeholder: "设置新密码",
+  },
+  reset: {
+    title: "重设登录口令",
+    lede: "向负责教师或管理员获取重设码，再设置新的登录口令。",
+    submit: "重设口令",
+    placeholder: "设置新的口令",
   },
   apply: {
     title: "申请教师账号",
-    lede: "提交后等待审核，通过前不能进入工作台。",
-    submit: "提交申请",
-    placeholder: "姓名 · 学校邮箱 · 任教课程",
+    lede: "提交后创建待审核账号；通过审核后即可登录。",
+    submit: "提交审核",
+    placeholder: "创建一个登录口令",
   },
 };
-const AUTH_STATUS = { ready: "就绪", checking: "核对中", denied: "未通过", sent: "已提交" };
-const AUTH_ROLE = { login: "学员", activate: "新学员", apply: "申请人" };
-const AUTH_STATE_LABEL = { denied: "未通过", checking: "核对中", sent: "已提交" };
+const AUTH_STATUS = { ready: "等待验证", checking: "正在验证", denied: "需要检查", sent: "等待审核" };
+const AUTH_ROLE = { login: "学习账号", activate: "学生激活", reset: "口令重设", apply: "教师申领" };
+const AUTH_STATE_LABEL = { denied: "未通过", checking: "核对中", sent: "等待审核" };
+const AUTH_ROLE_LABEL = { student: "学员", teacher: "教师", admin: "管理员" };
+const AUTH_FORMULAS = ["aₙ₊₁ = aₙ + d", "x = (−b ± √Δ) / 2a", "∫₀ᵗ v(τ) dτ = Δx", "∑ᵢ₌₁ⁿ i = n(n + 1) / 2"];
 
 function renderEntry() {
   const open = state.reveal > 0.5;
@@ -154,8 +166,8 @@ function renderEntry() {
           <div class="rail-body" style="--reveal:${rv}">
             <i class="rail-bar"></i>
             <i class="rail-dash" style="top:358px"></i>
-            <div class="rail-chip" style="left:44px; top:396px">智慧学伴 · 学习记录</div>
-            <p class="rail-micro" style="top:416px">每一次作答、提示与材料引用都留在原处。判断写在依据旁边，记录不够时就写记录不够。</p>
+            <div class="rail-chip" style="left:44px; top:396px">智慧学伴 · 学习证据</div>
+            <p class="rail-micro" style="top:416px">作答、提示与材料依据逐项留存。每个判断都有出处，尚无记录时如实说明。</p>
             <div class="rail-chip" style="left:44px; top:632px">访问记录</div>
             <div class="rail-log" style="top:656px">
               ${state.railLog.map((row) => `<div class="row"><i></i>${escapeHtml(row)}</div>`).join("")}
@@ -179,14 +191,16 @@ function renderEntry() {
         </div>
 
         <div class="entry-layer keep chrono" aria-hidden="true">
-          <div class="chrono-steps">
-            ${[0, 1, 2, 3, 4].map((i) => `<div class="step-node ${i === state.step ? "on" : ""}"><i></i></div>`).join("")}
+          <div class="chrono-cradle" role="img" aria-label="正在平衡的牛顿摆">
+            <span class="cradle-frame"><i></i><i></i><i></i><i></i><i></i></span>
+            <span class="cradle-strings"><i></i><i></i><i></i><i></i><i></i></span>
+            <span class="cradle-balls"><i></i><i></i><i></i><i></i><i></i></span>
           </div>
           <div class="chrono-time">
             <span class="chrono-hm">${state.clock.hm}</span><span class="chrono-sec">${state.clock.sec}</span>
           </div>
           <div class="chrono-date">${state.clock.date}</div>
-          <div class="chrono-term"><i></i>本地演示 · 虚构样例</div>
+          <div class="chrono-term"><i class="${state.live ? "online" : "offline"}"></i>${escapeHtml(state.live ? "正式服务 · 安全登录" : state.serviceError || "正式服务连接中断")}</div>
         </div>
 
         <div class="entry-layer callouts" aria-hidden="true">
@@ -205,17 +219,17 @@ function renderEntry() {
         </div>
 
         <div class="entry-layer entry-copy">
-          <p class="eyebrow">七年级数学 · 一元一次方程</p>
-          <h1>把下一道题，放在看得懂的位置。</h1>
-          <p class="lede">同一学习目标下，先看每人已有的依据，再决定讲解、练习和提示。这里是可点击原型，内容为虚构样例。</p>
-          <span class="sample-flag">虚构样例 · 不是实时模型</span>
+          <p class="eyebrow">七年级数学 · 学习证据系统</p>
+          <h1>让每一步学习，都有据可循。</h1>
+          <p class="lede">作答、提示与课程材料保留在各自的学习记录中。学生与教师使用正式账号，资料按授权范围访问。</p>
+          <span class="sample-flag">安全认证 · 以账号权限为准</span>
         </div>
 
         <div class="entry-layer entry-foot">
           <button class="scroll-hint" type="button" data-action="reveal" ${open ? "inert" : ""}>
             <span class="wheel" aria-hidden="true"><i></i></span>
             <span class="hint-main">向下滑动登录</span>
-            <span class="hint-sub">拖动金属可以转动它</span>
+            <span class="hint-sub">拖动玻璃调整视角</span>
           </button>
           <div class="entry-signature"><span>POWERED BY</span><b>AXIS</b><i></i></div>
         </div>
@@ -246,20 +260,28 @@ function tickClock() {
 function authCard(open) {
   const copy = AUTH_COPY[state.authTab];
   const busy = state.authStatus === "checking";
-  const name = (state.authAccount || "").toUpperCase() || "尚未登记";
-  const stateLabel = AUTH_STATE_LABEL[state.authStatus] || "会话未开启";
+  const locked = busy || state.authStatus === "sent" || !state.live;
+  const displayName = escapeHtml(state.authAccount || "等待身份核验");
+  const stateLabel = state.authStatus === "sent" ? "等待管理员审核"
+    : state.authStatus === "checking" ? "正在连接正式认证"
+      : state.authStatus === "denied" ? "认证未通过" : "尚未建立会话";
   const stateClass = state.authStatus === "denied" ? "alert" : state.authStatus === "sent" ? "ok" : "";
+  const identity = state.authTab === "apply" ? "教师申领"
+    : state.authTab === "activate" ? "学生激活"
+      : state.authTab === "reset" ? "口令重设" : AUTH_ROLE_LABEL[state.authRole];
+  const service = state.live ? "正式认证服务已连接" : state.serviceError;
+  const formula = AUTH_FORMULAS[state.formulaIndex % AUTH_FORMULAS.length];
   return `<form class="auth-card ${state.authStatus === "denied" ? "denied" : ""}" data-action="auth" aria-labelledby="auth-title" ${open ? "" : "inert"}>
       <div class="auth-rear" aria-hidden="true"></div>
       <div class="auth-slab" aria-hidden="true">
         <div class="hatch"></div>
-        <div class="ghost">${state.authStatus === "checking" ? "SECURE" : "INFO"}</div>
-        <div class="ghost-name">${escapeHtml(name)}</div>
+        <div class="ghost">${busy ? "VERIFY" : "AXIS"}</div>
+        <div class="ghost-name">${escapeHtml(identity)}</div>
         <i class="auth-bev t"></i><i class="auth-bev l"></i><i class="auth-bev b"></i><i class="auth-bev r"></i>
       </div>
       <div class="auth-inner">
         <header class="auth-head">
-          <span class="auth-mark"><i aria-hidden="true"></i>档案 · 入口</span>
+          <span class="auth-mark"><i aria-hidden="true"></i>账号 · 安全认证</span>
           <div class="auth-head-right">
             <span class="auth-outline">学习证据系统</span>
             <span class="auth-brandtag">智慧学伴 AXIS</span>
@@ -267,69 +289,67 @@ function authCard(open) {
         </header>
 
         <div class="auth-photo" aria-hidden="true">
-          <div class="film">
-            <svg class="sil" viewBox="0 0 100 124" preserveAspectRatio="none">
-              <defs><pattern id="authHatch" width="3.2" height="3.2" patternUnits="userSpaceOnUse"><circle cx="1.6" cy="1.6" r="0.75" fill="#ffffff" fill-opacity="0.16"/></pattern></defs>
-              <path d="M 50 14 C 63 14 71 24 71 38 C 71 50 66 60 59 65 L 60 72 C 72 75 86 80 93 90 C 99 99 101 112 101 124 L -1 124 C -1 112 1 99 7 90 C 14 80 28 75 40 72 L 41 65 C 34 60 29 50 29 38 C 29 24 37 14 50 14 Z" fill="#14343f" />
-              <path d="M 50 14 C 63 14 71 24 71 38 C 71 50 66 60 59 65 L 60 72 C 72 75 86 80 93 90 C 99 99 101 112 101 124 L -1 124 C -1 112 1 99 7 90 C 14 80 28 75 40 72 L 41 65 C 34 60 29 50 29 38 C 29 24 37 14 50 14 Z" fill="url(#authHatch)" />
-            </svg>
-            <span class="classified">${busy ? "核对中" : "虚构样例"}</span>
+          <div class="film formula-film">
+            <span class="formula-index">MATH / AXIS</span>
+            <span class="formula-rule"></span>
+            <span class="equation-reel" data-equation="${escapeHtml(formula)}">${escapeHtml(formula)}</span>
+            <span class="formula-coord">x → f(x)</span>
           </div>
-          <div class="badge">AX</div>
+          <div class="badge">∑</div>
           <i class="tick" style="right:-3px; top:-3px"></i><i class="tick" style="left:-3px; bottom:-3px"></i><i class="tick" style="right:-3px; bottom:-3px"></i>
         </div>
 
         <div class="auth-id">
           <div class="auth-rank">
-            <span class="auth-role">${AUTH_ROLE[state.authTab]}</span>
+            <span class="auth-role">${identity}</span>
             <span class="auth-state ${stateClass}">${stateLabel}</span>
           </div>
-          <div class="auth-name"><b>${escapeHtml(name)}</b></div>
+          <div class="auth-name"><b>${displayName}</b></div>
           <div class="auth-file">
             <span class="stamp">AXIS</span>
             <div class="info">
-              <div class="loaded">学习记录已载入 <i></i></div>
-              <div class="mono">■ ${state.authTab === "apply" ? "申请" : "七（1）班"} · ${AUTH_STATUS[state.authStatus]}</div>
+              <div class="loaded">${state.live ? "等待本人身份核验" : "认证服务暂不可用"} <i></i></div>
+              <div class="mono">${state.authStatus === "sent" ? "教师账号 · 等待审核" : "会话 · 尚未建立"}</div>
             </div>
           </div>
         </div>
 
-        <div class="auth-rings" aria-hidden="true">
-          <div class="ring"><i class="${state.capsLock ? "on" : ""}"></i><span>CAPS</span></div>
-          <div class="ring"><i class="${state.authAccount ? "on" : ""}"></i><span>账号</span></div>
-          <div class="ring"><i class="${state.authTab === "apply" ? "" : "on"}"></i><span>口令</span></div>
-        </div>
-
         <div class="auth-profile">
-          <div class="ph">档案信息</div>
+          <div class="ph">认证状态</div>
           <dl>
-            <dt>身份</dt><dd>${AUTH_ROLE[state.authTab]}</dd>
-            <dt>范围</dt><dd>${state.authTab === "apply" ? "待审核" : "七（1）班 · 数学"}</dd>
-            <dt>状态</dt><dd>${stateLabel}</dd>
-            <dt>会话</dt><dd>${open ? "已就绪" : "未开启"}</dd>
+            <dt>学生</dt><dd>查看个人任务与记录</dd>
+            <dt>教师</dt><dd>查看授权班级与依据</dd>
+            <dt>申领</dt><dd>教师账号须经管理员审核</dd>
           </dl>
-          <i class="rule"></i><span class="foot">智慧学伴 AXIS</span>
+          <i class="rule"></i><span class="foot">登录后读取授权范围</span>
         </div>
 
         <div class="auth-main">
           <div class="auth-main-head">
-            <span class="label"><i></i>授权口令</span>
-            <span class="attempt ${state.authStatus === "denied" ? "hot" : ""}">${state.authStatus === "denied" ? "再来一次" : `第 ${state.attempts + 1} 次`}</span>
+            <span class="label"><i></i>${state.authTab === "apply" ? "教师账号申领" : state.authTab === "login" ? "账号验证" : copy.submit}</span>
+            <span class="attempt ${state.authStatus === "denied" ? "hot" : ""}">${state.authStatus === "sent" ? "等待审核" : state.authStatus === "denied" ? "请检查信息" : state.live ? "安全连接" : "服务离线"}</span>
           </div>
           <h2 id="auth-title" class="auth-title">${copy.title}</h2>
           <p class="auth-lede">${copy.lede}</p>
-          <div class="tabs" role="tablist" aria-label="入口方式">
-            <button class="chip" type="button" role="tab" data-tab="login" aria-pressed="${state.authTab === "login"}">账号口令</button>
-            <button class="chip" type="button" role="tab" data-tab="activate" aria-pressed="${state.authTab === "activate"}">一次性码</button>
-            <button class="chip" type="button" role="tab" data-tab="apply" aria-pressed="${state.authTab === "apply"}">申请账号</button>
+          <div class="tabs role-tabs" role="group" aria-label="账号入口">
+            <button class="chip" type="button" data-role="student" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "student" && state.authTab !== "apply"}">学员</button>
+            <button class="chip" type="button" data-role="teacher" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "teacher" && state.authTab !== "apply"}">教师</button>
+            <button class="chip" type="button" data-auth-mode="apply" ${busy ? "disabled" : ""} aria-pressed="${state.authTab === "apply"}">申领账号</button>
           </div>
+          ${state.authTab === "apply" ? "" : `<div class="tabs auth-tabs" role="group" aria-label="登录方式">
+            <button class="chip" type="button" data-tab="login" ${busy ? "disabled" : ""} aria-pressed="${state.authTab === "login"}">账号口令</button>
+            <button class="chip" type="button" data-tab="activate" ${busy ? "disabled" : ""} aria-pressed="${state.authTab === "activate"}">首次激活</button>
+            <button class="chip" type="button" data-tab="reset" ${busy ? "disabled" : ""} aria-pressed="${state.authTab === "reset"}">重设口令</button>
+          </div>`}
           ${authFields()}
-          <p class="error-line" role="alert">${escapeHtml(state.error)}</p>
-          ${state.authTab === "login" ? keyBar(copy, busy) : `<button class="btn primary wide" type="submit" ${busy ? "disabled" : ""}>${busy ? "核对中…" : copy.submit}</button>`}
+          <p class="error-line ${state.live ? "" : "service-offline"}" role="alert">${escapeHtml(state.error || (!state.live ? service : ""))}</p>
+          ${state.authTab === "login" ? keyBar(copy, locked)
+            : `<label class="field secret-field">${state.authTab === "apply" ? "设置登录口令" : "新口令"}<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" ${locked ? "disabled" : ""} placeholder="至少 8 位"></label>
+              <button class="btn primary wide auth-submit" type="submit" ${busy || !state.live || state.authStatus === "sent" ? "disabled" : ""}>${busy ? "正在核验…" : state.authStatus === "sent" ? "已提交审核" : copy.submit}</button>`}
           <div class="auth-alt">${authLinks()}</div>
           <div class="entry-note">
-            ${state.authTab === "login" ? `<details class="proto-note"><summary>原型账号</summary><p>teacher 进教师工作台，linxia 进学生端，口令随意。一次性码填 000000 看过期，账号或口令填 disabled 看停用。</p></details>` : "<span></span>"}
-            <button class="linkish" type="button" data-action="back-entry">回到开场</button>
+            <span class="entry-note-spacer"></span>
+            <button class="linkish" type="button" data-action="back-entry" ${busy ? "disabled" : ""}>回到开场</button>
           </div>
         </div>
       </div>
@@ -337,13 +357,15 @@ function authCard(open) {
 }
 
 function authLinks() {
-  if (state.authTab !== "login") return `<button class="linkish" type="button" data-tab="login">已有账号，直接登录</button>`;
-  return `<button class="linkish" type="button" data-tab="activate">第一次来？用一次性码激活</button>
-    <button class="linkish" type="button" data-tab="apply">老师还没有账号</button>`;
+  if (state.authTab === "apply") return `<button class="linkish" type="button" data-tab="login" ${state.authStatus === "checking" ? "disabled" : ""}>已有账号，返回登录</button>`;
+  if (state.authTab === "login") {
+    return state.authRole === "student"
+      ? `<span class="auth-link-note">请使用老师创建的账号；首次登录先完成激活。</span>`
+      : `<span class="auth-link-note">教师账号申请通过审核后即可登录。</span>`;
+  }
+  return `<span class="auth-link-note">${state.authTab === "activate" ? "账号由负责教师创建并提供激活码。" : "重设码由负责教师或管理员提供。"}</span>`;
 }
 
-/** 口令条：登录时就是密码输入本身 —— 每敲一个字符落一个白格。
- *  它不是第二个密码框，而是把这个密码框画成档案里的授权键条。 */
 function keyBar(copy, busy) {
   return `<div class="keybar">
       <div class="keybar-cells" aria-hidden="true">
@@ -351,31 +373,38 @@ function keyBar(copy, busy) {
           ? Array.from({ length: Math.min(state.authInput.length, 22) }, () => '<i class="keybar-cell"></i>').join("")
           : `<span class="keybar-ghost">${copy.placeholder}</span>`}
       </div>
-      <input name="password" type="password" aria-label="口令" ${busy ? "disabled" : ""} autocomplete="current-password" />
-      <button type="submit" ${busy ? "disabled" : ""}>${busy ? "核对中" : copy.submit}<span aria-hidden="true">→</span></button>
+      <input name="password" type="password" aria-label="口令" required minlength="8" maxlength="128" ${busy ? "disabled" : ""} autocomplete="current-password" />
+      <button type="submit" ${busy ? "disabled" : ""}>${state.authStatus === "checking" ? "核对中" : copy.submit}<span aria-hidden="true">→</span></button>
     </div>`;
 }
 
 function authFields() {
   const account = escapeHtml(state.authAccount);
+  const disabled = !state.live || state.authStatus === "checking" || state.authStatus === "sent" ? "disabled" : "";
   if (state.authTab === "apply") {
     return `<div class="auth-fields">
-      <label class="field">姓名<input name="name" required autocomplete="name" value="陈宁"></label>
-      <label class="field">学校邮箱<input name="email" type="email" required autocomplete="email" value="chen@school.example"></label>
-      <label class="field">任教课程<input name="course" required value="七年级数学"></label>
+      <label class="field">登录账号<input name="account" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.\\-]+" autocomplete="username" value="${account}" ${disabled} placeholder="3–32 位字母、数字或 . _ -"></label>
+      <label class="field">姓名<input name="name" required minlength="1" maxlength="64" autocomplete="name" ${disabled} placeholder="真实姓名"></label>
     </div>`;
   }
-  if (state.authTab === "activate") {
+  if (state.authTab === "activate" || state.authTab === "reset") {
     return `<div class="auth-fields">
-      <label class="field">账号<input name="account" required autocomplete="username" value="${account || "linxia"}"></label>
-      <label class="field">一次性码<input name="code" required autocomplete="one-time-code" placeholder="6 位码"></label>
-      <label class="field">新密码<input name="password" type="password" required minlength="8" autocomplete="new-password" placeholder="至少 8 位"></label>
+      <label class="field">账号<input name="account" required autocomplete="username" value="${account}" ${disabled} placeholder="教师创建的登录账号"></label>
+      <label class="field">${state.authTab === "activate" ? "教师提供的一次性激活码" : "教师提供的口令重设码"}<input name="code" required minlength="20" maxlength="256" autocomplete="one-time-code" ${disabled} placeholder="粘贴完整的一次性代码"></label>
     </div>`;
   }
-  // 登录：账号在这里，口令在下方那条授权键条里（见 keyBar）
   return `<div class="auth-fields compact">
-    <label class="field">账号<input name="account" required autocomplete="username" value="${account}" placeholder="老师发给你的账号"></label>
+    <label class="field">账号<input name="account" required minlength="1" maxlength="64" autocomplete="username" value="${account}" ${disabled} placeholder="输入已登记的登录账号"></label>
   </div>`;
+}
+
+function renderAdmin() {
+  view.innerHTML = `<main class="admin-boundary" aria-labelledby="admin-title">
+    <p class="eyebrow">智慧学伴 · 管理员会话</p>
+    <h1 id="admin-title">此账号仅用于平台管理</h1>
+    <p>教师审核与账号管理尚未接入当前工作区。为保护权限范围，管理员账号不会进入教师或学生界面。</p>
+    <button class="btn primary" type="button" data-action="logout">安全退出</button>
+  </main>`;
 }
 
 function renderTeacher() {
@@ -391,14 +420,12 @@ function renderTeacher() {
         <div class="brand">智慧学伴</div>
         ${nav("home", "班级学情")}${nav("student", "学生依据")}${nav("materials", "课程与题目")}${nav("reports", "阶段成果")}
         <div class="spacer"></div>
-        <p class="who muted">${escapeHtml(state.who)} · ${sample.className}</p>
+        <p class="who muted">${escapeHtml(state.who)} · ${escapeHtml(state.className || "教师工作区")}</p>
         <button class="nav-btn" data-action="logout">退出</button>
       </aside>
       <main class="main">${page()}</main>
     </div>
-    ${state.drawer ? drawer() : ""}
-    <div class="preview-switch"><button class="btn" data-action="as-student">看学生手机流程</button></div>
-    ${stateMenu()}`;
+    ${state.drawer ? drawer() : ""}`;
 }
 
 function nav(id, label) {
@@ -611,8 +638,7 @@ function renderStudent() {
       <nav class="dock" aria-label="学生导航">
         ${dock("companion", "学伴")}${dock("tasks", "任务")}${dock("mine", "我的学习")}
       </nav>
-    </div>
-    ${stateMenu()}`;
+    </div>`;
 }
 
 function dock(id, label) {
@@ -854,20 +880,47 @@ function stateMenu() {
 
 function bind() {
   view.querySelectorAll("[data-action]:not(form)").forEach((node) => node.addEventListener("click", onAction));
+  view.querySelectorAll('[data-auth-mode="apply"]').forEach((node) => node.addEventListener("click", () => {
+    if (state.authStatus === "checking") return;
+    state.authRole = "teacher";
+    state.authTab = "apply";
+    state.authAccount = "";
+    state.authInput = "";
+    state.authStatus = "ready";
+    state.error = "";
+    render();
+  }));
+  view.querySelectorAll("[data-role]").forEach((node) => node.addEventListener("click", () => {
+    if (state.authStatus === "checking") return;
+    state.authRole = node.dataset.role;
+    state.authTab = "login";
+    state.authAccount = "";
+    state.authInput = "";
+    state.authStatus = "ready";
+    state.error = "";
+    render();
+  }));
   view.querySelectorAll("[data-tab]").forEach((node) => node.addEventListener("click", () => {
     if (state.role === "student") {
       state.studentTab = node.dataset.tab;
       state.studentPage = "home";
     } else {
+      if (state.authStatus === "checking") return;
       state.authTab = node.dataset.tab;
-      // 切到另一个入口方式时，上一个方式的失败状态要一起清掉，
-      // 否则申请页会顶着上一次"码已过期"的红色状态
+      if (state.authTab === "activate") state.authRole = "student";
+      if (state.authTab === "apply") state.authRole = "teacher";
       state.error = "";
       state.authStatus = "ready";
       state.authInput = "";
     }
-    state.error = "";
     render();
+  }));
+  view.querySelectorAll('.auth-fields input[name="account"]').forEach((input) => input.addEventListener("input", () => {
+    state.authAccount = input.value.trim();
+    const label = view.querySelector(".auth-name b");
+    const marker = view.querySelector(".auth-rings .ring:nth-child(2) i");
+    if (label) label.textContent = state.authAccount || "等待身份核验";
+    if (marker) marker.classList.toggle("on", Boolean(state.authAccount));
   }));
   view.querySelectorAll("[data-view]").forEach((node) => node.addEventListener("click", () => {
     state.teacherView = node.dataset.view;
@@ -928,6 +981,16 @@ function bind() {
   }
 }
 
+function finishLogout() {
+  Object.assign(state, {
+    screen: "entry", shifted: false, reveal: 0, authStatus: "ready",
+    authAccount: "", authInput: "", role: null, drawer: false, sheet: null, error: "",
+    railLog: ["等待账号口令", "会话未开启"], railLabel: "入口 · 正式服务已连接", step: 0,
+  });
+  if (scene) scene.setReveal(0);
+  render();
+}
+
 function onAction(event) {
   const action = event.currentTarget.dataset.action;
   if (action === "reveal") {
@@ -935,6 +998,7 @@ function onAction(event) {
     return;
   }
   if (action === "back-entry") {
+    if (state.authStatus === "checking") return;
     state.error = "";
     state.authStatus = "ready";
     state.authInput = "";
@@ -942,13 +1006,13 @@ function onAction(event) {
     return;
   }
   if (action === "logout") {
-    Object.assign(state, {
-      screen: "entry", shifted: false, reveal: 0, authStatus: "ready",
-      authAccount: "", authInput: "", role: null, drawer: false, sheet: null, error: "",
-      railLog: ["等待账号口令", "会话未开启"], railLabel: "入口 · 会话未开启", step: 0,
-    });
-    if (scene) scene.setReveal(0);
-    render();
+    if (state.live) {
+      api.logout().then(() => finishLogout()).catch((error) => {
+        toast(error && error.message ? error.message : "未能结束服务端会话，请重试");
+      });
+    } else {
+      finishLogout();
+    }
     return;
   }
   if (action === "open-drawer") state.drawer = true;
@@ -958,12 +1022,6 @@ function onAction(event) {
     return;
   }
   if (action === "prepare") toast("还差 1 道检验题，备齐前不会发布");
-  if (action === "as-student") {
-    state.role = "student";
-    state.who = "林夏";
-    state.studentPage = "home";
-    state.studentTab = "companion";
-  }
   if (action === "banner") state.banner = event.currentTarget.dataset.banner;
   if (action === "clear-banner") state.banner = "";
   if (action === "export") {
@@ -1068,35 +1126,22 @@ function onSubmit(event) {
   }
 }
 
-// 登录与激活共用同一条口令输入：登录时它同时充当账号，
-// 激活/申请走下方各自的独立字段，所以这里要按 tab 取不同的值。
-function readKeyValue(data) {
-  const key = String(data.get("key") || "").trim();
-  const account = String(data.get("account") || "").trim();
-  const name = String(data.get("name") || "").trim();
-  return { key, account, name };
-}
-
-/** 口令条里的输入就是密码；登录时它同时充当"账号不填时的兜底标识" */
-function readPassword(data) {
-  return String(data.get("password") || data.get("key") || "");
-}
-
-/** 核对通过后的统一收尾：金属化散、切到工作区。 */
 function enterWorkspace(role, displayName, { live, message }) {
-  state.authStatus = "ready";
+  state.authStatus = "checking";
+  state.authInput = "";
   state.role = role;
   state.who = displayName;
   state.step = 3;
   state.live = live;
-  state.railLog = [live ? "已连上正式服务" : "使用虚构样例", "会话已开启"];
-  state.railLabel = live ? "入口 · 已连服务" : "入口 · 虚构样例";
+  state.railLog = ["身份已核验", "正式会话已开启"];
+  state.railLabel = "入口 · 正式会话";
   if (scene) {
     scene.setVerify(0);
     scene.playDissolve(900);
   }
   window.setTimeout(() => {
     state.screen = "app";
+    state.authStatus = "ready";
     state.banner = "";
     toast(message);
     render();
@@ -1104,16 +1149,17 @@ function enterWorkspace(role, displayName, { live, message }) {
       scene.setReveal(0);
       scene.setAssembled();
     }
-    // 进工作区后拉真实数据
     if (live) loadWorkspace();
   }, state.reduce ? 0 : 700);
 }
 
 function failAuth(message) {
   state.authStatus = "denied";
+  state.authInput = "";
   state.error = message;
   state.attempts += 1;
-  state.railLog = [`第 ${state.attempts} 次未通过`, "会话未开启"];
+  state.railLog = ["身份核验未通过", "请检查后重试"];
+  state.railLabel = "入口 · 需要检查";
   state.step = 4;
   if (scene) scene.setDenied(1);
   render();
@@ -1121,81 +1167,72 @@ function failAuth(message) {
 }
 
 function submitAuth(data) {
-  if (state.authStatus === "checking") return;
-  const { key, account, name } = readKeyValue(data);
-  const password = readPassword(data);
-  const code = String(data.get("code") || "");
-  const who = account || key || name;
-  state.authAccount = who;
+  if (state.authStatus === "checking" || state.authStatus === "sent") return;
+  if (!state.live) return failAuth(state.serviceError || "无法连接正式认证服务，本次未创建账号或会话。");
 
+  const account = String(data.get("account") || "").trim();
+  const name = String(data.get("name") || "").trim();
+  const password = String(data.get("password") || "");
+  const code = String(data.get("code") || "").trim();
+  const tab = state.authTab;
+  const role = state.authRole;
+  state.authAccount = account || state.authAccount;
   state.authStatus = "checking";
   state.error = "";
-  state.railLog = ["正在核对账号", "会话未开启"];
-  state.railLabel = "入口 · 核对中";
+  state.railLog = ["正在核验身份", "等待正式服务"];
+  state.railLabel = "入口 · 核验中";
   state.step = 2;
   if (scene) scene.setVerify(1);
   render();
 
-  // 连上后端：走真实登录 / 激活 / 申请
-  if (state.live) {
-    (async () => {
-      try {
-        if (state.authTab === "apply") {
-          await api.post("/auth/teacher-applications", {
-            username: who, display_name: String(data.get("name") || who), password,
-          });
-          state.authStatus = "sent";
-          state.railLog = ["申请已提交", "等待审核"];
-          state.railLabel = "申请 · 待审核";
-          state.step = 3;
-          if (scene) scene.setVerify(0);
-          render();
-          toast("申请已提交，审核通过前不能进入工作台");
-          return;
-        }
-        if (state.authTab === "activate") {
-          await api.post("/auth/activate", { code, password });
-          toast("已激活，正在进入");
-        }
-        const user = await api.login(who, password);
-        enterWorkspace(user.role, user.display_name,
-          { live: true, message: `已进入${user.display_name ? " " + user.display_name : ""}` });
-      } catch (error) {
+  (async () => {
+    try {
+      if (tab === "apply") {
+        const result = await api.applyTeacherAccount({ username: account, display_name: name, password });
+        state.authStatus = "sent";
+        state.error = "";
+        state.railLog = ["账号已建立", "等待管理员审核"];
+        state.railLabel = "教师申领 · 待审核";
+        state.step = 3;
         if (scene) scene.setVerify(0);
-        const message = error && error.message ? error.message : "登录未完成";
-        const hint = error && error.retryable ? `${message}（可重试）` : message;
-        failAuth(hint);
+        render();
+        toast(result.message || "教师账号已提交，审核通过后即可登录");
+        return;
       }
-    })();
-    return;
-  }
-
-  // 没有后端：保留原来的虚构流程，界面上会标注这是样例
-  const fail = failAuth;
-  if (state.authTab === "apply") {
-    state.authStatus = "sent";
-    state.error = "";
-    state.railLog = ["申请已提交", "等待审核"];
-    state.railLabel = "申请 · 待审核";
-    state.step = 3;
-    toast("申请已提交，审核通过前不能进入工作台");
-    render();
-    return;
-  }
-  if (state.authTab === "activate" && (code === "expired" || code === "000000")) {
-    return fail("这个一次性码已过期，请向老师再要一个。");
-  }
-  if (password === "disabled" || who === "disabled" || key === "disabled") {
-    state.step = 4;
-    return fail("账号已停用，会话也已失效。");
-  }
-  window.setTimeout(() => {
-    const role = who.startsWith("lin") ? "student" : "teacher";
-    enterWorkspace(role, role === "student" ? "林夏" : "陈宁", {
-      live: false,
-      message: role === "student" ? "进入林夏的学习" : "进入七（1）班",
-    });
-  }, state.reduce ? 0 : 900);
+      if (tab === "activate" || tab === "reset") {
+        const activating = tab === "activate";
+        if (activating) await api.activateAccount(code, password);
+        else await api.resetPassword(code, password);
+        state.authTab = "login";
+        state.authRole = activating ? "student" : role;
+        state.authAccount = account;
+        state.authStatus = "ready";
+        state.authInput = "";
+        state.error = "";
+        state.step = 0;
+        state.railLog = [activating ? "账号已激活" : "口令已重设", "请使用新口令登录"];
+        state.railLabel = "入口 · 等待登录";
+        if (scene) scene.setVerify(0);
+        render();
+        toast(activating ? "账号已激活，请使用新口令登录" : "口令已重设，请使用新口令登录");
+        return;
+      }
+      let user;
+      try {
+        user = await api.login(account, password, role);
+      } catch (error) {
+        if (role !== "teacher" || error.code !== "role_mismatch") throw error;
+        user = await api.login(account, password, "admin");
+      }
+      enterWorkspace(user.role, user.display_name,
+        { live: true, message: `已验证${AUTH_ROLE_LABEL[user.role] || "账号"}身份` });
+    } catch (error) {
+      if (scene) scene.setVerify(0);
+      const message = error && error.message ? error.message : "身份核验未完成";
+      const hint = error && error.retryable ? `${message}，请稍后重试` : message;
+      failAuth(hint);
+    }
+  })();
 }
 
 // ── 连真后端：把正式数据拉进来，映射成原型能渲染的形状 ────────────────
@@ -1203,12 +1240,12 @@ function submitAuth(data) {
 // 免得渲染函数里到处判断"这是真数据还是样例"。
 
 async function loadWorkspace() {
-  if (!state.live) return;
+  if (!state.live || state.role === "admin") return;
   state.loading = true;
   state.liveError = "";
   render();
   try {
-    if (state.role === "teacher") {
+    if (state.role === "teacher" || state.role === "admin") {
       await loadTeacher();
     } else {
       await loadStudent();
@@ -1245,37 +1282,29 @@ async function loadTeacher() {
   state.liveGoals = goalList;
   const goal = goalList[0];
 
-  // 每位学生：先看有没有任务，再看有没有已评分成绩
+  // 任务只读一次；没有分配任务的新成员仍保留在班级列表中。
+  const tasks = goal ? await api.myTasks(goal.id).catch(() => []) : [];
   const students = [];
   for (const member of members) {
-    const entry = {
+    students.push({
       id: member.user_id,
       name: member.display_name || member.username,
       status: member.status === "active" ? "在班" : "未激活",
       note: "",
       mastery: null,
       evidence: "",
-      task: null,
+      task: tasks.find((item) => item.student_id === member.user_id) || null,
       attempt: null,
-    };
-    try {
-      const tasks = goal ? await api.myTasks(goal.id).catch(() => []) : [];
-      const task = tasks.find((item) => item.student_id === member.user_id);
-      if (task) entry.task = task;
-    } catch {
-      /* 单个学生读不到不影响整体 */
-    }
-    students.push(entry);
+    });
   }
 
-  // 教师用自己的会话读不到学生任务，改从目标证据里取成绩
+  // 读取已授权目标的全部依据，再按学生归类，避免向未参与目标的新成员发起无效查询。
   if (goal && students.length) {
-    for (const entry of students) {
-      try {
-        const evidence = await api.goalEvidence(goal.id, entry.id);
-        // 后端返回 { items: [...] }，每条记录带 score_units / max_score_units
-        const items = Array.isArray(evidence) ? evidence : (evidence.items || []);
-        const scored = items.filter((item) => typeof item.score_units === "number" && item.max_score_units);
+    try {
+      const evidence = await api.goalEvidence(goal.id);
+      const items = Array.isArray(evidence) ? evidence : (evidence.items || []);
+      for (const entry of students) {
+        const scored = items.filter((item) => item.student_id === entry.id && typeof item.score_units === "number" && item.max_score_units);
         if (scored.length) {
           const earned = scored.reduce((sum, item) => sum + item.score_units, 0);
           const possible = scored.reduce((sum, item) => sum + item.max_score_units, 0);
@@ -1291,7 +1320,9 @@ async function loadTeacher() {
           entry.note = "还没有本轮作答记录。";
           entry.evidence = "记录不足以判断，不显示 0%。";
         }
-      } catch {
+      }
+    } catch {
+      for (const entry of students) {
         entry.note = "读取依据时出错，稍后重试。";
       }
     }
@@ -1616,7 +1647,7 @@ document.addEventListener("pointercancel", () => { drag = null; });
 
 document.addEventListener("wheel", (event) => {
   if (state.screen !== "entry") return;
-  if (event.target.closest(".auth-card")) return;
+  if (event.target.closest(".auth-card") || (innerWidth <= 900 && state.shifted)) return;
   event.preventDefault();
   if (state.reduce) return;
   // 一格滚轮约 100~120px。除以 1100 让大约七八格才能完全展开，
@@ -1626,10 +1657,11 @@ document.addEventListener("wheel", (event) => {
 
 let touchY = null;
 document.addEventListener("touchstart", (event) => {
-  if (state.screen === "entry") touchY = event.touches[0].clientY;
+  if (state.screen === "entry" && !event.target.closest(".auth-card")) touchY = event.touches[0].clientY;
+  else touchY = null;
 }, { passive: true });
 document.addEventListener("touchmove", (event) => {
-  if (touchY === null || state.screen !== "entry" || state.reduce) return;
+  if (touchY === null || state.screen !== "entry" || state.reduce || event.target.closest(".auth-card")) return;
   const next = event.touches[0].clientY;
   setReveal(state.reveal + (touchY - next) / 420);
   touchY = next;
@@ -1668,6 +1700,15 @@ setInterval(() => {
 
 tickClock();
 setInterval(tickClock, 1000);
+setInterval(() => {
+  if (state.screen !== "entry" || state.reduce) return;
+  state.formulaIndex = (state.formulaIndex + 1) % AUTH_FORMULAS.length;
+  const reel = view.querySelector(".equation-reel");
+  if (!reel) return;
+  const formula = AUTH_FORMULAS[state.formulaIndex];
+  reel.textContent = formula;
+  reel.dataset.equation = formula;
+}, 2600);
 // 减少动态：不做出场动效，直接停在"已展开、可直接登录"的状态。
 // 注意 state.reveal 也要一起改——只改 3D 场景的话，DOM 面板仍然是隐藏的。
 if (state.reduce) state.reveal = 1;
@@ -1684,8 +1725,9 @@ if (state.live) {
       { live: true, message: `已进入${user.display_name ? " " + user.display_name : ""}` });
   });
 } else {
-  state.railLog = ["未连上服务，用虚构样例", "会话未开启"];
-  state.railLabel = "入口 · 虚构样例";
+  state.serviceError = (window.api && window.api.state.lastError) || "正式认证服务未连接，登录与申领暂不可用";
+  state.railLog = ["正式服务未连接", "登录暂不可用"];
+  state.railLabel = "入口 · 服务未连接";
 }
 mountScene();
 fitCanvas();

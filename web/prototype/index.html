@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>智慧学伴 · 可点击原型</title>
+  <title>智慧学伴 AXIS · 学习证据系统</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/prototype/styles.css">
 </head>
@@ -15,12 +15,12 @@
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script type="module">
-    // 液态金属场景先就位，再把入口接上；两者都是原生 ES 模块，不需要构建
+    // 玻璃场景先就位，再把正式服务连接状态交给入口。
     import { createScene } from "/prototype/scene.js";
     import { api } from "/prototype/api.js";
     window.createScene = createScene;
     window.api = api;
-    // 先探一次后端：连上就走真实数据，连不上就退回虚构样例并明确标注
+    // 正式服务不可用时暂停认证，不创建本地虚构会话。
     await api.probe();
     await import("/prototype/app.js");
   </script>

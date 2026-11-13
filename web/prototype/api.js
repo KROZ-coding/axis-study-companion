@@ -1,10 +1,5 @@
-// 原型用的接口层。
-//
-// 原型有两种运行方式：
-//   1. 连真后端（/api/v1/*）—— 登录、班级、任务、答题、评分都用真实数据；
-//   2. 纯静态打开（没有后端）—— 退回虚构样例，并在界面上明确标注。
-//
-// 判断方式：先探一次 /health。返回 mode: platform 才走真实链路。
+// 前端统一通过该模块访问正式 API；无法连接时会明确禁止认证操作。
+// 启动时探测 /health，返回 mode: platform 才启用账号与业务请求。
 
 const API_BASE = "/api/v1";
 
@@ -88,16 +83,23 @@ const put = (path, body, options = {}) => request("PUT", path, { ...options, bod
 async function probe() {
   try {
     const response = await fetch("/health", { credentials: "same-origin" });
-    if (!response.ok) return { live: false, reason: `health ${response.status}` };
+    if (!response.ok) {
+      state.live = false;
+      state.mode = "sample";
+      state.lastError = `正式服务暂不可用（${response.status}）`;
+      return { live: false, reason: state.lastError };
+    }
     const data = await response.json();
     const live = data && data.mode === "platform";
     state.live = live;
     state.mode = live ? "live" : "sample";
-    return { live, health: data, reason: live ? "" : `mode=${data && data.mode}` };
-  } catch (error) {
+    state.lastError = live ? "" : "当前服务未启用正式账号认证";
+    return { live, health: data, reason: state.lastError };
+  } catch {
     state.live = false;
     state.mode = "sample";
-    return { live: false, reason: String(error && error.message) };
+    state.lastError = "无法连接正式服务，请检查网络或稍后重试";
+    return { live: false, reason: state.lastError };
   }
 }
 
@@ -130,12 +132,12 @@ async function login(username, password, role) {
   return data.user;
 }
 
+const applyTeacherAccount = (payload) => post("/auth/teacher-applications", payload, { expect: 202 });
+const activateAccount = (code, password) => post("/auth/activate", { code, password }, { expect: 204 });
+const resetPassword = (code, password) => post("/auth/password-reset", { code, password }, { expect: 204 });
+
 async function logout() {
-  try {
-    await post("/auth/logout", undefined);
-  } catch {
-    /* 退出失败不影响前端回到入口 */
-  }
+  await post("/auth/logout", undefined, { expect: 204 });
   state.user = null;
 }
 
@@ -169,8 +171,8 @@ async function goals(classId) {
 }
 
 async function goalEvidence(goalId, studentId) {
-  const data = await get(`/goals/${goalId}/evidence?student_id=${encodeURIComponent(studentId)}`);
-  return data;
+  const query = studentId ? `?student_id=${encodeURIComponent(studentId)}` : "";
+  return get(`/goals/${goalId}/evidence${query}`);
 }
 
 /** 学生端：自己的任务列表。 */
@@ -265,6 +267,7 @@ const exportUrl = (reportId, format) =>
 
 export const api = {
   state, probe, currentUser, login, logout,
+  applyTeacherAccount, activateAccount, resetPassword,
   teacherClasses, classMembers, goals, goalEvidence,
   myTasks, task, acquireLease, renewLease, saveDraft, submitTask,
   startDiagnostic, submitDiagnostic, answerPolicy, helpEvent,

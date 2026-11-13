@@ -105,39 +105,56 @@ button { cursor: pointer; }
 }
 .brand-rule { margin-top: 14px; width: 232px; height: 2px; background: var(--ink); }
 
-/* 右上：时钟与阶段指示 */
-.chrono { right: 64px; top: 56px; display: flex; flex-direction: column; align-items: flex-end; }
-.chrono-steps { display: flex; gap: 16px; height: 12px; align-items: center; margin-right: 4px; }
-.step-node { position: relative; width: 7px; height: 12px; }
-.step-node i {
-  position: absolute; left: 0; top: 2.5px; width: 7px; height: 7px;
-  border-radius: 50%; background: var(--accent); opacity: 0.32;
+/* 右上：钟面与轻量牛顿摆。摆锤是阶段圆点的物理替代，不承担状态灯职责。 */
+.chrono { z-index: 2; right: 64px; top: 34px; display: flex; flex-direction: column; align-items: flex-end; }
+.chrono-cradle { position: relative; width: 118px; height: 66px; margin-right: 4px; }
+.chrono-cradle::before {
+  content: ""; position: absolute; left: 4px; right: 4px; top: 3px; height: 3px;
+  background: linear-gradient(90deg, rgba(20,52,63,.1), rgba(20,52,63,.56) 18%, rgba(20,52,63,.56) 82%, rgba(20,52,63,.1));
 }
-.step-node.on { width: 34px; }
-.step-node.on i { opacity: 1; }
-.step-node.on::after {
-  content: ""; position: absolute; left: 7px; right: 12px; top: 5.25px;
-  height: 1.5px; background: var(--accent);
+.chrono-cradle .cradle-frame,
+.chrono-cradle .cradle-strings,
+.chrono-cradle .cradle-balls { position: absolute; inset: 0; display: flex; justify-content: center; gap: 4px; }
+.chrono-cradle .cradle-frame { z-index: 1; }
+.chrono-cradle .cradle-frame i { width: 19px; height: 4px; border-radius: 0 0 3px 3px; background: rgba(20,52,63,.48); }
+.chrono-cradle .cradle-strings { z-index: 2; }
+.chrono-cradle .cradle-strings i {
+  width: 19px; height: 48px; margin-top: 4px; position: relative; transform-origin: 50% 0;
+  border-inline: 1px solid rgba(20,52,63,.24);
 }
-.step-node.on::before {
-  content: ""; position: absolute; right: 0; top: 0; width: 12px; height: 12px;
-  border-radius: 50%; border: 1.5px solid var(--accent);
+.chrono-cradle .cradle-balls { z-index: 3; }
+.chrono-cradle .cradle-balls i {
+  width: 19px; height: 19px; margin-top: 46px; border-radius: 50%;
+  background: linear-gradient(135deg, rgba(255,255,255,.95), rgba(111,190,211,.72) 48%, rgba(31,138,168,.88));
+  border: 1px solid rgba(31,138,168,.56); box-shadow: inset 2px 1px 3px rgba(255,255,255,.84), 0 2px 4px rgba(20,52,63,.14);
+  transform-origin: 50% -43px;
 }
-.chrono-time { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; }
-.chrono-hm {
-  font-family: var(--latin); font-size: 88px; font-weight: 200;
-  letter-spacing: -0.02em; line-height: 1;
+.chrono-cradle .cradle-strings i:first-child,
+.chrono-cradle .cradle-balls i:first-child { animation: cradle-left 2.1s ease-in-out infinite; }
+.chrono-cradle .cradle-strings i:last-child,
+.chrono-cradle .cradle-balls i:last-child { animation: cradle-right 2.1s ease-in-out infinite; }
+@keyframes cradle-left {
+  0%, 100% { transform: rotate(32deg); }
+  24%, 78% { transform: rotate(0); }
+  51% { transform: rotate(-3deg); }
 }
-.chrono-sec { font-family: var(--mono); font-size: 16px; color: var(--mute); margin-top: 12px; }
-.chrono-date {
-  margin-top: 10px; font-family: var(--latin); font-size: 13px; font-weight: 500;
-  letter-spacing: 0.26em; color: var(--ink-soft);
+@keyframes cradle-right {
+  0%, 100% { transform: rotate(0); }
+  24% { transform: rotate(-3deg); }
+  51% { transform: rotate(-32deg); }
+  78% { transform: rotate(-3deg); }
 }
+.chrono-time { display: flex; align-items: flex-start; gap: 8px; margin-top: 2px; }
+.chrono-hm { font-family: var(--latin); font-size: 76px; font-weight: 200; line-height: 1; }
+.chrono-sec { font-family: var(--mono); font-size: 15px; color: var(--mute); margin-top: 10px; }
+.chrono-date { margin-top: 7px; font-family: var(--latin); font-size: 12px; font-weight: 500; color: var(--ink-soft); }
 .chrono-term {
-  margin-top: 12px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em;
+  margin-top: 8px; font-family: var(--cjk); font-size: 11px;
   color: var(--mute); display: flex; align-items: center; gap: 8px;
 }
-.chrono-term i { width: 6px; height: 6px; background: var(--ink); display: block; }
+.chrono-term i { width: 7px; height: 7px; background: var(--bad); display: block; flex: none; }
+.chrono-term i.online { background: var(--ok); }
+.chrono-term i.offline { background: var(--bad); }
 
 /* 左侧竖轴：刻度、光标、微文案、尝试记录、按键提示 */
 .rail { left: 0; top: 0; width: 470px; height: 1080px; }
@@ -159,33 +176,35 @@ button { cursor: pointer; }
 .rail-dash { left: 44px; width: 14px; height: 3px; background: var(--ink); }
 .rail-chip {
   background: var(--ink); color: #f2f7fa;
-  font-family: var(--latin); font-size: 7.5px; font-weight: 600;
-  letter-spacing: 0.06em; padding: 2px 6px; line-height: 1.1; white-space: nowrap;
+  font-family: var(--cjk); font-size: calc(11px + var(--reveal) * 6px); font-weight: 650;
+  padding: 3px 8px; line-height: 1.35; white-space: nowrap;
+  transition: font-size 100ms linear, padding 100ms linear;
 }
 .rail-micro {
-  font-family: var(--mono); font-size: 7.5px; line-height: 1.65;
-  color: var(--mute); left: 58px; width: 196px;
+  font-family: var(--cjk); font-size: calc(12px + var(--reveal) * 5px); line-height: 1.8;
+  color: var(--ink-soft); left: 44px; width: 236px; margin: 28px 0 0;
+  transform-origin: left top; transition: font-size 100ms linear;
 }
-.rail-log { left: 44px; display: flex; flex-direction: column; gap: 5px; }
+.rail-log { left: 44px; margin-top: 16px; display: flex; flex-direction: column; gap: 7px; }
 .rail-log .row {
-  display: flex; align-items: center; gap: 6px; white-space: nowrap;
-  font-family: var(--mono); font-size: 8.5px; color: var(--mute); letter-spacing: 0.02em;
+  display: flex; align-items: center; gap: 8px; white-space: nowrap;
+  font-family: var(--cjk); font-size: calc(12px + var(--reveal) * 3px); color: var(--ink-soft);
+  transition: font-size 100ms linear;
 }
-.rail-log .row i { width: 2px; height: 2px; background: var(--ink); flex: none; }
+.rail-log .row i { width: 4px; height: 4px; background: var(--ink); flex: none; }
 .rail-hints {
   left: 44px; width: 340px; display: flex; flex-wrap: wrap; gap: 10px 14px;
-  font-family: var(--latin); font-size: 8.5px; font-weight: 500; letter-spacing: 0.08em;
-  color: var(--mute);
+  font-family: var(--latin); font-size: 11px; font-weight: 500; color: var(--ink-soft);
 }
 .rail-hints span { display: inline-flex; align-items: center; gap: 5px; }
 .rail-hints b {
   font-family: var(--mono); font-weight: 700; color: var(--ink);
-  border: 1px solid var(--ink); padding: 1px 4px; font-size: 8px;
+  border: 1px solid var(--ink); padding: 3px 5px; font-size: 10px;
 }
 .rail-foot { left: 0; width: 46px; height: 14px; background: var(--ink); }
 .rail-label {
-  font-family: var(--cjk); font-size: 16px; font-weight: 700;
-  letter-spacing: 0.04em; white-space: nowrap;
+  font-family: var(--cjk); font-size: calc(16px + var(--reveal) * 7px); font-weight: 700;
+  white-space: nowrap; transition: font-size 100ms linear;
 }
 
 /* 中央：标题与主张。放在下方，让出上半部给玻璃。
@@ -268,8 +287,8 @@ button { cursor: pointer; }
 
 /* ───────────────────── 入口右侧：档案板 ───────────────────── */
 .auth-card {
-  position: absolute; right: 64px; top: 104px;
-  width: 680px; height: 872px;
+  position: absolute; z-index: 3; right: 64px; top: 250px;
+  width: 680px; height: 830px;
   pointer-events: none;
   padding: 0;
   background: none; border: 0; box-shadow: none;
@@ -323,7 +342,7 @@ button { cursor: pointer; }
 .auth-bev.b { left: 0; right: 0; bottom: 0; height: 1px; background: rgba(20, 52, 63, 0.12); }
 .auth-bev.r { right: 0; top: 0; bottom: 0; width: 1px; background: rgba(20, 52, 63, 0.10); }
 
-.auth-inner { position: relative; }
+.auth-inner { position: relative; height: 100%; }
 
 /* 板上的所有子块都按设计单位定位 */
 .auth-card > .auth-inner > * { position: absolute; }
@@ -349,29 +368,41 @@ button { cursor: pointer; }
   letter-spacing: 0.1em; padding: 3px 8px;
 }
 
-/* 证件照位：虚构人物剪影 + 斜纹 */
+/* 数学公式卷轴：留出档案照片位，但展示的是克制的公式故障信号。 */
 .auth-photo {
-  position: absolute; left: 30px; top: 70px; width: 232px; height: 282px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(20, 52, 63, 0.08);
-  box-shadow: 0 10px 28px -6px rgba(18, 62, 82, 0.20);
+  position: absolute; left: 30px; top: 74px; width: 232px; height: 180px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(20, 52, 63, 0.10);
+  box-shadow: 0 10px 28px -6px rgba(18, 62, 82, 0.16);
 }
 .auth-photo .film {
   position: absolute; inset: 9px; overflow: hidden;
-  background: linear-gradient(180deg, #f0f5f8, #dbe9f0);
+  background: linear-gradient(155deg, rgba(236,246,250,.95), rgba(209,232,241,.84));
 }
-.auth-photo .sil { position: absolute; inset: 0; width: 100%; height: 100%; }
-.auth-photo .classified {
-  position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
-  background: var(--accent); color: #f7fcfe;
-  font-family: var(--latin); font-size: 9px; font-weight: 700;
-  letter-spacing: 0.14em; padding: 3px 7px; white-space: nowrap;
+.formula-film::before, .formula-film::after {
+  content: ""; position: absolute; left: 13px; right: 13px; height: 1px; background: rgba(20,52,63,.20);
+}
+.formula-film::before { top: 42px; }
+.formula-film::after { bottom: 38px; }
+.formula-index, .formula-coord {
+  position: absolute; left: 14px; font-family: var(--mono); font-size: 9px; color: var(--ink-soft);
+}
+.formula-index { top: 18px; }
+.formula-coord { bottom: 16px; right: 14px; left: auto; }
+.formula-rule {
+  position: absolute; left: 0; top: 50%; width: 100%; height: 1px;
+  background: rgba(31,138,168,.35); transform: rotate(-18deg);
+}
+.equation-reel {
+  position: absolute; left: 14px; right: 10px; top: 50%; transform: translateY(-50%);
+  color: var(--ink); font-family: "Cambria Math", "Times New Roman", serif;
+  font-size: 17px; line-height: 1.4; overflow-wrap: anywhere;
+  animation: formula-signal 4.8s steps(1, end) infinite;
 }
 .auth-photo .badge {
   position: absolute; left: -8px; top: -8px; width: 30px; height: 30px;
   background: var(--ink); display: grid; place-items: center;
-  color: #f2f7fa; font-family: var(--latin); font-size: 11px; font-weight: 700;
-  letter-spacing: 0.04em;
+  color: #f2f7fa; font-family: "Cambria Math", "Times New Roman", serif; font-size: 17px; font-weight: 600;
 }
 .auth-photo .tick { position: absolute; width: 16px; height: 16px; }
 .auth-photo .tick::before, .auth-photo .tick::after {
@@ -381,37 +412,36 @@ button { cursor: pointer; }
 .auth-photo .tick::after { top: 7.5px; left: 0; height: 1px; width: 16px; }
 
 /* 身份区：职别标签 + 名字条 */
-.auth-id { position: absolute; left: 286px; top: 84px; right: 0; }
-.auth-rank { display: flex; gap: 10px; align-items: center; }
+.auth-id { position: absolute; left: 286px; top: 74px; right: 24px; }
+.auth-rank { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .auth-role {
   background: var(--ink); color: #f2f7fa;
-  font-family: var(--cjk); font-size: 15px; font-weight: 500;
-  letter-spacing: 0.14em; padding: 6px 11px;
+  font-family: var(--cjk); font-size: 15px; font-weight: 600;
+  letter-spacing: 0; padding: 7px 11px;
 }
 .auth-state {
-  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em;
-  color: var(--mute); border: 1px solid var(--faint); padding: 3px 6px;
+  font-family: var(--cjk); font-size: 11px;
+  color: var(--ink-soft); border: 1px solid var(--faint); padding: 4px 7px;
 }
 .auth-state.alert { color: var(--warn); border-color: var(--warn); }
 .auth-state.ok { color: var(--ok); border-color: var(--ok); }
 .auth-name {
-  margin-top: 10px; height: 74px;
-  display: inline-flex; align-items: center;
-  background: var(--ink); padding: 0 30px 0 22px;
-  min-width: 250px; max-width: 420px;
+  margin-top: 12px; min-height: 64px;
+  display: inline-flex; align-items: center; width: 100%; max-width: 360px;
+  background: var(--ink); padding: 10px 14px;
 }
 .auth-name b {
-  color: #f2f7fa; font-family: var(--cjk); font-size: 40px; font-weight: 700;
-  letter-spacing: 0.06em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: #f2f7fa; font-family: var(--cjk); font-size: 22px; font-weight: 650;
+  line-height: 1.3; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .auth-file {
-  position: relative; margin-top: 12px; width: 348px; height: 82px;
+  position: relative; margin-top: 10px; width: 100%; max-width: 360px; min-height: 70px;
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(20, 52, 63, 0.06);
-  display: flex; align-items: center; gap: 14px; padding-left: 12px;
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
 }
 .auth-file .stamp {
-  width: 90px; height: 58px; flex: none;
+  width: 64px; height: 48px; flex: none;
   background: var(--ink); color: #f2f7fa;
   display: grid; place-items: center;
   font-family: var(--latin); font-size: 22px; font-weight: 700; letter-spacing: 0.10em;
@@ -425,7 +455,7 @@ button { cursor: pointer; }
 .auth-file .mono { font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
 
 /* 状态圆点：大写锁定 / 已输入 / 身份 */
-.auth-rings { position: absolute; left: 38px; top: 438px; display: flex; gap: 15px; }
+.auth-rings { position: absolute; left: 38px; top: 502px; display: flex; gap: 15px; }
 .auth-rings .ring {
   display: flex; flex-direction: column; align-items: center; gap: 5px;
   font-family: var(--latin); font-size: 8.5px; letter-spacing: 0.08em; color: var(--mute);
@@ -438,64 +468,66 @@ button { cursor: pointer; }
 
 /* 资料表 */
 .auth-profile {
-  position: absolute; right: 30px; top: 328px; width: 314px; height: 158px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 6px 18px -6px rgba(18, 62, 82, 0.16);
+  display: none;
+  position: absolute; left: 30px; top: 290px; width: 232px; height: 114px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(20,52,63,.08);
 }
 .auth-profile .ph {
-  margin: 10px 10px 0; background: var(--ink); color: #f2f7fa;
-  font-family: var(--latin); font-size: 10px; font-weight: 700;
-  letter-spacing: 0.1em; padding: 3px 6px;
+  margin: 8px 8px 0; background: var(--ink); color: #f2f7fa;
+  font-family: var(--cjk); font-size: 11px; font-weight: 650;
+  padding: 4px 7px;
 }
 .auth-profile dl {
-  margin: 10px 14px 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px;
+  margin: 8px 10px 0; display: grid; grid-template-columns: auto 1fr; gap: 5px 10px;
 }
 .auth-profile dt {
-  font-family: var(--cjk); font-size: 12px; font-weight: 500; color: var(--mute);
+  font-family: var(--cjk); font-size: 11px; font-weight: 500; color: var(--ink-soft);
 }
 .auth-profile dd {
-  margin: 0; font-family: var(--mono); font-size: 12.5px; font-weight: 500;
+  margin: 0; font-family: var(--cjk); font-size: 11px; font-weight: 500;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  font-variant-numeric: tabular-nums;
 }
-.auth-profile .rule { position: absolute; left: 14px; right: 14px; bottom: 28px; height: 1.5px; background: var(--ink); }
-.auth-profile .foot {
-  position: absolute; right: 14px; bottom: 10px;
-  font-family: var(--latin); font-size: 8.5px; color: var(--mute); letter-spacing: 0.1em;
-}
+.auth-profile .rule, .auth-profile .foot { display: none; }
 
-/* 授权口令区 */
-.auth-main { position: absolute; left: 30px; top: 486px; width: 620px; }
-.auth-title {
-  font-family: var(--cjk); font-size: 21px; font-weight: 700;
-  letter-spacing: 0.04em; margin: 0 0 6px;
+/* 认证区独立滚动，长表单与错误提示始终留在档案板内。 */
+.auth-main {
+  position: absolute; left: 30px; top: 292px; bottom: 24px; width: 620px;
+  overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; padding: 3px 6px 3px 0;
 }
+.auth-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.auth-fields.compact { grid-template-columns: 1fr; }
+.auth-title { font-family: var(--cjk); font-size: 20px; font-weight: 700; margin: 0 0 5px; }
 .auth-main-head {
   display: flex; justify-content: space-between; align-items: center;
   margin-bottom: 8px;
 }
 .auth-main-head .label {
-  display: inline-flex; align-items: center; gap: 9px;
-  font-family: var(--cjk); font-size: 11.5px; font-weight: 700; letter-spacing: 0.18em;
-  color: var(--ink-soft);
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--cjk); font-size: 12px; font-weight: 700; color: var(--ink-soft);
 }
-.auth-main-head .label i { width: 14px; height: 4px; background: var(--ink); }
-.auth-main-head .attempt {
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; color: var(--mute);
-}
+.auth-main-head .label i { width: 12px; height: 4px; background: var(--ink); }
+.auth-main-head .attempt { font-family: var(--cjk); font-size: 10px; color: var(--mute); }
 .auth-main-head .attempt.hot { color: var(--warn); }
-
-/* tab 行：保持 chip 的可点面积与语义 */
-.tabs {
-  display: flex; gap: 6px; margin: 0 0 10px;
+.tabs { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
+.role-tabs { margin-top: 12px; margin-bottom: 8px; }
+.auth-tabs { margin-bottom: 10px; }
+.auth-link-note { min-height: 30px; display: inline-flex; align-items: center; font-family: var(--cjk); font-size: 14px; line-height: 1.5; color: var(--ink-soft); }
+.error-line {
+  min-height: 1.35em; margin: 6px 0; font-family: var(--cjk); font-size: 12px; line-height: 1.5;
+  color: var(--bad); overflow-wrap: anywhere;
 }
+.error-line.service-offline { color: var(--ink-soft); }
+.auth-submit { width: 100%; margin-top: 0; }
+.auth-main .auth-alt { margin-top: 6px; }
+.auth-main .entry-note { margin-top: 4px; }
 .chip, .btn, .nav-btn, .icon-btn {
   border: 1px solid var(--line); background: rgba(255,255,255,.72); border-radius: 0;
   min-height: 44px; padding: 8px 14px;
 }
 .chip {
-  font-family: var(--cjk); font-size: 11.5px; letter-spacing: 0.06em;
-  padding: 4px 10px; min-height: 30px; background: transparent;
+  font-family: var(--cjk); font-size: 14px;
+  padding: 7px 11px; min-height: 42px; background: rgba(255,255,255,.42);
   border-color: var(--faint); color: var(--ink-soft);
 }
 .chip[aria-pressed="true"] {
@@ -507,11 +539,12 @@ button { cursor: pointer; }
 }
 
 /* 表单：扁平的、像填表，不是卡片输入框 */
-.field { display: grid; gap: 4px; margin: 0 0 7px; font-family: var(--cjk); font-size: 10.5px; color: var(--ink-soft); }
+.field { display: grid; gap: 5px; margin: 0 0 8px; font-family: var(--cjk); font-size: 14px; color: var(--ink-soft); min-width: 0; }
 .field input, .field textarea, .field select {
   width: 100%; border: 1px solid var(--faint); border-radius: 0; background: rgba(255, 255, 255, 0.92);
-  padding: 6px 10px; min-height: 34px; font-family: var(--cjk); font-size: 12.5px; color: var(--ink);
+  padding: 8px 10px; min-height: 46px; font-family: var(--cjk); font-size: 16px; color: var(--ink);
 }
+.field input:disabled { color: var(--mute); background: rgba(230,239,243,.72); cursor: not-allowed; }
 .field input:focus, .field textarea:focus, .field select:focus {
   outline: none; border-color: var(--cyan-deep); box-shadow: inset 0 -2px 0 var(--cyan-deep);
 }
@@ -526,12 +559,12 @@ button { cursor: pointer; }
 .keybar-cells { display: flex; flex: 1; align-items: center; padding: 0 10px; gap: 3px; overflow: hidden; }
 .keybar-cell { width: 10px; height: 22px; background: var(--ink); flex: none; }
 .keybar-ghost {
-  font-family: var(--cjk); font-size: 12px; letter-spacing: 0.10em; color: var(--mute);
+  font-family: var(--cjk); font-size: 14px; letter-spacing: 0.06em; color: var(--ink-soft);
 }
 .keybar-extra { font-family: var(--mono); font-size: 10px; color: var(--mute); margin-left: 6px; }
 .keybar button {
   flex: none; border: 0; background: var(--ink); color: #f2f7fa;
-  font-family: var(--cjk); font-size: 12px; font-weight: 600; letter-spacing: 0.14em;
+  font-family: var(--cjk); font-size: 14px; font-weight: 600; letter-spacing: 0.08em;
   padding: 0 22px; display: inline-flex; align-items: center; gap: 7px; min-height: 44px;
 }
 .keybar button:hover { background: var(--cyan-deep); }
@@ -561,6 +594,12 @@ button { cursor: pointer; }
 .proto-note summary { cursor: pointer; min-height: 28px; display: inline-flex; align-items: center; }
 .proto-note p { margin: 4px 0 0; max-width: 26em; line-height: 1.6; }
 .auth-card.denied { animation: shake 0.42s ease; }
+@keyframes formula-signal {
+  0%, 45%, 49%, 100% { opacity: 1; transform: translateY(-50%); text-shadow: none; }
+  46% { opacity: .28; transform: translate(2px, -50%); text-shadow: -2px 0 rgba(31,138,168,.5), 2px 0 rgba(141,45,58,.2); }
+  47% { opacity: .92; transform: translate(-1px, -50%); }
+  48% { opacity: .5; transform: translate(1px, -50%); }
+}
 @keyframes shake {
   20% { transform: translateX(-6px); }
   40% { transform: translateX(5px); }
@@ -582,10 +621,17 @@ button { cursor: pointer; }
 }
 .proto-note p, .auth-lede { line-height: 1.7; }
 .auth-lede {
-  font-family: var(--cjk); font-size: 11.5px; color: var(--ink-soft);
+  font-family: var(--cjk); font-size: 14px; color: var(--ink-soft);
   margin: 0 0 10px; display: block;
 }
 
+.admin-boundary {
+  min-height: 100vh; display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+  width: min(720px, calc(100% - 48px)); margin-inline: auto;
+}
+.admin-boundary .eyebrow { color: var(--ink-soft); font-size: 13px; }
+.admin-boundary h1 { font-family: var(--cjk); font-size: 34px; line-height: 1.3; }
+.admin-boundary p:not(.eyebrow) { max-width: 38em; color: var(--ink-soft); font-size: 16px; line-height: 1.8; }
 .app {
   min-height: 100vh; display: grid; grid-template-columns: 228px 1fr;
   position: relative; z-index: 1;
@@ -693,6 +739,15 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 
+@media (min-width: 901px) and (max-height: 820px) {
+  .chrono { right: 42px; top: 22px; }
+  .chrono-cradle { transform: scale(.82); transform-origin: right top; margin-bottom: -12px; }
+  .chrono-hm { font-size: 66px; }
+  .chrono-date { font-size: 10px; }
+  .chrono-term { font-size: 9px; }
+  .auth-card { top: 236px; height: 820px; }
+}
+
 /* ───────────────── 窄屏 / 手机：换成竖排单列 ─────────────────
    1920×1080 设计画布在手机上只能缩到 0.2 倍，字全糊了。
    窄屏下放弃固定画布，改成正常文档流：玻璃在上、文案居中、表单在下。 */
@@ -722,7 +777,7 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
     position: absolute; right: 18px; top: calc(16px + env(safe-area-inset-top));
     align-items: flex-end;
   }
-  .chrono-steps { display: none; }
+  .chrono-cradle { transform: scale(.75); transform-origin: right top; margin: 0 -2px -12px 0; }
   .chrono-time { margin-top: 0; }
   .chrono-hm { font-size: 26px; font-weight: 300; }
   .chrono-sec { font-size: 11px; margin-top: 4px; }
@@ -748,6 +803,8 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
   .entry-copy .lede { font-size: 13px; line-height: 1.75; max-width: none; }
   .sample-flag { font-size: 10px; margin-top: 12px; padding: 3px 8px; }
 
+  .entry.shifted .entry-copy, .entry.shifted .entry-foot { display: none; }
+  .entry.shifted .auth-card { margin-top: 24px; }
   .entry-foot { order: 4; margin-top: 16px; align-items: flex-start; gap: 10px; }
   .scroll-hint { align-items: flex-start; padding-left: 0; }
   .entry-signature { font-size: 9.5px; }
@@ -755,41 +812,41 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
   /* 登录面板：正常文档流里的一张扁平卡片 */
   .auth-card {
     order: 5; position: relative; right: auto; top: auto; left: auto;
-    width: 100%; height: auto; min-height: 0;
-    transform: none; transform-origin: 0 0;
-    margin-top: 14px;
+    display: block; width: 100%; height: auto; min-height: 0;
+    transform: none; transform-origin: 0 0; margin-top: 14px;
     pointer-events: auto;
     opacity: clamp(0, calc((var(--reveal) - 0.2) * 2.2), 1);
-    background: rgba(255, 255, 255, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.85);
+    background: rgba(255, 255, 255, 0.82); border: 1px solid rgba(255, 255, 255, 0.9);
     padding: 16px 14px;
   }
-  /* 档案板的装饰层在窄屏全部去掉：那是横向排版才成立的 */
-  .auth-rear, .auth-slab, .auth-head, .auth-photo, .auth-rings, .auth-profile { display: none; }
-
-  /* 桌面版把板内子块都绝对定位了，窄屏要还原成正常文档流，
-     否则 .auth-inner 高度为 0、整张卡片塌掉 */
+  .auth-rear, .auth-slab, .auth-head, .auth-rings, .auth-profile { display: none; }
   .auth-card > .auth-inner > * { position: relative; left: auto; top: auto; right: auto; }
-  .auth-inner { display: flex; flex-direction: column; }
-
-  .auth-id { position: relative; margin-bottom: 14px; }
+  .auth-inner { height: auto; display: flex; flex-direction: column; gap: 14px; }
+  .auth-photo { position: relative; display: block; left: auto; top: auto; width: 100%; height: 122px; margin: 0 0 2px; }
+  .auth-photo .film { inset: 7px; }
+  .equation-reel { left: 12px; font-size: 15px; }
+  .auth-id { position: relative; margin: 0; }
   .auth-rank { gap: 8px; }
-  .auth-role { font-size: 12px; padding: 4px 8px; }
-  .auth-state { font-size: 9px; }
-  .auth-name { height: 46px; margin-top: 8px; padding: 0 14px 0 12px; min-width: 0; width: 100%; }
-  .auth-name b { font-size: 20px; }
+  .auth-role { font-size: 13px; padding: 6px 9px; }
+  .auth-state { font-size: 11px; }
+  .auth-name { min-height: 42px; margin-top: 8px; padding: 7px 10px; min-width: 0; width: 100%; }
+  .auth-name b { font-size: 17px; }
   .auth-file { display: none; }
-
-  .auth-main { position: relative; left: auto; top: auto; width: 100%; }
+  .auth-main { position: relative; left: auto; top: auto; bottom: auto; width: 100%; overflow: visible; padding: 0; }
+  .auth-fields { grid-template-columns: 1fr; gap: 0; }
   .auth-title { font-size: 18px; }
   .auth-main-head { margin-bottom: 6px; }
-  .auth-main-head .label { font-size: 10.5px; }
-  .auth-lede { font-size: 11.5px; margin-bottom: 8px; }
+  .auth-main-head .label { font-size: 11px; }
+  .auth-lede { font-size: 13px; margin-bottom: 8px; }
   .tabs { gap: 5px; margin-bottom: 8px; }
-  .chip { font-size: 11px; padding: 5px 9px; min-height: 32px; }
-  .field input { min-height: 40px; font-size: 14px; }
-  .keybar { height: 44px; }
-  .keybar button { padding: 0 14px; font-size: 11.5px; letter-spacing: 0.1em; }
+  .chip { font-size: 12px; padding: 6px 9px; min-height: 42px; }
+  .field input { min-height: 44px; font-size: 16px; }
+  .keybar { height: 48px; }
+  .keybar button { padding: 0 14px; font-size: 12px; letter-spacing: 0; }
+  .auth-link-note { min-height: 38px; font-size: 12px; }
   .entry-note { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .entry-note .linkish, .auth-alt .linkish { min-height: 44px; display: inline-flex; align-items: center; }
+  .error-line { font-size: 13px; }
+  .auth-submit { min-height: 46px; }
 }
 
