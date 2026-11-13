@@ -14,6 +14,13 @@ id_rsa*
 Thumbs.db
 ~$*
 
+# 本地草稿：无头浏览器测试脚本、截图、外部参考仓库克隆
+/.scratch/
+
+# 演示世界的真实库与口令，只留在本机
+/server/data/demo-world/
+/demo-world.json
+
 # 赛事原件、报名材料与老师截图仅在本地保留
 *.doc
 *.docx

@@ -21,7 +21,6 @@ class ContentConflict(ValueError):
 class ContentStore:
     SCHEMA_VERSION = 1
     _MIGRATIONS = {1: "_migration_1"}
-    _SCHEMA_VERSION_SQL = {1: "PRAGMA user_version=1"}
     LICENSES = frozenset({"own", "permission", "cc0", "cc_by", "cc_by_sa", "unknown", "restricted"})
 
     def __init__(self, db_path: str | Path, *, timeout: float = 15.0) -> None:
@@ -90,7 +89,10 @@ class ContentStore:
                 while version < self.SCHEMA_VERSION:
                     version += 1
                     getattr(self, self._MIGRATIONS[version])(db)
-                    db.execute(self._SCHEMA_VERSION_SQL[version])
+                    if version == 1:
+                        db.execute("PRAGMA user_version=1")
+                    else:
+                        raise RuntimeError("no fixed schema version statement registered")
                 db.commit()
             except BaseException:
                 db.rollback()
@@ -354,18 +356,22 @@ class ContentStore:
                 raise ValueError("source permission or attribution required")
             if "title" in changes and not str(changes["title"]).strip():
                 raise ValueError("title required")
-            update_queries = {
-                "title": "UPDATE material_files SET title=? WHERE id=?",
-                "license_code": "UPDATE material_files SET license_code=? WHERE id=?",
-                "license_note": "UPDATE material_files SET license_note=? WHERE id=?",
-                "rights_confirmed": "UPDATE material_files SET rights_confirmed=? WHERE id=?",
-                "allow_generation": "UPDATE material_files SET allow_generation=? WHERE id=?",
-                "allow_retrieval": "UPDATE material_files SET allow_retrieval=? WHERE id=?",
-                "allow_student_view": "UPDATE material_files SET allow_student_view=? WHERE id=?",
-                "external_processing_allowed": "UPDATE material_files SET external_processing_allowed=? WHERE id=?",
-            }
-            for name, value in changes.items():
-                db.execute(update_queries[name], (value,file_id))
+            if title is not None:
+                db.execute("UPDATE material_files SET title=? WHERE id=?", (title,file_id))
+            if license_code is not None:
+                db.execute("UPDATE material_files SET license_code=? WHERE id=?", (license_code,file_id))
+            if license_note is not None:
+                db.execute("UPDATE material_files SET license_note=? WHERE id=?", (license_note,file_id))
+            if rights_confirmed is not None:
+                db.execute("UPDATE material_files SET rights_confirmed=? WHERE id=?", (rights_confirmed,file_id))
+            if allow_generation is not None:
+                db.execute("UPDATE material_files SET allow_generation=? WHERE id=?", (allow_generation,file_id))
+            if allow_retrieval is not None:
+                db.execute("UPDATE material_files SET allow_retrieval=? WHERE id=?", (allow_retrieval,file_id))
+            if allow_student_view is not None:
+                db.execute("UPDATE material_files SET allow_student_view=? WHERE id=?", (allow_student_view,file_id))
+            if external_processing_allowed is not None:
+                db.execute("UPDATE material_files SET external_processing_allowed=? WHERE id=?", (external_processing_allowed,file_id))
             if effective["rights_confirmed"]:
                 db.execute("""UPDATE material_issues SET status='resolved',resolution='许可由上传者确认',resolved_by=?,resolved_at=?
                               WHERE file_id=? AND code='source_permission_required' AND status='open'""", (actor_id,time.time(),file_id))

@@ -532,6 +532,23 @@ class Flow:
                                       "external_processing_allowed": "false"})
             self.material_id = material["material"]["id"]
             self.api("student", "GET", f"/api/v1/materials/{self.material_id}", 404)
+            update = {
+                "expected_revision": material["material"]["revision"],
+                "title": "Synthetic lesson ' ; -- & <metadata>",
+                "license_code": "permission", "license_note": "Synthetic permission ' ; -- & <note>",
+                "rights_confirmed": True, "allow_generation": False, "allow_retrieval": True,
+                "allow_student_view": True, "external_processing_allowed": False,
+            }
+            self.api("student", "PATCH", f"/api/v1/materials/{self.material_id}", 403, json=update)
+            updated = self.api("teacher", "PATCH", f"/api/v1/materials/{self.material_id}", json=update)["material"]
+            self.check(updated["revision"] == update["expected_revision"] + 1, "draft update did not advance revision")
+            for field, expected in update.items():
+                if field != "expected_revision":
+                    self.check(updated[field] == expected, f"draft update changed literal field {field}")
+            self.api("teacher", "PATCH", f"/api/v1/materials/{self.material_id}", 409, json=update)
+            self.check(self.api("teacher", "GET", f"/api/v1/materials/{self.material_id}")["material"] == updated,
+                       "stale draft update changed persisted material")
+            material["material"] = updated
             self.api("teacher", "POST", f"/api/v1/materials/{self.material_id}/confirm", json={
                 "expected_revision": material["material"]["revision"], "block_ids": [item["id"] for item in material["blocks"]],
                 "public_block_ids": [item["id"] for item in material["blocks"]], "public_content_attested": True,

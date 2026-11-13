@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>智慧学伴 · 可点击原型</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/prototype/styles.css">
+</head>
+<body>
+  <a class="skip" href="#view">跳到主要内容</a>
+  <div id="stage" class="stage">
+    <canvas id="glass" aria-hidden="true"></canvas>
+    <div id="view"></div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module">
+    // 液态金属场景先就位，再把入口接上；两者都是原生 ES 模块，不需要构建
+    import { createScene } from "/prototype/scene.js";
+    import { api } from "/prototype/api.js";
+    window.createScene = createScene;
+    window.api = api;
+    // 先探一次后端：连上就走真实数据，连不上就退回虚构样例并明确标注
+    await api.probe();
+    await import("/prototype/app.js");
+  </script>
+</body>
+</html>

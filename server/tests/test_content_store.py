@@ -48,12 +48,14 @@ class ContentStoreTests(unittest.TestCase):
             self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0],125)
 
     def test_newer_and_unversioned_foreign_databases_are_rejected_without_modification(self):
-        version_sql = {0: "PRAGMA user_version=0", 99: "PRAGMA user_version=99"}
         for name,version in (("future",99),("foreign",0)):
             path = Path(self.directory.name)/(name+".sqlite3")
             with closing(sqlite3.connect(path)) as db:
                 db.execute("CREATE TABLE foreign_data(value TEXT)")
-                db.execute(version_sql[version])
+                if version == 99:
+                    db.execute("PRAGMA user_version=99")
+                else:
+                    db.execute("PRAGMA user_version=0")
                 db.commit()
             before = path.read_bytes()
             with self.assertRaises(RuntimeError):

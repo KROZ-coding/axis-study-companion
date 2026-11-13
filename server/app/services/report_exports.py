@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any
-from defusedxml import minidom
+from defusedxml.ElementTree import fromstring
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from ..report_store import SNAPSHOT_SCHEMA_VERSION, canonical_json, content_hash, normalize_scope
@@ -409,6 +409,7 @@ def _xlsx_export(snapshot: dict[str, Any], manifest: dict[str, Any]) -> bytes:
         from openpyxl import Workbook, load_workbook
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
         from openpyxl.utils import get_column_letter
+        from openpyxl.xml.functions import tostring
     except ImportError as error:
         raise ExportDependencyUnavailable("Excel export requires openpyxl>=3.1,<4") from error
     workbook = Workbook()
@@ -488,38 +489,28 @@ def _xlsx_export(snapshot: dict[str, Any], manifest: dict[str, Any]) -> bytes:
     buffer = io.BytesIO()
     workbook.save(buffer)
     payload = buffer.getvalue()
-    # openpyxl 3.1.5 overwrites modified during save. Normalize the detached
-    # core properties by namespace, and fix ZIP metadata before verifying the output.
+    # openpyxl overwrites modified during save. Serialize the fixed in-memory
+    # properties again instead of parsing the generated core XML.
+    workbook.properties.created = workbook.properties.modified = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    core_properties = tostring(workbook.properties.to_tree())
     stable = io.BytesIO()
     with ZipFile(io.BytesIO(payload)) as original, ZipFile(stable, "w", compression=ZIP_DEFLATED) as archive:
         for name in sorted(original.namelist()):
-            content = original.read(name)
+            content = core_properties if name == "docProps/core.xml" else original.read(name)
             if name == "docProps/core.xml" or name.endswith(".rels"):
                 if len(content) > 1024 * 1024:
                     raise ValueError("report workbook metadata exceeds the XML size limit")
                 declarations = content.upper()
                 if b"<!DOCTYPE" in declarations or b"<!ENTITY" in declarations:
                     raise ValueError("report workbook metadata contains forbidden XML declarations")
-            if name == "docProps/core.xml":
-                with minidom.parseString(content, forbid_dtd=True, forbid_entities=True, forbid_external=True) as core:
-                    for property_name in ("created", "modified"):
-                        elements = core.getElementsByTagNameNS("http://purl.org/dc/terms/", property_name)
-                        if len(elements) != 1:
-                            raise ValueError("report workbook core timestamps are missing or duplicated")
-                        element = elements[0]
-                        for child in list(element.childNodes):
-                            element.removeChild(child)
-                            child.unlink()
-                        element.appendChild(core.createTextNode("2000-01-01T00:00:00Z"))
-                    content = core.toxml(encoding="utf-8")
             if name.startswith("xl/externalLinks/"):
                 raise ValueError("report workbook contains external links")
             if name.endswith(".rels"):
-                with minidom.parseString(content, forbid_dtd=True, forbid_entities=True, forbid_external=True) as relationships:
-                    if any(item.getAttribute("TargetMode") == "External" for item in relationships.getElementsByTagNameNS(
-                        "http://schemas.openxmlformats.org/package/2006/relationships", "Relationship",
-                    )):
-                        raise ValueError("report workbook contains external relationships")
+                relationships = fromstring(content, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+                if any(item.get("TargetMode") == "External" for item in relationships.iter(
+                    "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship",
+                )):
+                    raise ValueError("report workbook contains external relationships")
             _zip_entry(archive, name, content)
     payload = stable.getvalue()
     check = load_workbook(io.BytesIO(payload), data_only=False, keep_links=True)

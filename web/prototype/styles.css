@@ -1,0 +1,795 @@
+:root {
+  --ice: #e9f6fb;
+  --ice-deep: #d4eaf4;
+  --ink: #14343f;
+  --ink-soft: #3d6270;
+  --line: rgba(20, 52, 63, 0.16);
+  --glass: rgba(255, 255, 255, 0.62);
+  --glass-strong: rgba(255, 255, 255, 0.86);
+  --cyan: #1f8aa8;
+  --cyan-deep: #0e6d89;
+  --warn: #9a4d16;
+  --warn-bg: #fff1df;
+  --bad: #8d2d3a;
+  --bad-bg: #fdecef;
+  --ok: #1d6b52;
+  --ok-bg: #e7f6ef;
+  --shadow: 0 18px 50px rgba(18, 62, 82, 0.14);
+
+  /* 入口的排版体系：纸、墨、淡、极淡，四级足够 */
+  --paper: #f2f7fa;
+  --mute: #7d97a3;
+  --faint: rgba(20, 52, 63, 0.14);
+  --accent: #1f8aa8;
+
+  --sans: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --display: "Iowan Old Style", "Palatino Linotype", "Songti SC", serif;
+  /* 入口的拉丁字用窄体无衬线：档案、终端那种味道，中文仍走系统黑体 */
+  --mono: "JetBrains Mono", "Cascadia Mono", "Consolas", "Sarasa Mono SC", monospace;
+  --latin: "Inter", "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+  --cjk: "PingFang SC", "Microsoft YaHei", "Source Han Sans CN", "Noto Sans SC", sans-serif;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background:
+    radial-gradient(900px 520px at 12% -8%, rgba(255, 255, 255, 0.9), transparent 60%),
+    radial-gradient(700px 480px at 100% 0%, rgba(143, 214, 232, 0.55), transparent 55%),
+    linear-gradient(165deg, #f7fcfe 0%, var(--ice) 42%, #c9e4f0 100%);
+}
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+.skip {
+  position: absolute; left: 12px; top: -40px; z-index: 20;
+  background: #fff; padding: 8px 12px;
+}
+.skip:focus { top: 12px; }
+
+.stage { min-height: 100vh; position: relative; overflow: hidden; }
+.stage canvas, .stage svg.fallback {
+  position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
+}
+.stage:not(.show-glass) canvas, .stage:not(.show-glass) svg.fallback { opacity: 0; }
+.stage svg.fallback { opacity: 0.85; }
+
+/* ───────────────────────── 入口：设计画布 ─────────────────────────
+   1920×1080 的设计坐标整体缩放贴到视口，所有元素按设计单位绝对定位。
+   这样在大屏、1366×768、窄屏上版式关系完全一致，只是整体放大缩小。 */
+.entry {
+  --reveal: 0;
+  --layer-vis: visible;
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+}
+.entry-canvas {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 1920px; height: 1080px;
+  transform-origin: 50% 50%;
+  transform: translate(-50%, -50%) scale(var(--k, 1));
+}
+.entry-canvas > * { position: absolute; }
+
+/* 整层的显隐：登录展开后中央文字与引导线退场。
+   用 opacity + visibility 明确定义"退场"，也能被键盘和屏幕阅读正确忽略。 */
+.entry-layer {
+  opacity: clamp(0, calc(1 - var(--reveal) * 1.6), 1);
+  visibility: var(--layer-vis, visible);
+  transition: opacity 120ms linear;
+}
+.entry-layer.keep { opacity: 1; }
+
+/* 页头：三行锁定排版，第二行靠字距、第三行靠字号各自与首行等宽 */
+.brand { left: 62px; top: 104px; display: inline-flex; flex-direction: column; }
+.brand-l1 {
+  font-family: var(--cjk); font-size: 44px; font-weight: 700;
+  letter-spacing: 0.06em; line-height: 1; align-self: flex-start;
+}
+.brand-l2 {
+  display: inline-flex; align-items: baseline; gap: 12px;
+  margin-top: 10px; align-self: flex-start;
+}
+.brand-l2 .axis {
+  font-family: var(--latin); font-size: 26px; font-weight: 700;
+  letter-spacing: 0.34em; color: var(--mute); line-height: 1;
+}
+.brand-l3 {
+  margin-top: 8px; font-family: var(--latin);
+  font-size: 15px; font-weight: 500; letter-spacing: 0.30em;
+  color: var(--mute); align-self: flex-start; white-space: nowrap;
+}
+.brand-rule { margin-top: 14px; width: 232px; height: 2px; background: var(--ink); }
+
+/* 右上：时钟与阶段指示 */
+.chrono { right: 64px; top: 56px; display: flex; flex-direction: column; align-items: flex-end; }
+.chrono-steps { display: flex; gap: 16px; height: 12px; align-items: center; margin-right: 4px; }
+.step-node { position: relative; width: 7px; height: 12px; }
+.step-node i {
+  position: absolute; left: 0; top: 2.5px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--accent); opacity: 0.32;
+}
+.step-node.on { width: 34px; }
+.step-node.on i { opacity: 1; }
+.step-node.on::after {
+  content: ""; position: absolute; left: 7px; right: 12px; top: 5.25px;
+  height: 1.5px; background: var(--accent);
+}
+.step-node.on::before {
+  content: ""; position: absolute; right: 0; top: 0; width: 12px; height: 12px;
+  border-radius: 50%; border: 1.5px solid var(--accent);
+}
+.chrono-time { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; }
+.chrono-hm {
+  font-family: var(--latin); font-size: 88px; font-weight: 200;
+  letter-spacing: -0.02em; line-height: 1;
+}
+.chrono-sec { font-family: var(--mono); font-size: 16px; color: var(--mute); margin-top: 12px; }
+.chrono-date {
+  margin-top: 10px; font-family: var(--latin); font-size: 13px; font-weight: 500;
+  letter-spacing: 0.26em; color: var(--ink-soft);
+}
+.chrono-term {
+  margin-top: 12px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em;
+  color: var(--mute); display: flex; align-items: center; gap: 8px;
+}
+.chrono-term i { width: 6px; height: 6px; background: var(--ink); display: block; }
+
+/* 左侧竖轴：刻度、光标、微文案、尝试记录、按键提示 */
+.rail { left: 0; top: 0; width: 470px; height: 1080px; }
+.rail-rule {
+  position: absolute; left: 300px; top: 0; width: 2px; height: 100%;
+  background: var(--ink); opacity: 0.86;
+  transform-origin: 50% 0;
+  transform: scaleY(calc(min(1, var(--reveal) * 1.4)));
+}
+.rail-marker {
+  position: absolute; left: 282px; width: 38px; height: 22px;
+  background: var(--accent);
+  top: calc(340px + var(--reveal) * 250px);
+  opacity: calc(min(1, var(--reveal) * 2));
+}
+.rail-body { position: absolute; inset: 0; opacity: calc(max(0, min(1, var(--reveal) * 2 - 0.6))); }
+.rail-body > * { position: absolute; }
+.rail-bar { left: 0; top: 396px; width: 12px; height: 268px; background: var(--ink); }
+.rail-dash { left: 44px; width: 14px; height: 3px; background: var(--ink); }
+.rail-chip {
+  background: var(--ink); color: #f2f7fa;
+  font-family: var(--latin); font-size: 7.5px; font-weight: 600;
+  letter-spacing: 0.06em; padding: 2px 6px; line-height: 1.1; white-space: nowrap;
+}
+.rail-micro {
+  font-family: var(--mono); font-size: 7.5px; line-height: 1.65;
+  color: var(--mute); left: 58px; width: 196px;
+}
+.rail-log { left: 44px; display: flex; flex-direction: column; gap: 5px; }
+.rail-log .row {
+  display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  font-family: var(--mono); font-size: 8.5px; color: var(--mute); letter-spacing: 0.02em;
+}
+.rail-log .row i { width: 2px; height: 2px; background: var(--ink); flex: none; }
+.rail-hints {
+  left: 44px; width: 340px; display: flex; flex-wrap: wrap; gap: 10px 14px;
+  font-family: var(--latin); font-size: 8.5px; font-weight: 500; letter-spacing: 0.08em;
+  color: var(--mute);
+}
+.rail-hints span { display: inline-flex; align-items: center; gap: 5px; }
+.rail-hints b {
+  font-family: var(--mono); font-weight: 700; color: var(--ink);
+  border: 1px solid var(--ink); padding: 1px 4px; font-size: 8px;
+}
+.rail-foot { left: 0; width: 46px; height: 14px; background: var(--ink); }
+.rail-label {
+  font-family: var(--cjk); font-size: 16px; font-weight: 700;
+  letter-spacing: 0.04em; white-space: nowrap;
+}
+
+/* 中央：标题与主张。放在下方，让出上半部给玻璃。
+   定位只用 left/right/top；不要在这里再用 transform 做位移——
+   .entry-canvas 已经有 scale，再叠 translate 会让设计坐标对不上。 */
+.entry-copy {
+  left: 0; right: 0; top: 620px; margin: 0;
+  display: flex; flex-direction: column; align-items: center;
+  pointer-events: none; user-select: none; text-align: center;
+}
+.entry-copy .eyebrow {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.42em;
+  color: var(--cyan-deep); margin: 0 0 18px;
+}
+.entry-copy h1 {
+  font-family: var(--cjk); font-weight: 700;
+  font-size: 54px; line-height: 1.24; letter-spacing: 0.02em;
+  margin: 0 0 18px; max-width: 16em;
+}
+.entry-copy .lede {
+  font-family: var(--cjk); font-size: 14.5px; line-height: 1.8;
+  color: var(--ink-soft); max-width: 32em; margin: 0;
+}
+.sample-flag {
+  margin-top: 22px; font-family: var(--latin); font-size: 10.5px;
+  letter-spacing: 0.14em; color: var(--mute);
+  border: 1px solid var(--faint); padding: 4px 10px;
+}
+
+/* 引导线：钉在金属上的两个点，随画面重算 */
+.callouts { position: absolute; inset: 0; pointer-events: none; opacity: calc(max(0, min(1, var(--reveal) * 2.6 - 1.0))); }
+.callouts svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.callouts line { stroke: var(--ink); stroke-width: 1.2; }
+.callouts circle { fill: var(--ink); }
+.callout-label { position: absolute; display: flex; flex-direction: column; gap: 3px; }
+.callout-label span {
+  align-self: flex-start; background: var(--ink); color: #f2f7fa;
+  font-family: var(--latin); font-size: 7.5px; font-weight: 600;
+  letter-spacing: 0.06em; padding: 1px 5px;
+}
+.callout-label b { font-family: var(--cjk); font-size: 16px; font-weight: 700; letter-spacing: 0.02em; }
+.callout-label em {
+  font-style: normal; font-family: var(--mono); font-size: 8.5px;
+  color: var(--mute); letter-spacing: 0.04em; white-space: nowrap;
+}
+
+/* 底部：滚动引导 + 页脚签名 */
+.entry-foot {
+  left: 0; right: 0; bottom: 62px;
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  opacity: calc(max(0, min(1, 1 - var(--reveal) * 2.4)));
+}
+.scroll-hint {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  border: 0; background: none; padding: 8px 16px; min-height: 44px;
+  font-family: var(--cjk); font-size: 12px; letter-spacing: 0.18em; color: var(--cyan-deep);
+}
+.scroll-hint .wheel {
+  width: 17px; height: 27px; border: 1.5px solid var(--cyan-deep); border-radius: 9px;
+  display: grid; justify-items: center; padding-top: 5px;
+}
+.scroll-hint .wheel i {
+  width: 2.5px; height: 6px; border-radius: 2px; background: var(--cyan-deep);
+  animation: wheel-drop 1.7s ease-in-out infinite;
+}
+.scroll-hint .hint-sub {
+  letter-spacing: 0.02em; font-size: 10.5px; color: var(--mute);
+}
+@keyframes wheel-drop {
+  0% { transform: translateY(0); opacity: 1; }
+  70% { transform: translateY(8px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 0; }
+}
+.entry-signature {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--latin); font-size: 11px; letter-spacing: 0.22em; color: var(--mute);
+}
+.entry-signature b { color: var(--ink); font-weight: 700; letter-spacing: 0.12em; }
+.entry-signature i { width: 22px; height: 4px; background: var(--ink); }
+
+/* ───────────────────── 入口右侧：档案板 ───────────────────── */
+.auth-card {
+  position: absolute; right: 64px; top: 104px;
+  width: 680px; height: 872px;
+  pointer-events: none;
+  padding: 0;
+  background: none; border: 0; box-shadow: none;
+  opacity: calc(max(0, min(1, (var(--reveal) - 0.42) * 2.6)));
+  transform:
+    translateX(calc((1 - var(--reveal)) * 96px))
+    perspective(2200px)
+    rotateY(calc(-6deg + (1 - var(--reveal)) * 10deg));
+  transform-origin: 0 318px;
+  transform-style: preserve-3d;
+}
+.entry.shifted .auth-card { pointer-events: auto; }
+
+/* 板下的第二层衬底，做出厚度 */
+.auth-rear {
+  position: absolute; inset: 0;
+  transform: translate(18px, -18px);
+  background: rgba(255, 255, 255, 0.22);
+  border: 1px solid rgba(20, 52, 63, 0.10);
+}
+.auth-slab {
+  position: absolute; inset: 0; overflow: hidden;
+  background: linear-gradient(180deg, rgba(252, 254, 255, 0.86), rgba(244, 250, 253, 0.78) 55%, rgba(238, 247, 251, 0.72));
+  backdrop-filter: blur(26px) saturate(0.9) brightness(1.02);
+  -webkit-backdrop-filter: blur(26px) saturate(0.9) brightness(1.02);
+  box-shadow: 10px 18px 46px rgba(18, 62, 82, 0.14);
+}
+/* 板上的斜纹与大字底纹 */
+.auth-slab .hatch {
+  position: absolute; right: 0; bottom: 0; width: 62%; height: 55%;
+  background-image: repeating-linear-gradient(135deg, rgba(20, 52, 63, 0.06) 0 1px, transparent 1px 7px);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 72%);
+  mask-image: linear-gradient(90deg, transparent, #000 72%);
+  opacity: 0.85;
+}
+.auth-slab .ghost {
+  position: absolute; left: 22px; top: 344px;
+  font-family: var(--latin); font-size: 84px; font-weight: 700;
+  letter-spacing: 0.02em; color: rgba(255, 255, 255, 0.72);
+  white-space: nowrap; pointer-events: none;
+}
+.auth-slab .ghost-name {
+  position: absolute; left: 286px; top: -22px;
+  font-family: var(--cjk); font-size: 104px; font-weight: 700;
+  color: rgba(20, 52, 63, 0.06); white-space: nowrap; pointer-events: none;
+}
+/* 四边倒角：上面和左面亮，下面和右面暗，玻璃才有厚度 */
+.auth-bev { position: absolute; display: block; }
+.auth-bev.t { left: 0; right: 0; top: 0; height: 2px; background: rgba(255, 255, 255, 0.95); }
+.auth-bev.l { left: 0; top: 0; bottom: 0; width: 2px; background: rgba(255, 255, 255, 0.8); }
+.auth-bev.b { left: 0; right: 0; bottom: 0; height: 1px; background: rgba(20, 52, 63, 0.12); }
+.auth-bev.r { right: 0; top: 0; bottom: 0; width: 1px; background: rgba(20, 52, 63, 0.10); }
+
+.auth-inner { position: relative; }
+
+/* 板上的所有子块都按设计单位定位 */
+.auth-card > .auth-inner > * { position: absolute; }
+
+.auth-head { left: 0; right: 0; top: 0; display: block; }
+.auth-mark {
+  position: absolute; left: 28px; top: 24px;
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--latin); font-size: 9.5px; font-weight: 600; letter-spacing: 0.12em;
+}
+.auth-mark i { width: 4px; height: 4px; background: var(--ink); }
+.auth-head-right {
+  position: absolute; right: 28px; top: 22px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+}
+.auth-outline {
+  font-family: var(--latin); font-size: 8px; letter-spacing: 0.08em;
+  border: 1px solid rgba(20, 52, 63, 0.5); padding: 2px 7px;
+}
+.auth-brandtag {
+  background: var(--ink); color: #f2f7fa;
+  font-family: var(--latin); font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.1em; padding: 3px 8px;
+}
+
+/* 证件照位：虚构人物剪影 + 斜纹 */
+.auth-photo {
+  position: absolute; left: 30px; top: 70px; width: 232px; height: 282px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(20, 52, 63, 0.08);
+  box-shadow: 0 10px 28px -6px rgba(18, 62, 82, 0.20);
+}
+.auth-photo .film {
+  position: absolute; inset: 9px; overflow: hidden;
+  background: linear-gradient(180deg, #f0f5f8, #dbe9f0);
+}
+.auth-photo .sil { position: absolute; inset: 0; width: 100%; height: 100%; }
+.auth-photo .classified {
+  position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+  background: var(--accent); color: #f7fcfe;
+  font-family: var(--latin); font-size: 9px; font-weight: 700;
+  letter-spacing: 0.14em; padding: 3px 7px; white-space: nowrap;
+}
+.auth-photo .badge {
+  position: absolute; left: -8px; top: -8px; width: 30px; height: 30px;
+  background: var(--ink); display: grid; place-items: center;
+  color: #f2f7fa; font-family: var(--latin); font-size: 11px; font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.auth-photo .tick { position: absolute; width: 16px; height: 16px; }
+.auth-photo .tick::before, .auth-photo .tick::after {
+  content: ""; position: absolute; background: rgba(20, 52, 63, 0.45);
+}
+.auth-photo .tick::before { left: 7.5px; top: 0; width: 1px; height: 16px; }
+.auth-photo .tick::after { top: 7.5px; left: 0; height: 1px; width: 16px; }
+
+/* 身份区：职别标签 + 名字条 */
+.auth-id { position: absolute; left: 286px; top: 84px; right: 0; }
+.auth-rank { display: flex; gap: 10px; align-items: center; }
+.auth-role {
+  background: var(--ink); color: #f2f7fa;
+  font-family: var(--cjk); font-size: 15px; font-weight: 500;
+  letter-spacing: 0.14em; padding: 6px 11px;
+}
+.auth-state {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em;
+  color: var(--mute); border: 1px solid var(--faint); padding: 3px 6px;
+}
+.auth-state.alert { color: var(--warn); border-color: var(--warn); }
+.auth-state.ok { color: var(--ok); border-color: var(--ok); }
+.auth-name {
+  margin-top: 10px; height: 74px;
+  display: inline-flex; align-items: center;
+  background: var(--ink); padding: 0 30px 0 22px;
+  min-width: 250px; max-width: 420px;
+}
+.auth-name b {
+  color: #f2f7fa; font-family: var(--cjk); font-size: 40px; font-weight: 700;
+  letter-spacing: 0.06em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.auth-file {
+  position: relative; margin-top: 12px; width: 348px; height: 82px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(20, 52, 63, 0.06);
+  display: flex; align-items: center; gap: 14px; padding-left: 12px;
+}
+.auth-file .stamp {
+  width: 90px; height: 58px; flex: none;
+  background: var(--ink); color: #f2f7fa;
+  display: grid; place-items: center;
+  font-family: var(--latin); font-size: 22px; font-weight: 700; letter-spacing: 0.10em;
+}
+.auth-file .info { display: flex; flex-direction: column; gap: 6px; }
+.auth-file .loaded {
+  font-family: var(--latin); font-size: 10.5px; font-weight: 500;
+  letter-spacing: 0.06em; display: flex; align-items: center; gap: 6px;
+}
+.auth-file .loaded i { width: 6px; height: 6px; background: var(--ink); }
+.auth-file .mono { font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+
+/* 状态圆点：大写锁定 / 已输入 / 身份 */
+.auth-rings { position: absolute; left: 38px; top: 438px; display: flex; gap: 15px; }
+.auth-rings .ring {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  font-family: var(--latin); font-size: 8.5px; letter-spacing: 0.08em; color: var(--mute);
+}
+.auth-rings .ring i {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 3px solid var(--accent); transition: background 160ms;
+}
+.auth-rings .ring i.on { background: var(--accent); }
+
+/* 资料表 */
+.auth-profile {
+  position: absolute; right: 30px; top: 328px; width: 314px; height: 158px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 18px -6px rgba(18, 62, 82, 0.16);
+}
+.auth-profile .ph {
+  margin: 10px 10px 0; background: var(--ink); color: #f2f7fa;
+  font-family: var(--latin); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.1em; padding: 3px 6px;
+}
+.auth-profile dl {
+  margin: 10px 14px 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px;
+}
+.auth-profile dt {
+  font-family: var(--cjk); font-size: 12px; font-weight: 500; color: var(--mute);
+}
+.auth-profile dd {
+  margin: 0; font-family: var(--mono); font-size: 12.5px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.auth-profile .rule { position: absolute; left: 14px; right: 14px; bottom: 28px; height: 1.5px; background: var(--ink); }
+.auth-profile .foot {
+  position: absolute; right: 14px; bottom: 10px;
+  font-family: var(--latin); font-size: 8.5px; color: var(--mute); letter-spacing: 0.1em;
+}
+
+/* 授权口令区 */
+.auth-main { position: absolute; left: 30px; top: 486px; width: 620px; }
+.auth-title {
+  font-family: var(--cjk); font-size: 21px; font-weight: 700;
+  letter-spacing: 0.04em; margin: 0 0 6px;
+}
+.auth-main-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px;
+}
+.auth-main-head .label {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-family: var(--cjk); font-size: 11.5px; font-weight: 700; letter-spacing: 0.18em;
+  color: var(--ink-soft);
+}
+.auth-main-head .label i { width: 14px; height: 4px; background: var(--ink); }
+.auth-main-head .attempt {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; color: var(--mute);
+}
+.auth-main-head .attempt.hot { color: var(--warn); }
+
+/* tab 行：保持 chip 的可点面积与语义 */
+.tabs {
+  display: flex; gap: 6px; margin: 0 0 10px;
+}
+.chip, .btn, .nav-btn, .icon-btn {
+  border: 1px solid var(--line); background: rgba(255,255,255,.72); border-radius: 0;
+  min-height: 44px; padding: 8px 14px;
+}
+.chip {
+  font-family: var(--cjk); font-size: 11.5px; letter-spacing: 0.06em;
+  padding: 4px 10px; min-height: 30px; background: transparent;
+  border-color: var(--faint); color: var(--ink-soft);
+}
+.chip[aria-pressed="true"] {
+  background: var(--ink); color: #f2f7fa; border-color: var(--ink);
+}
+.chip:focus-visible, .btn:focus-visible, .nav-btn:focus-visible,
+.scroll-hint:focus-visible, .linkish:focus-visible, .icon-btn:focus-visible {
+  outline: 3px solid #0b6f8c; outline-offset: 2px;
+}
+
+/* 表单：扁平的、像填表，不是卡片输入框 */
+.field { display: grid; gap: 4px; margin: 0 0 7px; font-family: var(--cjk); font-size: 10.5px; color: var(--ink-soft); }
+.field input, .field textarea, .field select {
+  width: 100%; border: 1px solid var(--faint); border-radius: 0; background: rgba(255, 255, 255, 0.92);
+  padding: 6px 10px; min-height: 34px; font-family: var(--cjk); font-size: 12.5px; color: var(--ink);
+}
+.field input:focus, .field textarea:focus, .field select:focus {
+  outline: none; border-color: var(--cyan-deep); box-shadow: inset 0 -2px 0 var(--cyan-deep);
+}
+.field textarea { min-height: 88px; resize: vertical; }
+
+/* 口令条：每敲一个字符出现一个白格 —— 参考作品的授权键 */
+.keybar {
+  position: relative; display: flex; align-items: stretch; gap: 0;
+  border: 1px solid var(--ink); background: rgba(255, 255, 255, 0.5);
+  height: 46px;
+}
+.keybar-cells { display: flex; flex: 1; align-items: center; padding: 0 10px; gap: 3px; overflow: hidden; }
+.keybar-cell { width: 10px; height: 22px; background: var(--ink); flex: none; }
+.keybar-ghost {
+  font-family: var(--cjk); font-size: 12px; letter-spacing: 0.10em; color: var(--mute);
+}
+.keybar-extra { font-family: var(--mono); font-size: 10px; color: var(--mute); margin-left: 6px; }
+.keybar button {
+  flex: none; border: 0; background: var(--ink); color: #f2f7fa;
+  font-family: var(--cjk); font-size: 12px; font-weight: 600; letter-spacing: 0.14em;
+  padding: 0 22px; display: inline-flex; align-items: center; gap: 7px; min-height: 44px;
+}
+.keybar button:hover { background: var(--cyan-deep); }
+.keybar button:disabled { background: var(--mute); cursor: default; }
+.keybar input {
+  position: absolute; inset: 0; opacity: 0; border: 0; padding: 0 0 0 10px;
+  font-size: 16px; cursor: text;
+  z-index: 1;
+}
+/* 按钮必须压在透明输入层之上，否则点不到（标签长度会变，不能靠留白让位） */
+.keybar button { position: relative; z-index: 2; }
+.keybar:focus-within { box-shadow: 0 0 0 2px rgba(31, 138, 168, 0.35); }
+
+.auth-msg {
+  margin-top: 9px; display: flex; align-items: center; gap: 7px;
+  font-family: var(--cjk); font-size: 11px; letter-spacing: 0.10em; min-height: 18px;
+}
+.auth-msg i { width: 6px; height: 6px; background: var(--ink); flex: none; }
+.auth-msg.err { color: var(--bad); }
+.auth-msg.err i { background: var(--bad); }
+
+.entry-note {
+  margin-top: 10px; display: flex; justify-content: space-between; align-items: center;
+  font-family: var(--latin); font-size: 9.5px; letter-spacing: 0.06em; color: var(--mute);
+}
+.proto-note { font-size: 10px; color: var(--mute); }
+.proto-note summary { cursor: pointer; min-height: 28px; display: inline-flex; align-items: center; }
+.proto-note p { margin: 4px 0 0; max-width: 26em; line-height: 1.6; }
+.auth-card.denied { animation: shake 0.42s ease; }
+@keyframes shake {
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(2px); }
+}
+@keyframes shake-narrow {
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(2px); }
+}
+
+.auth-alt { display: flex; flex-direction: column; align-items: flex-start; gap: 0; }
+.linkish {
+  background: none; border: 0; color: var(--cyan-deep); padding: 0; min-height: 30px;
+  font-family: var(--cjk); font-size: 11.5px; letter-spacing: 0.04em;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.proto-note p, .auth-lede { line-height: 1.7; }
+.auth-lede {
+  font-family: var(--cjk); font-size: 11.5px; color: var(--ink-soft);
+  margin: 0 0 10px; display: block;
+}
+
+.app {
+  min-height: 100vh; display: grid; grid-template-columns: 228px 1fr;
+  position: relative; z-index: 1;
+}
+.side {
+  padding: 22px 16px; border-right: 1px solid var(--line);
+  background: rgba(255,255,255,.38); backdrop-filter: blur(10px);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.side .brand { font-family: var(--display); font-size: 24px; margin: 4px 8px 16px; }
+.nav-btn { text-align: left; border-radius: 16px; }
+.side .spacer { flex: 1; }
+.main { padding: 28px 32px 80px; min-width: 0; }
+.top-note { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 18px; }
+h1.page, h2.section { font-family: var(--display); font-weight: 500; margin: 0; }
+h1.page { font-size: 40px; }
+h2.section { font-size: 26px; margin: 22px 0 10px; }
+.grid { display: grid; gap: 14px; }
+.grid.two { grid-template-columns: 1.2fr .8fr; }
+.grid.three { grid-template-columns: repeat(3, 1fr); }
+.panel {
+  background: var(--glass-strong); border: 1px solid rgba(255,255,255,.75);
+  border-radius: 22px; padding: 18px; box-shadow: 0 10px 30px rgba(24, 70, 90, 0.06);
+}
+.panel h3 { margin: 0 0 8px; font-size: 16px; }
+.student-row, .issue {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+  padding: 10px 0; border-top: 1px solid var(--line);
+}
+.pct { font-family: var(--display); font-size: 28px; }
+.tag { font-size: 12px; border-radius: 999px; padding: 3px 8px; background: var(--ice-deep); }
+.tag.warn { background: var(--warn-bg); color: var(--warn); }
+.tag.bad { background: var(--bad-bg); color: var(--bad); }
+.tag.ok { background: var(--ok-bg); color: var(--ok); }
+
+.drawer-back {
+  position: fixed; inset: 0; background: rgba(16, 42, 52, 0.28); z-index: 5;
+}
+.drawer {
+  position: fixed; top: 0; right: 0; height: 100%; width: min(560px, 100%);
+  background: #f7fcfe; z-index: 6; box-shadow: -20px 0 50px rgba(16, 42, 52, 0.16);
+  padding: 22px; overflow: auto; transform: translateX(24px);
+  animation: slide .35s ease forwards;
+}
+@keyframes slide { to { transform: none; } }
+.phone-frame {
+  width: min(390px, 100%); margin: 0 auto; min-height: 100vh;
+  background: linear-gradient(180deg, rgba(255,255,255,.55), rgba(255,255,255,.2));
+  border-inline: 1px solid rgba(255,255,255,.6); position: relative;
+  padding-bottom: calc(78px + env(safe-area-inset-bottom));
+}
+.phone-top, .phone-body { padding: 16px 16px 8px; }
+.bubble {
+  background: var(--glass-strong); border-radius: 18px; padding: 12px 14px; margin: 8px 0;
+  border: 1px solid rgba(255,255,255,.8); max-width: 92%;
+}
+.bubble.me { margin-left: auto; background: #14343f; color: #f4fbfe; }
+.dock {
+  position: sticky; bottom: 0; display: grid; grid-template-columns: repeat(3, 1fr);
+  background: rgba(247, 252, 254, 0.94); border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.dock button { border: 0; background: transparent; min-height: 64px; border-radius: 0; }
+.dock button[aria-current="page"] { color: var(--cyan-deep); font-weight: 650; }
+.sheet {
+  position: fixed; inset: auto 0 0 0; background: #f7fcfe; border-radius: 22px 22px 0 0;
+  padding: 16px 16px calc(18px + env(safe-area-inset-bottom)); z-index: 7;
+  box-shadow: 0 -12px 40px rgba(16,42,52,.16); max-height: 78vh; overflow: auto;
+}
+.q-nav { display: flex; gap: 8px; overflow: auto; padding-bottom: 8px; }
+.q-nav button { min-width: 44px; }
+.formula { font-family: "Cambria Math", "Times New Roman", serif; font-size: 22px; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.muted { color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
+.error-line { color: var(--bad); font-size: 14px; min-height: 1.4em; }
+.state-banner { border-radius: 16px; padding: 12px 14px; margin: 10px 0; }
+.state-banner.warn { background: var(--warn-bg); }
+.state-banner.bad { background: var(--bad-bg); }
+.state-banner.ok { background: var(--ok-bg); }
+.preview-switch { position: fixed; left: 16px; bottom: 16px; z-index: 8; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(12px);
+  background: var(--ink); color: #f4fbfe; border-radius: 999px; padding: 10px 16px;
+  opacity: 0; pointer-events: none; transition: .25s ease; z-index: 9;
+}
+.toast.show { opacity: 1; transform: translateX(-50%); }
+
+.proto-states { position: fixed; right: 16px; bottom: 16px; z-index: 8; }
+.proto-states summary { min-height: 44px; display: grid; place-items: center; }
+.proto-states .panel { display: grid; gap: 8px; margin-top: 8px; }
+
+/* 无 WebGL 时的静态替代图形。
+   它是 .entry-canvas 的第一个子元素，铺满整块设计画布；位置与 canvas 对齐。 */
+.stage svg.fallback { display: none; }
+.stage.no-webgl svg.fallback { display: block; }
+.stage.no-webgl canvas { display: none; }
+.entry-canvas > svg.fallback {
+  left: 0; top: 0; width: 1920px; height: 1080px;
+  pointer-events: none;
+}
+.entry-canvas > svg.fallback path { opacity: 0.9; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ───────────────── 窄屏 / 手机：换成竖排单列 ─────────────────
+   1920×1080 设计画布在手机上只能缩到 0.2 倍，字全糊了。
+   窄屏下放弃固定画布，改成正常文档流：玻璃在上、文案居中、表单在下。 */
+@media (max-width: 900px) {
+  .entry { min-height: 100svh; }
+  /* 窄屏放弃 1920×1080 设计画布：缩到 0.2 倍字就读不出来了。
+     改成正常文档流，一切按手机宽度排。 */
+  .entry-canvas {
+    position: relative; left: auto; top: auto;
+    width: 100%; height: auto; min-height: 100svh;
+    transform: none;
+    display: flex; flex-direction: column; align-items: stretch;
+    padding: calc(16px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));
+  }
+  .entry-canvas > * { position: relative; left: auto; top: auto; right: auto; }
+
+  /* 页头：正常横排，字号可读 */
+  .brand { order: 1; }
+  .brand-l1 { font-size: 26px; letter-spacing: 0.04em; }
+  .brand-l2 { margin-top: 6px; }
+  .brand-l2 .axis { font-size: 15px; letter-spacing: 0.28em; }
+  .brand-l3 { font-size: 9.5px; letter-spacing: 0.22em; margin-top: 6px; }
+  .brand-rule { width: 120px; margin-top: 10px; height: 1.5px; }
+
+  /* 时钟收成右上角小字 */
+  .chrono {
+    position: absolute; right: 18px; top: calc(16px + env(safe-area-inset-top));
+    align-items: flex-end;
+  }
+  .chrono-steps { display: none; }
+  .chrono-time { margin-top: 0; }
+  .chrono-hm { font-size: 26px; font-weight: 300; }
+  .chrono-sec { font-size: 11px; margin-top: 4px; }
+  .chrono-date, .chrono-term { display: none; }
+
+  /* 左侧竖轴与引导线信息密度太高，窄屏隐藏 */
+  .rail, .callouts { display: none; }
+
+  /* 主视觉：画布只占上半屏。桌面版画布铺满整个 stage，
+     手机上若不裁，3D 里居中的玻璃正好落在文案上。 */
+  .stage { position: relative; }
+  #glass { position: absolute; left: 0; right: 0; top: 0; bottom: auto; height: 52svh; width: 100%; }
+  .stage svg.fallback { height: 52svh; inset: 0 0 auto 0; }
+
+  /* 文案落在玻璃下方 */
+  .entry-copy {
+    order: 3; padding: 0; margin-top: 54svh;
+    text-align: left; align-items: flex-start;
+    transform: none;
+  }
+  .entry-copy .eyebrow { font-size: 10px; letter-spacing: 0.2em; margin-bottom: 10px; }
+  .entry-copy h1 { font-size: 27px; line-height: 1.35; margin-bottom: 10px; max-width: none; }
+  .entry-copy .lede { font-size: 13px; line-height: 1.75; max-width: none; }
+  .sample-flag { font-size: 10px; margin-top: 12px; padding: 3px 8px; }
+
+  .entry-foot { order: 4; margin-top: 16px; align-items: flex-start; gap: 10px; }
+  .scroll-hint { align-items: flex-start; padding-left: 0; }
+  .entry-signature { font-size: 9.5px; }
+
+  /* 登录面板：正常文档流里的一张扁平卡片 */
+  .auth-card {
+    order: 5; position: relative; right: auto; top: auto; left: auto;
+    width: 100%; height: auto; min-height: 0;
+    transform: none; transform-origin: 0 0;
+    margin-top: 14px;
+    pointer-events: auto;
+    opacity: clamp(0, calc((var(--reveal) - 0.2) * 2.2), 1);
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    padding: 16px 14px;
+  }
+  /* 档案板的装饰层在窄屏全部去掉：那是横向排版才成立的 */
+  .auth-rear, .auth-slab, .auth-head, .auth-photo, .auth-rings, .auth-profile { display: none; }
+
+  /* 桌面版把板内子块都绝对定位了，窄屏要还原成正常文档流，
+     否则 .auth-inner 高度为 0、整张卡片塌掉 */
+  .auth-card > .auth-inner > * { position: relative; left: auto; top: auto; right: auto; }
+  .auth-inner { display: flex; flex-direction: column; }
+
+  .auth-id { position: relative; margin-bottom: 14px; }
+  .auth-rank { gap: 8px; }
+  .auth-role { font-size: 12px; padding: 4px 8px; }
+  .auth-state { font-size: 9px; }
+  .auth-name { height: 46px; margin-top: 8px; padding: 0 14px 0 12px; min-width: 0; width: 100%; }
+  .auth-name b { font-size: 20px; }
+  .auth-file { display: none; }
+
+  .auth-main { position: relative; left: auto; top: auto; width: 100%; }
+  .auth-title { font-size: 18px; }
+  .auth-main-head { margin-bottom: 6px; }
+  .auth-main-head .label { font-size: 10.5px; }
+  .auth-lede { font-size: 11.5px; margin-bottom: 8px; }
+  .tabs { gap: 5px; margin-bottom: 8px; }
+  .chip { font-size: 11px; padding: 5px 9px; min-height: 32px; }
+  .field input { min-height: 40px; font-size: 14px; }
+  .keybar { height: 44px; }
+  .keybar button { padding: 0 14px; font-size: 11.5px; letter-spacing: 0.1em; }
+  .entry-note { flex-direction: column; align-items: flex-start; gap: 6px; }
+}
+
