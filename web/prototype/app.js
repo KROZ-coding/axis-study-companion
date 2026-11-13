@@ -2,6 +2,8 @@ const stage = document.querySelector("#stage");
 const view = document.querySelector("#view");
 const toastEl = document.querySelector("#toast");
 const reduceQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+// 接口层由 index.html 先加载并挂在 window 上（它要先探一次后端）
+const api = window.api;
 
 const sample = {
   className: "七（1）班",
@@ -69,6 +71,20 @@ const state = {
   railLog: ["等待账号口令", "会话未开启"],
   railLabel: "入口 · 会话未开启",
   fallback: false,
+  // 真后端
+  live: false,
+  loading: false,
+  liveError: "",
+  courseId: null,
+  courseName: "",
+  classId: null,
+  className: "",
+  liveStudents: [],
+  liveGoals: [],
+  liveTask: null,
+  liveLease: null,
+  liveReport: null,
+  liveReportFormats: [],
   yaw: 0.5,
   pitch: 0.25,
 };
@@ -389,7 +405,59 @@ function nav(id, label) {
   return `<button class="nav-btn" data-view="${id}" aria-current="${state.teacherView === id ? "page" : "false"}">${label}</button>`;
 }
 
+/** 连上后端时的教师首页：全部来自正式接口。 */
+function teacherHomeLive() {
+  if (state.loading) {
+    return `<h1 class="page">正在读取 ${state.className || "班级"}</h1>
+      <div class="state-banner">正在从正式服务读取学习记录。</div>`;
+  }
+  if (state.liveError) {
+    return `<h1 class="page">这次没有读全</h1>
+      <div class="state-banner bad">${escapeHtml(state.liveError)}</div>
+      <button class="btn" data-action="reload">再读一次</button>`;
+  }
+  const goal = state.liveGoals[0];
+  const students = state.liveStudents;
+  const scored = students.filter((item) => item.mastery !== null);
+  return `
+    <div class="top-note">
+      <h1 class="page">${escapeHtml(state.className)}</h1>
+      <button class="btn primary" data-action="open-drawer">准备学习目标</button>
+    </div>
+    <p class="muted">${escapeHtml(state.courseName)} · 已连上正式服务，下面的数字来自本机真实记录。</p>
+    ${goal ? `<div class="grid two">
+      <section class="panel">
+        <h3>本轮目标</h3>
+        <p>${escapeHtml(goal.title)}</p>
+        <p class="muted">${escapeHtml(goal.description || "")}</p>
+        <span class="tag ok">${goal.status === "active" ? "进行中" : escapeHtml(goal.status)}</span>
+      </section>
+      <section class="panel">
+        <h3>涉及学生</h3>
+        <p>共 ${students.length} 人，其中 ${scored.length} 人已有本轮记录。</p>
+        <p class="muted">没有记录的学生显示「待评估」，不会写成 0%。</p>
+      </section>
+    </div>` : `<div class="state-banner">这个班还没有发布过目标。</div>`}
+    <h2 class="section">相关学生</h2>
+    <section class="panel">
+      ${students.length ? students.map((student) => `
+        <article class="student-row">
+          <div>
+            <strong>${escapeHtml(student.name)}</strong>
+            <p class="muted">${escapeHtml(student.note || "还没有本轮作答记录。")}</p>
+            <button class="linkish" data-open-student="${escapeHtml(student.id)}">展开依据</button>
+          </div>
+          <div>
+            <div class="pct">${student.mastery === null ? "待评估" : student.mastery + "%"}</div>
+            <span class="tag">${escapeHtml(student.status)}</span>
+          </div>
+        </article>`).join("") : `<p class="muted">这个班还没有学生。</p>`}
+    </section>`;
+}
+
 function teacherHome() {
+  // 连上后端：渲染真实班级与真实记录
+  if (state.live) return teacherHomeLive();
   if (state.banner === "empty") {
     return `<h1 class="page">这个班还没有学习记录</h1><p class="lede">先确认课程材料，或给学生发一次目标。</p><button class="btn primary" data-action="open-drawer">准备学习目标</button>`;
   }
@@ -423,6 +491,8 @@ function teacherHome() {
 }
 
 function teacherStudent() {
+  // 连上后端：显示真实学生与真实依据
+  if (state.live) return teacherStudentLive();
   const student = sample.students.find((item) => item.id === (state.openStudent || "lin"));
   return `
     <div class="top-note"><h1 class="page">${student.name}</h1><button class="btn primary" data-action="open-drawer">给${student.name}安排</button></div>
@@ -444,6 +514,43 @@ function teacherStudent() {
     <h2 class="section">短评</h2>
     <form class="panel" data-action="comment">
       <label class="field">写给${student.name}<textarea name="comment" required placeholder="只指导，不改答案。"></textarea></label>
+      <button class="btn primary" type="submit">发送短评</button>
+    </form>`;
+}
+
+/** 连上后端时的学生依据页：分数与记录都来自真实评卷。 */
+function teacherStudentLive() {
+  const id = state.openStudent;
+  const student = state.liveStudents.find((item) => item.id === id) || state.liveStudents[0];
+  if (!student) {
+    return `<h1 class="page">还没有学生</h1><p class="muted">这个班还没有可查看的学生。</p>`;
+  }
+  const goal = state.liveGoals[0];
+  return `
+    <div class="top-note">
+      <h1 class="page">${escapeHtml(student.name)}</h1>
+      <button class="btn primary" data-action="open-drawer">给${escapeHtml(student.name)}安排</button>
+    </div>
+    <div class="grid two">
+      <section class="panel">
+        <h3>本轮证据</h3>
+        <p>${escapeHtml(student.note || "还没有本轮作答记录。")}</p>
+        <p class="muted">${escapeHtml(student.evidence || "记录不足以判断，不显示 0%。")}</p>
+        ${student.earned !== undefined
+          ? `<p>本轮得分 <strong>${student.earned}</strong> / ${student.possible}（程序核验，可复算）</p>`
+          : `<p class="muted">还没有可展示的分数。</p>`}
+      </section>
+      <section class="panel">
+        <h3>判断范围</h3>
+        <p><span class="pct">${student.mastery === null ? "待评估" : student.mastery + "%"}</span> 本轮得分比例</p>
+        <p class="muted">这是本轮已评分题目的得分比例，不是掌握概率。记录不足时写「待评估」，不显示 0%。</p>
+        ${goal ? `<p class="muted">范围：${escapeHtml(goal.title)}</p>` : ""}
+        <button class="btn" data-action="open-drawer">按此依据出目标</button>
+      </section>
+    </div>
+    <h2 class="section">短评</h2>
+    <form class="panel" data-action="comment">
+      <label class="field">写给${escapeHtml(student.name)}<textarea name="comment" required placeholder="只指导，不改答案。"></textarea></label>
       <button class="btn primary" type="submit">发送短评</button>
     </form>`;
 }
@@ -535,6 +642,8 @@ function companion() {
 }
 
 function tasks() {
+  // 连上后端：展示真实任务
+  if (state.live) return tasksLive();
   return `
     <div class="phone-body">
       <h1 class="page" style="font-size:32px">任务</h1>
@@ -551,6 +660,47 @@ function tasks() {
     </div>`;
 }
 
+/** 连上后端时的任务页。 */
+function tasksLive() {
+  if (state.loading) {
+    return `<div class="phone-body"><h1 class="page" style="font-size:32px">任务</h1>
+      <div class="state-banner">正在读取你的任务。</div></div>`;
+  }
+  if (state.liveError) {
+    return `<div class="phone-body"><h1 class="page" style="font-size:32px">任务</h1>
+      <div class="state-banner bad">${escapeHtml(state.liveError)}</div>
+      <button class="btn" data-action="reload">再读一次</button></div>`;
+  }
+  const task = state.liveTask;
+  if (!task) {
+    return `<div class="phone-body"><h1 class="page" style="font-size:32px">任务</h1>
+      <div class="state-banner">老师还没有发布任务。</div></div>`;
+  }
+  const graded = ["results_ready", "awaiting_manual", "closed"].includes(task.status);
+  const due = task.deadline_at
+    ? new Date(task.deadline_at * 1000).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "未设截止";
+  const needDiagnostic = task.diagnostic_required;
+  return `
+    <div class="phone-body">
+      <h1 class="page" style="font-size:32px">任务</h1>
+      <section class="panel">
+        <h3>${escapeHtml(state.goalLabel || "本轮任务")}</h3>
+        <p class="muted">教师发布 · ${task.questions.length || 2} 题 · 截止 ${due}</p>
+        ${needDiagnostic
+          ? `<div class="state-banner warn">先做一次不计分的短诊，之后才开放正式卷。</div>
+             <button class="btn primary" data-action="open-diagnostic">开始短诊</button>`
+          : graded
+            ? `<button class="btn primary" data-action="open-task">查看结果</button>`
+            : `<button class="btn primary" data-action="open-task">${task.draft_answers && Object.keys(task.draft_answers).length ? "继续作答" : "开始作答"}</button>`}
+      </section>
+      <section class="panel">
+        <h3>本轮状态</h3>
+        <p class="muted">${graded ? `已评分，成绩 ${(task.attempts[0] || {}).total_score ?? "—"} / ${(task.attempts[0] || {}).max_score ?? "—"}` : "尚未交卷。首次成绩会单独保留。"}</p>
+      </section>
+    </div>`;
+}
+
 function mine() {
   return `
     <div class="phone-body">
@@ -561,6 +711,7 @@ function mine() {
 }
 
 function workspace() {
+  if (state.live) return workspaceLive();
   const prompts = [
     "3(x − 2) = 2x + 1。先写出去括号后的式子。",
     "把含 x 的项移到一边后，系数是多少？",
@@ -588,6 +739,7 @@ function workspace() {
 }
 
 function resultPage() {
+  if (state.live) return resultPageLive();
   const waiting = state.banner === "awaiting";
   return `
     <div class="phone-body">
@@ -595,6 +747,89 @@ function resultPage() {
       ${waiting ? '<div class="state-banner warn">第 2 题等待教师评分。全部完成前不显示对错和解析。</div>' : `
         <section class="panel"><h3>首次成绩 2 / 3</h3><p>第 1 题漏乘。第 3 题检验正确。重做不会改这个成绩。</p></section>
         <section class="panel"><h3>第 1 题</h3><p class="formula">3(x − 2) = 3x − 6</p><p class="muted">${state.seenSolution ? "你已看过解析，再次作答不再当作新的独立依据。" : "解析在交卷后才开放。"}</p></section>`}
+      <button class="btn" data-action="retry">再做一次</button>
+    </div>`;
+}
+
+/** 连上后端时的作答区：题目、选项、保存、交卷都是真的。 */
+function workspaceLive() {
+  const task = state.liveTask;
+  if (!task) {
+    return `<div class="phone-body"><h1 class="page" style="font-size:32px">作答</h1>
+      <div class="state-banner">没有可作答的任务。</div></div>`;
+  }
+  const questions = task.questions || [];
+  if (!questions.length) {
+    return `<div class="phone-body"><h1 class="page" style="font-size:32px">作答</h1>
+      <div class="state-banner warn">正式卷尚未开放，请先完成短诊。</div>
+      <button class="btn primary" data-action="open-diagnostic">去短诊</button></div>`;
+  }
+  const locked = state.banner === "takeover";
+  const current = Math.min(state.currentQ, questions.length - 1);
+  const question = questions[current];
+  const chosen = state.answers[current];
+  return `
+    <div class="phone-body">
+      <div class="row" style="justify-content:space-between">
+        <span class="tag">${state.mode === "focus" ? "专注作答" : "辅导"}</span>
+        <button class="btn" data-action="toggle-mode">${state.mode === "focus" ? "打开辅导" : "只看作答"}</button>
+      </div>
+      <div class="q-nav">
+        ${questions.map((_, index) => `<button class="chip" data-q="${index}" aria-pressed="${current === index}">${index + 1}${state.answers[index] === undefined || state.answers[index] === "" ? " · 未答" : ""}</button>`).join("")}
+      </div>
+      <p class="formula">${escapeHtml(question.stem)}</p>
+      ${locked ? '<div class="state-banner bad">另一台设备正在作答。这里改为只读。</div>' : ""}
+      ${state.banner === "save-fail" ? '<div class="state-banner bad">没有保存成功。输入还在页面上，请再试一次。</div>' : ""}
+      <div class="options">
+        ${(question.options || []).map((option, index) => `
+          <button class="option" data-choose="${index}" aria-pressed="${chosen === index}" ${locked ? "disabled" : ""}>
+            <b>${String.fromCharCode(65 + index)}</b><span>${escapeHtml(option)}</span>
+          </button>`).join("")}
+      </div>
+      ${state.mode === "tutor" ? '<div class="bubble">先自己写一步。需要时再要提示，提示不扣这次成绩。</div><button class="btn" data-action="hint">要一步提示</button>' : ""}
+      <div class="row" style="margin-top:14px">
+        <button class="btn" data-action="save-draft" ${locked ? "disabled" : ""}>保存进度</button>
+        <button class="btn primary" data-action="submit" ${locked ? "disabled" : ""}>交卷</button>
+      </div>
+      <p class="muted" style="margin-top:10px">共 ${questions.length} 题 · 全部作答后才能交卷。</p>
+    </div>`;
+}
+
+/** 连上后端时的结果页：分数与逐题对错都来自真实评卷。 */
+function resultPageLive() {
+  const task = state.liveTask;
+  const attempt = task && task.attempts && task.attempts[0];
+  if (!task || !attempt) {
+    return `<div class="phone-body"><h1 class="page" style="font-size:32px">本轮结果</h1>
+      <div class="state-banner warn">还在评卷，成绩稍后出现在这里。</div></div>`;
+  }
+  if (!task.answer_released) {
+    return `<div class="phone-body"><h1 class="page" style="font-size:32px">本轮结果</h1>
+      <div class="state-banner warn">整轮评分完成前不显示对错和解析。</div>
+      <button class="btn" data-action="refresh-task">刷新</button></div>`;
+  }
+  const items = attempt.items || [];
+  const byId = Object.fromEntries(items.map((item) => [item.question_id, item]));
+  return `
+    <div class="phone-body">
+      <h1 class="page" style="font-size:32px">本轮结果</h1>
+      <section class="panel">
+        <h3>${attempt.kind === "first" ? "首次成绩" : "重做成绩"} ${attempt.total_score} / ${attempt.max_score}</h3>
+        <p class="muted">${attempt.independent_evidence ? "这是一次独立作答，会作为新依据。" : "已看过解析，不再当作新的独立依据。"}</p>
+      </section>
+      ${(task.questions || []).map((question) => {
+        const item = byId[question.id] || {};
+        const yours = attempt.answers ? attempt.answers[question.id] : undefined;
+        const correct = item.score_units > 0;
+        return `<section class="panel">
+          <h3>${correct ? "答对" : "这题没拿到分"} · ${item.score ?? 0} / ${question.points}</h3>
+          <p class="formula">${escapeHtml(question.stem)}</p>
+          <p class="muted">你选的是：${yours === undefined ? "未作答" : escapeHtml((question.options || [])[yours] || String(yours))}</p>
+          ${question.answer !== undefined ? `<p class="muted">正确答案：${escapeHtml((question.options || [])[question.answer] || String(question.answer))}</p>` : ""}
+          ${item.result && item.result.why ? `<p class="muted">判定：${escapeHtml(item.result.why)}</p>` : ""}
+          ${question.explanation ? `<p>${escapeHtml(question.explanation)}</p>` : ""}
+        </section>`;
+      }).join("")}
       <button class="btn" data-action="retry">再做一次</button>
     </div>`;
 }
@@ -623,7 +858,14 @@ function bind() {
     if (state.role === "student") {
       state.studentTab = node.dataset.tab;
       state.studentPage = "home";
-    } else state.authTab = node.dataset.tab;
+    } else {
+      state.authTab = node.dataset.tab;
+      // 切到另一个入口方式时，上一个方式的失败状态要一起清掉，
+      // 否则申请页会顶着上一次"码已过期"的红色状态
+      state.error = "";
+      state.authStatus = "ready";
+      state.authInput = "";
+    }
     state.error = "";
     render();
   }));
@@ -638,6 +880,11 @@ function bind() {
   }));
   view.querySelectorAll("[data-q]").forEach((node) => node.addEventListener("click", () => {
     state.currentQ = Number(node.dataset.q);
+    render();
+  }));
+  // 连上后端时的选项按钮：选中即记进本机答案，不立刻发请求
+  view.querySelectorAll("[data-choose]").forEach((node) => node.addEventListener("click", () => {
+    state.answers[state.currentQ] = Number(node.dataset.choose);
     render();
   }));
   view.querySelectorAll("[data-state]").forEach((node) => node.addEventListener("click", () => {
@@ -706,6 +953,10 @@ function onAction(event) {
   }
   if (action === "open-drawer") state.drawer = true;
   if (action === "close-drawer") state.drawer = false;
+  if (action === "reload") {
+    loadWorkspace();
+    return;
+  }
   if (action === "prepare") toast("还差 1 道检验题，备齐前不会发布");
   if (action === "as-student") {
     state.role = "student";
@@ -724,9 +975,38 @@ function onAction(event) {
   if (action === "voice") state.sheet = "voice";
   if (action === "explain" || action === "find") state.sheet = "explain";
   if (action === "close-sheet") state.sheet = null;
-  if (action === "practice" || action === "open-task") {
+  if (action === "practice") {
     state.studentPage = "workspace";
     state.sheet = null;
+  }
+  if (action === "open-task") {
+    if (state.live) {
+      // 已评分就直接看结果，否则拿租约进作答区
+      const graded = state.liveTask
+        && ["results_ready", "awaiting_manual", "closed"].includes(state.liveTask.status);
+      if (graded) {
+        state.studentPage = "result";
+        state.sheet = null;
+        render();
+      } else {
+        openLiveTask();
+      }
+      return;
+    }
+    state.studentPage = "workspace";
+    state.sheet = null;
+  }
+  if (action === "open-diagnostic") {
+    if (state.live) { runDiagnostic(); return; }
+    state.studentPage = "workspace";
+  }
+  if (action === "save-draft") {
+    if (state.live) { saveLiveDraft(); return; }
+    state.sheet = null;
+  }
+  if (action === "refresh-task") {
+    if (state.live) { loadWorkspace(); return; }
+    render();
   }
   if (action === "toggle-mode") state.mode = state.mode === "focus" ? "tutor" : "focus";
   if (action === "hint") toast("先写出括号外的数乘到了哪几项");
@@ -802,23 +1082,96 @@ function readPassword(data) {
   return String(data.get("password") || data.get("key") || "");
 }
 
+/** 核对通过后的统一收尾：金属化散、切到工作区。 */
+function enterWorkspace(role, displayName, { live, message }) {
+  state.authStatus = "ready";
+  state.role = role;
+  state.who = displayName;
+  state.step = 3;
+  state.live = live;
+  state.railLog = [live ? "已连上正式服务" : "使用虚构样例", "会话已开启"];
+  state.railLabel = live ? "入口 · 已连服务" : "入口 · 虚构样例";
+  if (scene) {
+    scene.setVerify(0);
+    scene.playDissolve(900);
+  }
+  window.setTimeout(() => {
+    state.screen = "app";
+    state.banner = "";
+    toast(message);
+    render();
+    if (scene) {
+      scene.setReveal(0);
+      scene.setAssembled();
+    }
+    // 进工作区后拉真实数据
+    if (live) loadWorkspace();
+  }, state.reduce ? 0 : 700);
+}
+
+function failAuth(message) {
+  state.authStatus = "denied";
+  state.error = message;
+  state.attempts += 1;
+  state.railLog = [`第 ${state.attempts} 次未通过`, "会话未开启"];
+  state.step = 4;
+  if (scene) scene.setDenied(1);
+  render();
+  window.setTimeout(() => { if (scene) scene.setDenied(0); }, 900);
+}
+
 function submitAuth(data) {
   if (state.authStatus === "checking") return;
   const { key, account, name } = readKeyValue(data);
   const password = readPassword(data);
   const code = String(data.get("code") || "");
   const who = account || key || name;
-  state.authAccount = account || key || name;
-  const fail = (message) => {
-    state.authStatus = "denied";
-    state.error = message;
-    state.attempts += 1;
-    state.railLog = [`第 ${state.attempts} 次未通过`, "会话未开启"];
-    state.step = 4;
-    if (scene) scene.setDenied(1);
-    render();
-    window.setTimeout(() => { if (scene) scene.setDenied(0); }, 900);
-  };
+  state.authAccount = who;
+
+  state.authStatus = "checking";
+  state.error = "";
+  state.railLog = ["正在核对账号", "会话未开启"];
+  state.railLabel = "入口 · 核对中";
+  state.step = 2;
+  if (scene) scene.setVerify(1);
+  render();
+
+  // 连上后端：走真实登录 / 激活 / 申请
+  if (state.live) {
+    (async () => {
+      try {
+        if (state.authTab === "apply") {
+          await api.post("/auth/teacher-applications", {
+            username: who, display_name: String(data.get("name") || who), password,
+          });
+          state.authStatus = "sent";
+          state.railLog = ["申请已提交", "等待审核"];
+          state.railLabel = "申请 · 待审核";
+          state.step = 3;
+          if (scene) scene.setVerify(0);
+          render();
+          toast("申请已提交，审核通过前不能进入工作台");
+          return;
+        }
+        if (state.authTab === "activate") {
+          await api.post("/auth/activate", { code, password });
+          toast("已激活，正在进入");
+        }
+        const user = await api.login(who, password);
+        enterWorkspace(user.role, user.display_name,
+          { live: true, message: `已进入${user.display_name ? " " + user.display_name : ""}` });
+      } catch (error) {
+        if (scene) scene.setVerify(0);
+        const message = error && error.message ? error.message : "登录未完成";
+        const hint = error && error.retryable ? `${message}（可重试）` : message;
+        failAuth(hint);
+      }
+    })();
+    return;
+  }
+
+  // 没有后端：保留原来的虚构流程，界面上会标注这是样例
+  const fail = failAuth;
   if (state.authTab === "apply") {
     state.authStatus = "sent";
     state.error = "";
@@ -836,33 +1189,128 @@ function submitAuth(data) {
     state.step = 4;
     return fail("账号已停用，会话也已失效。");
   }
-  state.authStatus = "checking";
-  state.error = "";
-  state.railLog = ["正在核对账号", "会话未开启"];
-  state.railLabel = "入口 · 核对中";
-  state.step = 2;
-  if (scene) scene.setVerify(1);
-  render();
   window.setTimeout(() => {
-    state.authStatus = "ready";
-    state.role = who.startsWith("lin") ? "student" : "teacher";
-    state.who = state.role === "student" ? "林夏" : "陈宁";
-    state.step = 3;
-    if (scene) {
-      scene.setVerify(0);
-      scene.playDissolve(900);
-    }
-    window.setTimeout(() => {
-      state.screen = "app";
-      state.banner = "";
-      toast(state.role === "student" ? "进入林夏的学习" : "进入七（1）班");
-      render();
-      if (scene) {
-        scene.setReveal(0);
-        scene.setAssembled();
-      }
-    }, state.reduce ? 0 : 700);
+    const role = who.startsWith("lin") ? "student" : "teacher";
+    enterWorkspace(role, role === "student" ? "林夏" : "陈宁", {
+      live: false,
+      message: role === "student" ? "进入林夏的学习" : "进入七（1）班",
+    });
   }, state.reduce ? 0 : 900);
+}
+
+// ── 连真后端：把正式数据拉进来，映射成原型能渲染的形状 ────────────────
+// 后端返回的是完整业务对象；渲染层只需要一部分字段。所有映射都在这里做，
+// 免得渲染函数里到处判断"这是真数据还是样例"。
+
+async function loadWorkspace() {
+  if (!state.live) return;
+  state.loading = true;
+  state.liveError = "";
+  render();
+  try {
+    if (state.role === "teacher") {
+      await loadTeacher();
+    } else {
+      await loadStudent();
+    }
+  } catch (error) {
+    state.liveError = error && error.message ? error.message : "读取学习记录时出错了";
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
+async function loadTeacher() {
+  const courses = await api.teacherClasses();
+  const withClasses = courses.find((entry) => entry.classes.length) || courses[0];
+  if (!withClasses) {
+    state.liveError = "这个账号还没有可访问的课程";
+    return;
+  }
+  state.courseId = withClasses.course.id;
+  state.courseName = withClasses.course.name;
+  const classroom = withClasses.classes[0];
+  if (!classroom) {
+    state.liveError = "这门课还没有班级";
+    return;
+  }
+  state.classId = classroom.id;
+  state.className = classroom.name;
+
+  const [members, goalList] = await Promise.all([
+    api.classMembers(state.classId),
+    api.goals(state.classId),
+  ]);
+  state.liveGoals = goalList;
+  const goal = goalList[0];
+
+  // 每位学生：先看有没有任务，再看有没有已评分成绩
+  const students = [];
+  for (const member of members) {
+    const entry = {
+      id: member.user_id,
+      name: member.display_name || member.username,
+      status: member.status === "active" ? "在班" : "未激活",
+      note: "",
+      mastery: null,
+      evidence: "",
+      task: null,
+      attempt: null,
+    };
+    try {
+      const tasks = goal ? await api.myTasks(goal.id).catch(() => []) : [];
+      const task = tasks.find((item) => item.student_id === member.user_id);
+      if (task) entry.task = task;
+    } catch {
+      /* 单个学生读不到不影响整体 */
+    }
+    students.push(entry);
+  }
+
+  // 教师用自己的会话读不到学生任务，改从目标证据里取成绩
+  if (goal && students.length) {
+    for (const entry of students) {
+      try {
+        const evidence = await api.goalEvidence(goal.id, entry.id);
+        // 后端返回 { items: [...] }，每条记录带 score_units / max_score_units
+        const items = Array.isArray(evidence) ? evidence : (evidence.items || []);
+        const scored = items.filter((item) => typeof item.score_units === "number" && item.max_score_units);
+        if (scored.length) {
+          const earned = scored.reduce((sum, item) => sum + item.score_units, 0);
+          const possible = scored.reduce((sum, item) => sum + item.max_score_units, 0);
+          entry.mastery = possible ? Math.round((earned / possible) * 100) : null;
+          entry.earned = earned / 100;
+          entry.possible = possible / 100;
+          entry.evidence = `本轮 ${scored.length} 条评分记录，来自 ${new Set(scored.map((i) => i.attempt_id)).size} 次作答。`;
+          entry.note = entry.mastery === null
+            ? "记录不足，先不判断。"
+            : entry.mastery >= 80 ? "本轮已能独立完成，可进入目标题。"
+            : entry.mastery >= 50 ? "部分掌握，先补讲解再练。" : "需要先补基础，建议先看讲解。";
+        } else {
+          entry.note = "还没有本轮作答记录。";
+          entry.evidence = "记录不足以判断，不显示 0%。";
+        }
+      } catch {
+        entry.note = "读取依据时出错，稍后重试。";
+      }
+    }
+  }
+  state.liveStudents = students;
+  state.liveGoals = goalList;
+}
+
+async function loadStudent() {
+  const tasks = await api.myTasks();
+  if (!tasks.length) {
+    state.liveError = "还没有分配给你的任务";
+    state.liveTask = null;
+    return;
+  }
+  const summary = tasks[0];
+  const full = await api.task(summary.id);
+  state.liveTask = full;
+  state.goalLabel = (state.liveGoals.find((goal) => goal.id === full.goal_id) || {}).title || "本轮任务";
 }
 
 function submitPaper() {
@@ -873,10 +1321,130 @@ function submitPaper() {
     render();
     return;
   }
+  // 连上后端：走真实的交卷接口，等后台评卷
+  if (state.live && state.liveTask) {
+    (async () => {
+      try {
+        state.loading = true;
+        render();
+        // 交卷前先把当前答案存成草稿：后端要求草稿与提交分开，且都要版本号
+        const questions = state.liveTask.questions || [];
+        const payload = {};
+        questions.forEach((question, index) => {
+          const value = state.answers[index];
+          if (value !== undefined && value !== "") payload[question.id] = value;
+        });
+        const saved = await api.saveDraft(
+          state.liveTask.id, state.liveTask.version, state.liveLease, payload, `pre-submit-${Date.now()}`);
+        await api.submitTask(state.liveTask.id, saved.version, state.liveLease,
+                             `submit-${state.liveTask.id}-${Date.now()}`);
+        state.submitted = true;
+        state.studentPage = "result";
+        state.banner = "awaiting";
+        toast("已交卷，正在后台评卷");
+        await pollTask();
+      } catch (error) {
+        state.banner = "save-fail";
+        toast(error && error.message ? error.message : "交卷没有成功，可以再试一次");
+      } finally {
+        state.loading = false;
+        render();
+      }
+    })();
+    return;
+  }
   state.submitted = true;
   state.studentPage = "result";
   state.banner = state.banner === "awaiting" ? "awaiting" : "";
   toast("已交卷，成绩以这次快照为准");
+  render();
+}
+
+/** 等后台评卷完成；不假造进度，就是定时问一次。 */
+async function pollTask(tries = 40) {
+  if (!state.live || !state.liveTask) return;
+  for (let i = 0; i < tries; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    try {
+      const full = await api.task(state.liveTask.id);
+      state.liveTask = full;
+      if (["results_ready", "awaiting_manual", "closed"].includes(full.status)) {
+        state.banner = "";
+        render();
+        return;
+      }
+    } catch {
+      return;
+    }
+  }
+}
+
+/** 学生进工作区时先拿编辑租约——后端规定同一任务同时只允许一端作答。 */
+async function openLiveTask() {
+  if (!state.live || !state.liveTask) return;
+  try {
+    state.loading = true;
+    render();
+    const lease = await api.acquireLease(state.liveTask.id, "prototype-browser", { takeover: true });
+    state.liveLease = lease;
+    state.liveTask = await api.task(state.liveTask.id);
+    // 把已有草稿填进本机答案，接着上次继续
+    const draft = state.liveTask.draft_answers || {};
+    state.answers = (state.liveTask.questions || []).map((question) =>
+      draft[question.id] === undefined ? "" : draft[question.id]);
+    state.currentQ = 0;
+    state.studentPage = "workspace";
+  } catch (error) {
+    state.banner = "takeover";
+    toast(error && error.message ? error.message : "另一端正在作答");
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
+/** 首诊：不计分、无提示，完成后才开放正式卷。 */
+async function runDiagnostic() {
+  if (!state.live || !state.liveTask) return;
+  try {
+    state.loading = true;
+    render();
+    const diagnostic = await api.startDiagnostic(
+      state.liveTask.id, state.liveTask.version, `diagnostic-${Date.now()}`);
+    const questions = diagnostic.questions || [];
+    const answers = {};
+    // 演示路径：首诊只用来解锁正式卷，这里按题目顺序取第一项作答
+    for (const question of questions) answers[question.id] = 0;
+    await api.submitDiagnostic(diagnostic.id, answers, `diagnostic-submit-${Date.now()}`);
+    state.liveTask = await api.task(state.liveTask.id);
+    toast("短诊完成，正式卷已开放");
+  } catch (error) {
+    toast(error && error.message ? error.message : "短诊没有完成");
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
+/** 保存草稿：带版本与租约，后端据此拒绝过期写入。 */
+async function saveLiveDraft() {
+  if (!state.live || !state.liveTask || !state.liveLease) return;
+  try {
+    const questions = state.liveTask.questions || [];
+    const payload = {};
+    questions.forEach((question, index) => {
+      const value = state.answers[index];
+      if (value !== undefined && value !== "") payload[question.id] = value;
+    });
+    const saved = await api.saveDraft(
+      state.liveTask.id, state.liveTask.version, state.liveLease, payload, `draft-${Date.now()}`);
+    state.liveTask = { ...state.liveTask, version: saved.version, draft_answers: payload };
+    state.banner = "";
+    toast("进度已保存");
+  } catch (error) {
+    state.banner = "save-fail";
+    toast(error && error.message ? error.message : "没有保存成功");
+  }
   render();
 }
 
@@ -1104,6 +1672,21 @@ setInterval(tickClock, 1000);
 // 注意 state.reveal 也要一起改——只改 3D 场景的话，DOM 面板仍然是隐藏的。
 if (state.reduce) state.reveal = 1;
 state.shifted = state.reveal > 0.5;
+// 后端探测结果由 index.html 里的 api.probe() 提供
+state.live = Boolean(window.api && window.api.state.live);
+if (state.live) {
+  state.railLog = ["已连上正式服务", "等待账号口令"];
+  state.railLabel = "入口 · 已连服务";
+  // 已经有会话就直接进工作区，刷新不会掉出来
+  window.api.currentUser().then((user) => {
+    if (!user) return;
+    enterWorkspace(user.role, user.display_name,
+      { live: true, message: `已进入${user.display_name ? " " + user.display_name : ""}` });
+  });
+} else {
+  state.railLog = ["未连上服务，用虚构样例", "会话未开启"];
+  state.railLabel = "入口 · 虚构样例";
+}
 mountScene();
 fitCanvas();
 render();
