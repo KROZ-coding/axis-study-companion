@@ -56,12 +56,24 @@ const state = {
   reveal: 0,
   authStatus: "ready",
   authAccount: "",
+  authInput: "",
+  attempts: 0,
+  capsLock: false,
+  clock: { hm: "--:--", sec: "--", date: "" },
+  step: 0,
+  anchorA: { x: 900, y: 470 },
+  anchorB: { x: 560, y: 640 },
+  anchorYaw: 0.40,
+  anchorPitch: 0.17,
+  anchorSpin: 0,
+  railLog: ["等待账号口令", "会话未开启"],
+  railLabel: "入口 · 会话未开启",
+  fallback: false,
   yaw: 0.5,
   pitch: 0.25,
 };
 
 let toastTimer = 0;
-let glass = null;
 
 function toast(text) {
   toastEl.textContent = text;
@@ -82,65 +94,228 @@ function render() {
   else if (state.role === "teacher") renderTeacher();
   else renderStudent();
   bind();
+  if (state.screen === "entry") {
+    fitCanvas();
+    refreshAnchors();
+  }
 }
 
 const AUTH_COPY = {
   login: {
     title: "从上次停下的地方继续",
     lede: "老师回到班级，学生回到自己的题。进哪一边，由账号决定。",
-    submit: "登录",
+    submit: "请求进入",
+    placeholder: "输入账号，Enter 确认",
   },
   activate: {
     title: "第一次来，先设一个密码",
     lede: "用老师给你的一次性码激活。忘了密码，也从这里重设。",
-    submit: "激活并设置密码",
+    submit: "激活",
+    placeholder: "账号 · 一次性码 · 新密码",
   },
   apply: {
     title: "申请教师账号",
     lede: "提交后等待审核，通过前不能进入工作台。",
     submit: "提交申请",
+    placeholder: "姓名 · 学校邮箱 · 任教课程",
   },
 };
 const AUTH_STATUS = { ready: "就绪", checking: "核对中", denied: "未通过", sent: "已提交" };
+const AUTH_ROLE = { login: "学员", activate: "新学员", apply: "申请人" };
+const AUTH_STATE_LABEL = { denied: "未通过", checking: "核对中", sent: "已提交" };
 
 function renderEntry() {
   const open = state.reveal > 0.5;
   state.shifted = open;
+  const rv = state.reveal.toFixed(3);
   view.innerHTML = `
-    <section class="entry ${open ? "shifted" : ""}" style="--reveal:${state.reveal.toFixed(3)}">
-      <div class="orb-hit" aria-hidden="true"></div>
-      <div class="entry-copy" ${open ? "inert" : ""}>
-        <p class="mark">智慧学伴</p>
-        <h1>把下一道题，放在看得懂的位置。</h1>
-        <p class="lede">同一学习目标下，先看每人已有的依据，再决定讲解、练习和提示。这里是可点击原型，内容为虚构样例。</p>
-        <span class="sample-flag">虚构样例 · 不是实时模型</span>
+    <section class="entry ${open ? "shifted" : ""}" style="--reveal:${rv}">
+      <div class="entry-canvas">
+        ${state.fallback ? fallbackSvg() : ""}
+        <div class="entry-layer keep rail" aria-hidden="true">
+          <div class="rail-rule" style="--reveal:${rv}"></div>
+          <div class="rail-marker" style="--reveal:${rv}"></div>
+          <div class="rail-body" style="--reveal:${rv}">
+            <i class="rail-bar"></i>
+            <i class="rail-dash" style="top:358px"></i>
+            <div class="rail-chip" style="left:44px; top:396px">智慧学伴 · 学习记录</div>
+            <p class="rail-micro" style="top:416px">每一次作答、提示与材料引用都留在原处。判断写在依据旁边，记录不够时就写记录不够。</p>
+            <div class="rail-chip" style="left:44px; top:632px">访问记录</div>
+            <div class="rail-log" style="top:656px">
+              ${state.railLog.map((row) => `<div class="row"><i></i>${escapeHtml(row)}</div>`).join("")}
+            </div>
+            <i class="rail-dash" style="left:44px; top:852px"></i>
+            <i class="rail-hair" style="left:66px; top:853px"></i>
+            <div class="rail-hints" style="top:872px">
+              <span><b>↓</b>展开登录</span><span><b>拖</b>转动装置</span>
+              <span><b>Tab</b>切换栏位</span><span><b>Enter</b>确认</span>
+            </div>
+            <i class="rail-foot" style="top:946px"></i>
+            <div class="rail-label" style="left:71px; top:944px">${escapeHtml(state.railLabel)}</div>
+          </div>
+        </div>
+
+        <div class="entry-layer keep brand" aria-hidden="true">
+          <div class="brand-l1">智慧学伴</div>
+          <div class="brand-l2"><span class="axis">AXIS</span></div>
+          <div class="brand-l3">LEARNING EVIDENCE OS</div>
+          <div class="brand-rule"></div>
+        </div>
+
+        <div class="entry-layer keep chrono" aria-hidden="true">
+          <div class="chrono-steps">
+            ${[0, 1, 2, 3, 4].map((i) => `<div class="step-node ${i === state.step ? "on" : ""}"><i></i></div>`).join("")}
+          </div>
+          <div class="chrono-time">
+            <span class="chrono-hm">${state.clock.hm}</span><span class="chrono-sec">${state.clock.sec}</span>
+          </div>
+          <div class="chrono-date">${state.clock.date}</div>
+          <div class="chrono-term"><i></i>本地演示 · 虚构样例</div>
+        </div>
+
+        <div class="entry-layer callouts" aria-hidden="true">
+          <svg width="1920" height="1080">
+            <line x1="${state.anchorA.x}" y1="${state.anchorA.y}" x2="${state.anchorA.x + 150}" y2="${state.anchorA.y - 130}" />
+            <line x1="${state.anchorB.x}" y1="${state.anchorB.y}" x2="${state.anchorB.x - 120}" y2="${state.anchorB.y + 170}" />
+            <circle cx="${state.anchorA.x}" cy="${state.anchorA.y}" r="3.5" />
+            <circle cx="${state.anchorB.x}" cy="${state.anchorB.y}" r="3.5" />
+          </svg>
+          <div class="callout-label" style="left:${state.anchorA.x + 158}px; top:${state.anchorA.y - 152}px">
+            <span>SECT.01</span><b>学习记录</b><em>每一次作答与原题</em>
+          </div>
+          <div class="callout-label" style="left:${state.anchorB.x - 208}px; top:${state.anchorB.y + 168}px">
+            <span>SECT.02</span><b>判断依据</b><em>可定位 · 可复核</em>
+          </div>
+        </div>
+
+        <div class="entry-layer entry-copy">
+          <p class="eyebrow">七年级数学 · 一元一次方程</p>
+          <h1>把下一道题，放在看得懂的位置。</h1>
+          <p class="lede">同一学习目标下，先看每人已有的依据，再决定讲解、练习和提示。这里是可点击原型，内容为虚构样例。</p>
+          <span class="sample-flag">虚构样例 · 不是实时模型</span>
+        </div>
+
+        <div class="entry-layer entry-foot">
+          <button class="scroll-hint" type="button" data-action="reveal" ${open ? "inert" : ""}>
+            <span class="wheel" aria-hidden="true"><i></i></span>
+            <span class="hint-main">向下滑动登录</span>
+            <span class="hint-sub">拖动金属可以转动它</span>
+          </button>
+          <div class="entry-signature"><span>POWERED BY</span><b>AXIS</b><i></i></div>
+        </div>
+
+        ${authCard(open)}
       </div>
-      <button class="scroll-hint" type="button" data-action="reveal" ${open ? "inert" : ""}>
-        <span class="wheel" aria-hidden="true"><i></i></span>
-        <span class="hint-main">向下滑动登录</span>
-        <span class="hint-sub">拖动玻璃可以转动它</span>
-      </button>
-      ${authCard(open)}
     </section>`;
+}
+
+/** 顶部时钟：每秒刷新一次，避免整屏重渲染 */
+function tickClock() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const DAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  state.clock = {
+    hm: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+    sec: pad(now.getSeconds()),
+    date: `${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日 · ${DAYS[now.getDay()]}`,
+  };
+  if (state.screen !== "entry") return;
+  const root = view.querySelector(".chrono");
+  if (!root) return;
+  root.querySelector(".chrono-hm").textContent = state.clock.hm;
+  root.querySelector(".chrono-sec").textContent = state.clock.sec;
+  root.querySelector(".chrono-date").textContent = state.clock.date;
 }
 
 function authCard(open) {
   const copy = AUTH_COPY[state.authTab];
   const busy = state.authStatus === "checking";
+  const name = (state.authAccount || "").toUpperCase() || "尚未登记";
+  const stateLabel = AUTH_STATE_LABEL[state.authStatus] || "会话未开启";
+  const stateClass = state.authStatus === "denied" ? "alert" : state.authStatus === "sent" ? "ok" : "";
   return `<form class="auth-card ${state.authStatus === "denied" ? "denied" : ""}" data-action="auth" aria-labelledby="auth-title" ${open ? "" : "inert"}>
-      <header class="auth-head">
-        <span class="auth-mark">智慧学伴 · 入口</span>
-        <span class="auth-status" data-status="${state.authStatus}"><i aria-hidden="true"></i><span>${AUTH_STATUS[state.authStatus]}</span></span>
-      </header>
-      <h2 id="auth-title">${copy.title}</h2>
-      <p class="auth-lede">${copy.lede}</p>
-      ${authFields()}
-      <p class="error-line" role="alert">${escapeHtml(state.error)}</p>
-      <button class="btn primary wide" type="submit" ${busy ? "disabled" : ""}>${busy ? "核对中…" : copy.submit}</button>
-      <div class="auth-alt">${authLinks()}</div>
-      <div class="auth-foot">
-        ${state.authTab === "login" ? `<details class="proto-note"><summary>原型账号</summary><p>teacher 进教师工作台，linxia 进学生端，密码随意。一次性码填 000000 看过期，账号或密码填 disabled 看停用。</p></details>` : "<span></span>"}
-        <button class="linkish" type="button" data-action="back-entry">回到开场</button>
+      <div class="auth-rear" aria-hidden="true"></div>
+      <div class="auth-slab" aria-hidden="true">
+        <div class="hatch"></div>
+        <div class="ghost">${state.authStatus === "checking" ? "SECURE" : "INFO"}</div>
+        <div class="ghost-name">${escapeHtml(name)}</div>
+        <i class="auth-bev t"></i><i class="auth-bev l"></i><i class="auth-bev b"></i><i class="auth-bev r"></i>
+      </div>
+      <div class="auth-inner">
+        <header class="auth-head">
+          <span class="auth-mark"><i aria-hidden="true"></i>档案 · 入口</span>
+          <div class="auth-head-right">
+            <span class="auth-outline">学习证据系统</span>
+            <span class="auth-brandtag">智慧学伴 AXIS</span>
+          </div>
+        </header>
+
+        <div class="auth-photo" aria-hidden="true">
+          <div class="film">
+            <svg class="sil" viewBox="0 0 100 124" preserveAspectRatio="none">
+              <defs><pattern id="authHatch" width="3.2" height="3.2" patternUnits="userSpaceOnUse"><circle cx="1.6" cy="1.6" r="0.75" fill="#ffffff" fill-opacity="0.16"/></pattern></defs>
+              <path d="M 50 14 C 63 14 71 24 71 38 C 71 50 66 60 59 65 L 60 72 C 72 75 86 80 93 90 C 99 99 101 112 101 124 L -1 124 C -1 112 1 99 7 90 C 14 80 28 75 40 72 L 41 65 C 34 60 29 50 29 38 C 29 24 37 14 50 14 Z" fill="#14343f" />
+              <path d="M 50 14 C 63 14 71 24 71 38 C 71 50 66 60 59 65 L 60 72 C 72 75 86 80 93 90 C 99 99 101 112 101 124 L -1 124 C -1 112 1 99 7 90 C 14 80 28 75 40 72 L 41 65 C 34 60 29 50 29 38 C 29 24 37 14 50 14 Z" fill="url(#authHatch)" />
+            </svg>
+            <span class="classified">${busy ? "核对中" : "虚构样例"}</span>
+          </div>
+          <div class="badge">AX</div>
+          <i class="tick" style="right:-3px; top:-3px"></i><i class="tick" style="left:-3px; bottom:-3px"></i><i class="tick" style="right:-3px; bottom:-3px"></i>
+        </div>
+
+        <div class="auth-id">
+          <div class="auth-rank">
+            <span class="auth-role">${AUTH_ROLE[state.authTab]}</span>
+            <span class="auth-state ${stateClass}">${stateLabel}</span>
+          </div>
+          <div class="auth-name"><b>${escapeHtml(name)}</b></div>
+          <div class="auth-file">
+            <span class="stamp">AXIS</span>
+            <div class="info">
+              <div class="loaded">学习记录已载入 <i></i></div>
+              <div class="mono">■ ${state.authTab === "apply" ? "申请" : "七（1）班"} · ${AUTH_STATUS[state.authStatus]}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="auth-rings" aria-hidden="true">
+          <div class="ring"><i class="${state.capsLock ? "on" : ""}"></i><span>CAPS</span></div>
+          <div class="ring"><i class="${state.authAccount ? "on" : ""}"></i><span>账号</span></div>
+          <div class="ring"><i class="${state.authTab === "apply" ? "" : "on"}"></i><span>口令</span></div>
+        </div>
+
+        <div class="auth-profile">
+          <div class="ph">档案信息</div>
+          <dl>
+            <dt>身份</dt><dd>${AUTH_ROLE[state.authTab]}</dd>
+            <dt>范围</dt><dd>${state.authTab === "apply" ? "待审核" : "七（1）班 · 数学"}</dd>
+            <dt>状态</dt><dd>${stateLabel}</dd>
+            <dt>会话</dt><dd>${open ? "已就绪" : "未开启"}</dd>
+          </dl>
+          <i class="rule"></i><span class="foot">智慧学伴 AXIS</span>
+        </div>
+
+        <div class="auth-main">
+          <div class="auth-main-head">
+            <span class="label"><i></i>授权口令</span>
+            <span class="attempt ${state.authStatus === "denied" ? "hot" : ""}">${state.authStatus === "denied" ? "再来一次" : `第 ${state.attempts + 1} 次`}</span>
+          </div>
+          <h2 id="auth-title" class="auth-title">${copy.title}</h2>
+          <p class="auth-lede">${copy.lede}</p>
+          <div class="tabs" role="tablist" aria-label="入口方式">
+            <button class="chip" type="button" role="tab" data-tab="login" aria-pressed="${state.authTab === "login"}">账号口令</button>
+            <button class="chip" type="button" role="tab" data-tab="activate" aria-pressed="${state.authTab === "activate"}">一次性码</button>
+            <button class="chip" type="button" role="tab" data-tab="apply" aria-pressed="${state.authTab === "apply"}">申请账号</button>
+          </div>
+          ${authFields()}
+          <p class="error-line" role="alert">${escapeHtml(state.error)}</p>
+          ${state.authTab === "login" ? keyBar(copy, busy) : `<button class="btn primary wide" type="submit" ${busy ? "disabled" : ""}>${busy ? "核对中…" : copy.submit}</button>`}
+          <div class="auth-alt">${authLinks()}</div>
+          <div class="entry-note">
+            ${state.authTab === "login" ? `<details class="proto-note"><summary>原型账号</summary><p>teacher 进教师工作台，linxia 进学生端，口令随意。一次性码填 000000 看过期，账号或口令填 disabled 看停用。</p></details>` : "<span></span>"}
+            <button class="linkish" type="button" data-action="back-entry">回到开场</button>
+          </div>
+        </div>
       </div>
     </form>`;
 }
@@ -151,20 +326,40 @@ function authLinks() {
     <button class="linkish" type="button" data-tab="apply">老师还没有账号</button>`;
 }
 
+/** 口令条：登录时就是密码输入本身 —— 每敲一个字符落一个白格。
+ *  它不是第二个密码框，而是把这个密码框画成档案里的授权键条。 */
+function keyBar(copy, busy) {
+  return `<div class="keybar">
+      <div class="keybar-cells" aria-hidden="true">
+        ${state.authInput
+          ? Array.from({ length: Math.min(state.authInput.length, 22) }, () => '<i class="keybar-cell"></i>').join("")
+          : `<span class="keybar-ghost">${copy.placeholder}</span>`}
+      </div>
+      <input name="password" type="password" aria-label="口令" ${busy ? "disabled" : ""} autocomplete="current-password" />
+      <button type="submit" ${busy ? "disabled" : ""}>${busy ? "核对中" : copy.submit}<span aria-hidden="true">→</span></button>
+    </div>`;
+}
+
 function authFields() {
   const account = escapeHtml(state.authAccount);
   if (state.authTab === "apply") {
-    return `<label class="field">姓名<input name="name" required autocomplete="name" value="陈宁"></label>
+    return `<div class="auth-fields">
+      <label class="field">姓名<input name="name" required autocomplete="name" value="陈宁"></label>
       <label class="field">学校邮箱<input name="email" type="email" required autocomplete="email" value="chen@school.example"></label>
-      <label class="field">任教课程<input name="course" required value="七年级数学"></label>`;
+      <label class="field">任教课程<input name="course" required value="七年级数学"></label>
+    </div>`;
   }
   if (state.authTab === "activate") {
-    return `<label class="field">账号<input name="account" required autocomplete="username" value="${account || "linxia"}"></label>
+    return `<div class="auth-fields">
+      <label class="field">账号<input name="account" required autocomplete="username" value="${account || "linxia"}"></label>
       <label class="field">一次性码<input name="code" required autocomplete="one-time-code" placeholder="6 位码"></label>
-      <label class="field">新密码<input name="password" type="password" required minlength="8" autocomplete="new-password" placeholder="至少 8 位"></label>`;
+      <label class="field">新密码<input name="password" type="password" required minlength="8" autocomplete="new-password" placeholder="至少 8 位"></label>
+    </div>`;
   }
-  return `<label class="field">账号<input name="account" required autocomplete="username" value="${account}" placeholder="老师发给你的账号"></label>
-    <label class="field">密码<input name="password" type="password" required autocomplete="current-password"></label>`;
+  // 登录：账号在这里，口令在下方那条授权键条里（见 keyBar）
+  return `<div class="auth-fields compact">
+    <label class="field">账号<input name="account" required autocomplete="username" value="${account}" placeholder="老师发给你的账号"></label>
+  </div>`;
 }
 
 function renderTeacher() {
@@ -470,6 +665,20 @@ function bind() {
     render();
   }));
   view.querySelectorAll("form").forEach((form) => form.addEventListener("submit", onSubmit));
+  // 口令条：每敲一个字符就落一个白格，反映的是条内那个密码输入本身
+  const keyInput = view.querySelector(".keybar input");
+  if (keyInput) {
+    keyInput.addEventListener("input", () => {
+      state.authInput = keyInput.value;
+      const cells = view.querySelector(".keybar-cells");
+      if (!cells) return;
+      const shown = Array.from({ length: Math.min(state.authInput.length, 22) }, () => '<i class="keybar-cell"></i>').join("");
+      cells.innerHTML = shown || `<span class="keybar-ghost">${AUTH_COPY[state.authTab].placeholder}</span>`;
+    });
+    keyInput.addEventListener("keyup", (event) => {
+      state.capsLock = typeof event.getModifierState === "function" && event.getModifierState("CapsLock");
+    });
+  }
 }
 
 function onAction(event) {
@@ -481,11 +690,17 @@ function onAction(event) {
   if (action === "back-entry") {
     state.error = "";
     state.authStatus = "ready";
+    state.authInput = "";
     animateReveal(0);
     return;
   }
   if (action === "logout") {
-    Object.assign(state, { screen: "entry", shifted: false, reveal: 0, authStatus: "ready", authAccount: "", role: null, drawer: false, sheet: null, error: "" });
+    Object.assign(state, {
+      screen: "entry", shifted: false, reveal: 0, authStatus: "ready",
+      authAccount: "", authInput: "", role: null, drawer: false, sheet: null, error: "",
+      railLog: ["等待账号口令", "会话未开启"], railLabel: "入口 · 会话未开启", step: 0,
+    });
+    if (scene) scene.setReveal(0);
     render();
     return;
   }
@@ -573,38 +788,81 @@ function onSubmit(event) {
   }
 }
 
+// 登录与激活共用同一条口令输入：登录时它同时充当账号，
+// 激活/申请走下方各自的独立字段，所以这里要按 tab 取不同的值。
+function readKeyValue(data) {
+  const key = String(data.get("key") || "").trim();
+  const account = String(data.get("account") || "").trim();
+  const name = String(data.get("name") || "").trim();
+  return { key, account, name };
+}
+
+/** 口令条里的输入就是密码；登录时它同时充当"账号不填时的兜底标识" */
+function readPassword(data) {
+  return String(data.get("password") || data.get("key") || "");
+}
+
 function submitAuth(data) {
   if (state.authStatus === "checking") return;
-  const account = String(data.get("account") || data.get("name") || "").trim();
-  const password = String(data.get("password") || "");
+  const { key, account, name } = readKeyValue(data);
+  const password = readPassword(data);
   const code = String(data.get("code") || "");
-  state.authAccount = String(data.get("account") || "").trim();
+  const who = account || key || name;
+  state.authAccount = account || key || name;
   const fail = (message) => {
     state.authStatus = "denied";
     state.error = message;
+    state.attempts += 1;
+    state.railLog = [`第 ${state.attempts} 次未通过`, "会话未开启"];
+    state.step = 4;
+    if (scene) scene.setDenied(1);
     render();
+    window.setTimeout(() => { if (scene) scene.setDenied(0); }, 900);
   };
   if (state.authTab === "apply") {
     state.authStatus = "sent";
     state.error = "";
+    state.railLog = ["申请已提交", "等待审核"];
+    state.railLabel = "申请 · 待审核";
+    state.step = 3;
     toast("申请已提交，审核通过前不能进入工作台");
     render();
     return;
   }
-  if (state.authTab === "activate" && (code === "expired" || code === "000000")) return fail("这个一次性码已过期，请向老师再要一个。");
-  if (password === "disabled" || account === "disabled") return fail("账号已停用，会话也已失效。");
+  if (state.authTab === "activate" && (code === "expired" || code === "000000")) {
+    return fail("这个一次性码已过期，请向老师再要一个。");
+  }
+  if (password === "disabled" || who === "disabled" || key === "disabled") {
+    state.step = 4;
+    return fail("账号已停用，会话也已失效。");
+  }
   state.authStatus = "checking";
   state.error = "";
+  state.railLog = ["正在核对账号", "会话未开启"];
+  state.railLabel = "入口 · 核对中";
+  state.step = 2;
+  if (scene) scene.setVerify(1);
   render();
   window.setTimeout(() => {
     state.authStatus = "ready";
-    state.role = account.startsWith("lin") ? "student" : "teacher";
+    state.role = who.startsWith("lin") ? "student" : "teacher";
     state.who = state.role === "student" ? "林夏" : "陈宁";
-    state.screen = "app";
-    state.banner = "";
-    toast(state.role === "student" ? "进入林夏的学习" : "进入七（1）班");
-    render();
-  }, state.reduce ? 0 : 650);
+    state.step = 3;
+    if (scene) {
+      scene.setVerify(0);
+      scene.playDissolve(900);
+    }
+    window.setTimeout(() => {
+      state.screen = "app";
+      state.banner = "";
+      toast(state.role === "student" ? "进入林夏的学习" : "进入七（1）班");
+      render();
+      if (scene) {
+        scene.setReveal(0);
+        scene.setAssembled();
+      }
+    }, state.reduce ? 0 : 700);
+  }, state.reduce ? 0 : 900);
 }
 
 function submitPaper() {
@@ -622,23 +880,45 @@ function submitPaper() {
   render();
 }
 
-function mountGlass() {
-  if (glass) glass.stop();
+// ── 场景 ──────────────────────────────────────────────────────────────
+// 液态金属主视觉由 scene.js 负责；这里只管何时创建、何时让位、何时化散。
+let scene = null;
+
+function mountScene() {
   const canvas = document.querySelector("#glass");
-  if (!canvas) return;
-  glass = startGlass(canvas, state.reduce);
+  if (!canvas || scene || state.fallback) return;
+  scene = createScene(canvas, { reduce: () => state.reduce });
+  if (!scene) {
+    // 无 WebGL：换成一张静态玻璃弧，功能完全不受阻
+    stage.classList.add("no-webgl");
+    state.fallback = true;
+    if (state.screen === "entry") render();
+    return;
+  }
+  scene.setReveal(state.reduce ? 1 : 0);
+  if (state.reduce) scene.setAssembled();
+  else scene.playAssemble(1700);
+  scene.start();
+  window.__scene = scene;   // 截图与自动化检查用
 }
 
 let revealTimer = 0;
 
 function setReveal(value) {
   state.reveal = Math.min(1, Math.max(0, value));
+  if (scene) scene.setPull(state.reveal);
   const open = state.reveal > 0.5;
   if (open !== state.shifted || state.screen !== "entry" || !view.querySelector(".entry")) {
     render();
     return;
   }
-  view.querySelector(".entry").style.setProperty("--reveal", state.reveal.toFixed(3));
+  const entry = view.querySelector(".entry");
+  entry.style.setProperty("--reveal", state.reveal.toFixed(3));
+  // 侧栏的刻度、光标、微文案都跟着 reveal 走
+  for (const node of entry.querySelectorAll("[style*='--reveal']")) {
+    node.style.setProperty("--reveal", state.reveal.toFixed(3));
+  }
+  refreshAnchors();
 }
 
 function animateReveal(target) {
@@ -658,241 +938,124 @@ function animateReveal(target) {
   revealTimer = requestAnimationFrame(step);
 }
 
-function startGlass(canvas, reduce) {
-  const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true, antialias: true, depth: true });
-  if (!gl) {
-    canvas.insertAdjacentHTML("afterend", fallbackSvg());
-    return { stop() {} };
-  }
-  const vertex = `attribute vec3 pos; attribute vec3 normal;
-    uniform mat4 uMvp,uModel; uniform float uTime;
-    varying vec3 vN,vP,vLocal;
-    void main(){
-      float wobble=0.035*sin(uTime*0.8+pos.y*2.4);
-      vec3 morphed=pos*(1.0+wobble);
-      vec4 world=uModel*vec4(morphed,1.0);
-      vP=world.xyz; vN=mat3(uModel)*normal; vLocal=pos;
-      gl_Position=uMvp*vec4(morphed,1.0);
-    }`;
-  const fragment = `precision mediump float;
-    varying vec3 vN,vP,vLocal; uniform vec3 uEye;
-    void main(){
-      vec3 n=normalize(vN); vec3 viewDir=normalize(uEye-vP);
-      vec3 key=normalize(vec3(-0.55,0.75,0.45));
-      vec3 fill=normalize(vec3(0.7,-0.2,0.35));
-      float keyLit=pow(max(dot(n,key),0.0), 1.35);
-      float fillLit=max(dot(n,fill),0.0);
-      vec3 ice=vec3(0.05,0.16,0.24)+vec3(0.55,0.86,0.98)*keyLit+vec3(0.10,0.16,0.20)*fillLit;
-      float fres=pow(1.0-max(dot(n,viewDir),0.0), 2.6);
-      ice=mix(ice, vec3(0.86,0.97,1.0), fres*0.55);
-      float spec=pow(max(dot(reflect(-viewDir,n), key),0.0), 90.0);
-      vec3 color=ice+spec*vec3(1.0,1.0,1.0);
-      float alpha=0.78+0.18*fres;
-      gl_FragColor=vec4(color*alpha, alpha);
-    }`;
-  const program = link(gl, vertex, fragment);
-  if (!program) return { stop() {} };
-  const solid = crystalGeometry();
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, solid.interleaved, gl.STATIC_DRAW);
-  const stride = 24;
-  const posLoc = gl.getAttribLocation(program, "pos");
-  const norLoc = gl.getAttribLocation(program, "normal");
-  gl.enableVertexAttribArray(posLoc);
-  gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(norLoc);
-  gl.vertexAttribPointer(norLoc, 3, gl.FLOAT, false, stride, 12);
-  gl.useProgram(program);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
-    gl.enable(gl.DEPTH_TEST);
-  const uniforms = {
-    mvp: gl.getUniformLocation(program, "uMvp"),
-    model: gl.getUniformLocation(program, "uModel"),
-    eye: gl.getUniformLocation(program, "uEye"),
-    time: gl.getUniformLocation(program, "uTime"),
-  };
-  let frame = 0;
-  let running = true;
-  const draw = (now) => {
-    if (!running || !canvas.isConnected) return;
-    const rect = canvas.getBoundingClientRect();
-    const width = Math.max(1, Math.floor(rect.width * devicePixelRatio));
-    const height = Math.max(1, Math.floor(rect.height * devicePixelRatio));
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    const aspect = canvas.width / canvas.height;
-    const reveal = state.reveal;
-    const spin = reduce ? 0 : now / 1000;
-    const yaw = state.yaw + spin * 0.16;
-    const pitch = state.pitch + Math.sin(spin * 0.37) * 0.05;
-    const slideX = reveal * -0.95;
-    const model = multiply(translation(slideX, reveal * 0.08, 0), multiply(rotationY(yaw), rotationX(pitch)));
-    const eye = [0, 0.1, 3.4];
-    const viewM = lookAt(eye, [0, 0, 0], [0, 1, 0]);
-    const projection = perspective(0.82, aspect, 0.1, 20);
-    gl.uniformMatrix4fv(uniforms.model, false, model);
-    gl.uniformMatrix4fv(uniforms.mvp, false, multiply(projection, multiply(viewM, model)));
-    gl.uniform3fv(uniforms.eye, eye);
-    gl.uniform1f(uniforms.time, reduce ? 0 : now / 1000);
-    gl.drawArrays(gl.TRIANGLES, 0, solid.count);
-    frame = requestAnimationFrame(draw);
-  };
-  frame = requestAnimationFrame(draw);
-  return { stop() { running = false; cancelAnimationFrame(frame); } };
-}
-
-function crystalGeometry() {
-  const ring = 6;
-  const cap = [0, 1.25, 0];
-  const base = [0, -1.12, 0];
-  const belt = [];
-  for (let i = 0; i < ring; i += 1) {
-    const angle = (Math.PI * 2 * i) / ring + 0.35;
-    const radius = i % 2 === 0 ? 0.92 : 0.62;
-    belt.push([Math.cos(angle) * radius, i % 2 === 0 ? 0.22 : -0.16, Math.sin(angle) * radius]);
-  }
-  const faces = [];
-  for (let i = 0; i < ring; i += 1) {
-    const next = (i + 1) % ring;
-    faces.push([cap, belt[next], belt[i]]);
-    faces.push([base, belt[i], belt[next]]);
-  }
-  const data = [];
-  const shared = new Map();
-  const keyOf = (vertex) => vertex.map((value) => value.toFixed(3)).join(",");
-  for (const [a, b, c] of faces) {
-    const normal = faceNormal(a, b, c);
-    for (const vertex of [a, b, c]) {
-      const key = keyOf(vertex);
-      const sum = shared.get(key) || [0, 0, 0];
-      shared.set(key, sum.map((value, index) => value + normal[index]));
-    }
-  }
-  for (const [a, b, c] of faces) {
-    for (const vertex of [a, b, c]) data.push(...vertex, ...unit(shared.get(keyOf(vertex))));
-  }
-  return { interleaved: new Float32Array(data), count: faces.length * 3 };
-}
-
-function faceNormal(a, b, c) {
-  const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
-  const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
-  const x = uy * vz - uz * vy, y = uz * vx - ux * vz, z = ux * vy - uy * vx;
-  const length = Math.hypot(x, y, z) || 1;
-  return [x / length, y / length, z / length];
-}
-
-function unit(vector) {
-  const length = Math.hypot(...vector) || 1;
-  return vector.map((value) => value / length);
-}
-
-function perspective(fov, aspect, near, far) {
-  const f = 1 / Math.tan(fov / 2), nf = 1 / (near - far);
-  return new Float32Array([
-    f / aspect, 0, 0, 0,
-    0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, 2 * far * near * nf, 0,
-  ]);
-}
-
-function lookAt(eye, target, up) {
-  const z = normalize([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
-  const x = normalize(cross(up, z));
-  const y = cross(z, x);
-  return new Float32Array([
-    x[0], y[0], z[0], 0,
-    x[1], y[1], z[1], 0,
-    x[2], y[2], z[2], 0,
-    -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
-  ]);
-}
-
-function translation(x, y, z) {
-  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1]);
-}
-
-function rotationX(angle) {
-  const c = Math.cos(angle), s = Math.sin(angle);
-  return new Float32Array([1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]);
-}
-
-function rotationY(angle) {
-  const c = Math.cos(angle), s = Math.sin(angle);
-  return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]);
-}
-
-function multiply(a, b) {
-  const out = new Float32Array(16);
-  for (let col = 0; col < 4; col += 1) {
-    for (let row = 0; row < 4; row += 1) {
-      out[col * 4 + row] = a[row] * b[col * 4] + a[4 + row] * b[col * 4 + 1] + a[8 + row] * b[col * 4 + 2] + a[12 + row] * b[col * 4 + 3];
-    }
-  }
-  return out;
-}
-
-function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
-function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
-function normalize(v) {
-  const length = Math.hypot(...v) || 1;
-  return v.map((item) => item / length);
-}
-
-function link(gl, vertexSource, fragmentSource) {
-  const program = gl.createProgram();
-  for (const [type, source] of [[gl.VERTEX_SHADER, vertexSource], [gl.FRAGMENT_SHADER, fragmentSource]]) {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return null;
-    gl.attachShader(program, shader);
-  }
-  gl.linkProgram(program);
-  return gl.getProgramParameter(program, gl.LINK_STATUS) ? program : null;
-}
-
+// 无 WebGL 时的静态替代图形：一段冰蓝玻璃弧，功能完全不受影响
 function fallbackSvg() {
-  return `<svg class="fallback" viewBox="0 0 800 600" aria-hidden="true"><polygon points="470,90 650,250 430,430" fill="rgba(255,255,255,.45)" stroke="rgba(31,138,168,.45)"/><polygon points="360,150 560,210 340,390" fill="rgba(170,220,234,.35)"/></svg>`;
+  return `<svg class="fallback" viewBox="0 0 800 600" aria-hidden="true">
+    <defs>
+      <linearGradient id="fx" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="rgba(255,255,255,.92)"/>
+        <stop offset="0.5" stop-color="rgba(168,216,236,.66)"/>
+        <stop offset="1" stop-color="rgba(31,138,168,.40)"/>
+      </linearGradient>
+    </defs>
+    <path d="M 150 300 C 250 120 400 120 470 250 C 540 380 660 400 700 300"
+          fill="none" stroke="url(#fx)" stroke-width="52" stroke-linecap="round"/>
+    <path d="M 150 300 C 250 120 400 120 470 250"
+          fill="none" stroke="rgba(255,255,255,.75)" stroke-width="6" stroke-linecap="round"/>
+  </svg>`;
 }
 
-let drag = null;
+// ── 画布缩放：1920×1080 设计坐标贴到视口 ───────────────────────────────
+// 每次 render() 之后都要调用，因为 renderEntry 会重建 .entry-canvas。
+// 窄屏不用设计画布（CSS 里已改成文档流），这里要把 --k 清掉。
+function fitCanvas() {
+  const entry = view.querySelector(".entry-canvas");
+  if (!entry) return;
+  if (innerWidth <= 900) {
+    entry.style.removeProperty("--k");
+    return;
+  }
+  const k = Math.min(innerWidth / 1920, innerHeight / 1080);
+  entry.style.setProperty("--k", k.toFixed(4));
+}
 
+// ── 金属上两个引导点：把曲线上的位置投到设计坐标 ─────────────────────
+function projectAnchor(u) {
+  // 与 scene.js 的 curveAt 同一公式，再用同一套相机参数投影
+  const t = u * Math.PI * 2;
+  const R = 1.0, A = 0.92, D = 0.52;
+  const p = [R * Math.cos(t), R * A * Math.sin(t) * Math.cos(t), D * Math.sin(t)];
+  const yaw = state.anchorYaw + state.anchorSpin;
+  const pitch = state.anchorPitch;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  let q = [p[0] * cy + p[2] * sy, p[1], -p[0] * sy + p[2] * cy];
+  const cx = Math.cos(pitch), sx = Math.sin(pitch);
+  q = [q[0], q[1] * cx - q[2] * sx, q[1] * sx + q[2] * cx];
+  const shiftX = -0.06 - state.reveal * 0.46;
+  q[0] += shiftX;
+  // 与 scene.js 同样的相机距离推导
+  const fov = 0.92, aspect = innerWidth / innerHeight;
+  const tan = Math.tan(fov / 2);
+  const dist = Math.max(1.30 / tan, 1.42 / (tan * aspect)) * 1.06;
+  const eye = [0, 0.10 * dist * 0.2, dist];
+  const zc = eye[2] - q[2];
+  if (zc <= 0.05) return { x: -9999, y: -9999 };
+  const ndcX = (q[0] - eye[0]) / (zc * tan * aspect);
+  const ndcY = (q[1] - eye[1]) / (zc * tan);
+  return { x: (ndcX * 0.5 + 0.5) * 1920, y: (-ndcY * 0.5 + 0.5) * 1080 };
+}
+
+function refreshAnchors() {
+  if (state.screen !== "entry") return;
+  const a = projectAnchor(0.22);
+  const b = projectAnchor(0.70);
+  state.anchorA = a;
+  state.anchorB = b;
+  const svg = view.querySelector(".callouts svg");
+  if (!svg) return;
+  const lines = svg.querySelectorAll("line");
+  const dots = svg.querySelectorAll("circle");
+  lines[0].setAttribute("x1", a.x); lines[0].setAttribute("y1", a.y);
+  lines[0].setAttribute("x2", a.x + 150); lines[0].setAttribute("y2", a.y - 130);
+  lines[1].setAttribute("x1", b.x); lines[1].setAttribute("y1", b.y);
+  lines[1].setAttribute("x2", b.x - 120); lines[1].setAttribute("y2", b.y + 170);
+  dots[0].setAttribute("cx", a.x); dots[0].setAttribute("cy", a.y);
+  dots[1].setAttribute("cx", b.x); dots[1].setAttribute("cy", b.y);
+  const labels = view.querySelectorAll(".callout-label");
+  if (labels[0]) { labels[0].style.left = `${a.x + 158}px`; labels[0].style.top = `${a.y - 152}px`; }
+  if (labels[1]) { labels[1].style.left = `${b.x - 208}px`; labels[1].style.top = `${b.y + 168}px`; }
+}
+
+// ── 拖拽转动 / 滚轮与触摸推进 ────────────────────────────────────────
+let drag = null;
 document.addEventListener("pointerdown", (event) => {
-  if (state.screen !== "entry" || event.target.closest("form, button, a, input, textarea")) return;
-  drag = { x: event.clientX, y: event.clientY, yaw: state.yaw, pitch: state.pitch, moved: false };
+  if (state.screen !== "entry" || state.reduce) return;
+  if (event.target.closest("form, button, a, input, textarea, details")) return;
+  drag = { x: event.clientX, y: event.clientY, moved: false };
 });
 document.addEventListener("pointermove", (event) => {
-  state.pointer = { x: event.clientX / innerWidth, y: event.clientY / innerHeight };
   if (!drag) return;
   const dx = event.clientX - drag.x;
   const dy = event.clientY - drag.y;
   if (Math.hypot(dx, dy) > 4) drag.moved = true;
-  state.yaw = drag.yaw + dx * 0.008;
-  state.pitch = Math.max(-0.8, Math.min(0.8, drag.pitch + dy * 0.006));
+  drag.x = event.clientX;
+  drag.y = event.clientY;
+  if (scene) scene.rotateBy(dx, dy);
 });
-document.addEventListener("pointerup", () => {
+document.addEventListener("pointerup", (event) => {
+  const wasDrag = drag ? drag.moved : false;
   drag = null;
-});
-document.addEventListener("pointercancel", () => {
-  drag = null;
-});
-document.addEventListener("wheel", (event) => {
+  // 拖过 = 在转装置，不要顺手把它推进去
+  if (wasDrag) return;
   if (state.screen !== "entry" || state.reduce) return;
+  if (state.reveal > 0.5) return;
+  if (event.target.closest("form, button, a, input, textarea, details, summary")) return;
+  if (event.target.closest(".entry-copy, .entry-foot, .chrono, .rail, .auth-card")) return;
+  // 单独点一下玻璃（没有拖动）也推进：转起来之后，点击是最自然的"进去"
+  animateReveal(1);
+});
+document.addEventListener("pointercancel", () => { drag = null; });
+
+document.addEventListener("wheel", (event) => {
+  if (state.screen !== "entry") return;
   if (event.target.closest(".auth-card")) return;
   event.preventDefault();
-  setReveal(state.reveal + event.deltaY / 700);
+  if (state.reduce) return;
+  // 一格滚轮约 100~120px。除以 1100 让大约七八格才能完全展开，
+  // 中间会经过"卡片半透明、还不能输入"的阶段，不会是瞬时跳到底。
+  setReveal(state.reveal + event.deltaY / 1100);
 }, { passive: false });
+
 let touchY = null;
 document.addEventListener("touchstart", (event) => {
   if (state.screen === "entry") touchY = event.touches[0].clientY;
@@ -903,13 +1066,45 @@ document.addEventListener("touchmove", (event) => {
   setReveal(state.reveal + (touchY - next) / 420);
   touchY = next;
 }, { passive: true });
-document.addEventListener("touchend", () => {
-  touchY = null;
+document.addEventListener("touchend", () => { touchY = null; });
+
+window.addEventListener("resize", () => {
+  fitCanvas();
+  refreshAnchors();
 });
+
 reduceQuery.addEventListener("change", () => {
   state.reduce = reduceQuery.matches;
-  if (glass) glass.stop();
-  glass = startGlass(document.querySelector("#glass"), state.reduce);
+  if (scene) {
+    scene.stop();
+    scene = null;
+  }
+  if (state.screen === "entry") {
+    const canvas = document.querySelector("#glass");
+    if (canvas) canvas.getContext("webgl") && canvas.width > 0;
+    mountScene();
+    setReveal(state.reduce ? 1 : state.reveal);
+    render();
+    refreshAnchors();
+  }
 });
-glass = startGlass(document.querySelector("#glass"), state.reduce);
+
+// ── 引导点跟随金属的缓慢自转 ─────────────────────────────────────────
+setInterval(() => {
+  if (state.screen !== "entry" || state.reduce) return;
+  const now = performance.now() / 1000;
+  state.anchorYaw = 0.40 + Math.sin(now * 0.085) * 0.26;
+  state.anchorPitch = 0.17 + Math.sin(now * 0.052 + 0.8) * 0.08;
+  refreshAnchors();
+}, 120);
+
+tickClock();
+setInterval(tickClock, 1000);
+// 减少动态：不做出场动效，直接停在"已展开、可直接登录"的状态。
+// 注意 state.reveal 也要一起改——只改 3D 场景的话，DOM 面板仍然是隐藏的。
+if (state.reduce) state.reveal = 1;
+state.shifted = state.reveal > 0.5;
+mountScene();
+fitCanvas();
 render();
+refreshAnchors();

@@ -14,6 +14,11 @@
     <div id="view"></div>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/prototype/app.js" type="module"></script>
+  <script type="module">
+    // 液态金属场景先就位，再把入口接上；两者都是原生 ES 模块，不需要构建
+    import { createScene } from "/prototype/scene.js";
+    window.createScene = createScene;
+    await import("/prototype/app.js");
+  </script>
 </body>
 </html>
