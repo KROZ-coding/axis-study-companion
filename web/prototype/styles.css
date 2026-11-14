@@ -68,7 +68,8 @@ button { cursor: pointer; }
   color: var(--ink-soft); font-size: 13px; letter-spacing: .04em;
 }
 .entry-transition-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
-.stage.workspace-visible #view > :is(.student-app, .app, .admin-boundary) {
+/* 动画挂在不随 render 重建的容器上，刷新任务和切换内容时保持工作台可见。 */
+.stage.workspace-visible #view {
   animation: workspace-enter 240ms cubic-bezier(.23, 1, .32, 1) backwards;
 }
 @keyframes workspace-enter {
