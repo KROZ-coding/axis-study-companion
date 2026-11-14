@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
@@ -12,6 +13,10 @@ from ..models import User
 from ..platform_store import PlatformStore
 from ..services.material_parser import MaterialParseError, ParseLimits, parse_material, preview_grade_mapping
 from ..services.question_bank import QuestionBank
+from ..services.question_library import (
+    IMPORT_MAX_BYTES, confirm_import, import_preview, list_question_library, preview_view,
+    question_detail, question_import_template, question_job_view,
+)
 from ..v1_deps import get_platform_store, get_platform_user, require_platform_roles
 
 router = APIRouter(prefix="/api/v1", tags=["materials"])
@@ -52,16 +57,33 @@ class ParseJobRequest(StrictModel):
 
 
 class GenerationRequest(StrictModel):
+    request_id: str | None = Field(default=None,min_length=1,max_length=100,pattern=r"^[A-Za-z0-9_.:-]+$",strict=True)
     source_block_ids: list[str] = Field(min_length=1,max_length=8)
     class_id: str | None = Field(default=None,min_length=1,max_length=100)
-    count: int = Field(default=1,ge=1,le=10)
+    count: int | None = Field(default=None,ge=1,le=10,strict=True)
+    question_types: dict[str,Annotated[int,Field(strict=True,ge=0,le=10)]] | None = None
+    difficulty: Literal["easy","medium","hard"] | None = None
+    knowledge_points: list[str] | None = Field(default=None,max_length=32)
     instruction: str = Field(default="",max_length=2000)
+    external_processing_allowed: StrictBool = False
+
+
+class QuestionCandidate(StrictModel):
+    request_id: str | None = Field(default=None,min_length=1,max_length=100,pattern=r"^[A-Za-z0-9_.:-]+$",strict=True)
+    source_block_ids: list[str] = Field(min_length=1,max_length=8)
+    class_id: str | None = Field(default=None,min_length=1,max_length=100)
+    question: dict[str,Any]
     external_processing_allowed: StrictBool = False
 
 
 class QuestionEdit(GenerationRequest):
     expected_version: int = Field(ge=1)
     question: dict[str,Any]
+
+
+class QuestionImportConfirmation(StrictModel):
+    external_processing_allowed: StrictBool = False
+    row_numbers: list[Annotated[int,Field(strict=True,ge=1)]] | None = Field(default=None,min_length=1,max_length=100)
 
 
 class GradePreview(StrictModel):
@@ -101,7 +123,7 @@ def _content_errors():
         yield
     except HTTPException:
         raise
-    except KeyError as error:
+    except LookupError as error:
         raise HTTPException(404,detail={"code":"content_not_found","message":"内容不存在"}) from error
     except PermissionError as error:
         raise HTTPException(403,detail={"code":"content_forbidden","message":str(error)}) from error
@@ -330,7 +352,7 @@ def generate_questions(course_id: str,payload: GenerationRequest,request: Reques
     with _content_errors():
         _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id)
         job = _bank(request,content).create_generation(course_id=course_id,owner_id=actor.id,**payload.model_dump())
-    return {"job":job}
+    return {"job":question_job_view(request.app.state.runtime,job)}
 
 
 @router.post("/courses/{course_id}/questions/{question_id}/edit-jobs",status_code=status.HTTP_202_ACCEPTED)
@@ -338,18 +360,144 @@ def edit_question(course_id: str,question_id: str,payload: QuestionEdit,request:
     _scope(platform,actor,course_id,payload.class_id,teaching=True)
     with _content_errors():
         _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id)
-        values = payload.model_dump(exclude={"count","instruction"})
+        values = payload.model_dump(exclude={"count","instruction","question_types","difficulty","knowledge_points"})
         job = _bank(request,content).create_edit(course_id=course_id,owner_id=actor.id,question_id=question_id,**values)
-    return {"job":job}
+    return {"job":question_job_view(request.app.state.runtime,job)}
+
+
+@router.get("/courses/{course_id}/question-library")
+def get_question_library(course_id: str,request: Request,q: str | None = Query(default=None,max_length=200),
+                         question_type: str | None = Query(default=None,alias="type",max_length=30),
+                         status: str | None = Query(default=None,max_length=30),knowledge_point: str | None = Query(default=None,max_length=200),
+                         difficulty: str | None = Query(default=None,max_length=30),class_id: str | None = Query(default=None,max_length=100),
+                         limit: int = Query(default=100,ge=1,le=200),offset: int = Query(default=0,ge=0),
+                         actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store)):
+    _scope(platform,actor,course_id,class_id)
+    with _content_errors():
+        return list_question_library(request.app.state.runtime.learning,course_id,actor.id,q=q,question_type=question_type,
+            status=status,knowledge_point=knowledge_point,difficulty=difficulty,class_id=class_id,limit=limit,offset=offset)
+
+
+@router.get("/courses/{course_id}/questions/{question_id}/versions/{version}")
+def get_question_version(course_id: str,question_id: str,version: int,request: Request,
+                         actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store)):
+    _scope(platform,actor,course_id)
+    with _content_errors():
+        result = question_detail(request.app.state.runtime.learning,course_id,question_id,version,actor.id)
+        _scope(platform,actor,course_id,result["question"]["content"].get("class_id"))
+        return result
+
+
+@router.post("/courses/{course_id}/question-candidates",status_code=status.HTTP_202_ACCEPTED)
+def create_question_candidate(course_id: str,payload: QuestionCandidate,request: Request,
+                              actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),
+                              content: ContentStore = Depends(get_content_store)):
+    _scope(platform,actor,course_id,payload.class_id,teaching=True)
+    with _content_errors():
+        _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id)
+        job = _bank(request,content).create_candidate(course_id=course_id,owner_id=actor.id,**payload.model_dump())
+    candidate_status = "approved" if job["status"]=="completed" else "quarantined" if job["status"]=="quarantined" else "reviewing"
+    return {"job":question_job_view(request.app.state.runtime,job),"candidate_status":candidate_status}
+
+
+@router.get("/courses/{course_id}/question-imports/template")
+def download_question_template(course_id: str,format: Literal["csv","json","xlsx"] = "xlsx",
+                               actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store)):
+    _scope(platform,actor,course_id,teaching=True)
+    data,media_type,filename = question_import_template(format)
+    return Response(content=data,media_type=media_type,headers={"Content-Disposition":f'attachment; filename="{filename}"',"Cache-Control":"no-store"})
+
+
+@router.post("/courses/{course_id}/question-imports/preview",status_code=status.HTTP_201_CREATED)
+async def preview_question_import(course_id: str,request: Request,file: Annotated[UploadFile,File()],
+                                  source_block_ids: Annotated[str,Form(max_length=2000)],
+                                  class_id: Annotated[str | None,Form(max_length=100)] = None,
+                                  actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),
+                                  content: ContentStore = Depends(get_content_store)):
+    _scope(platform,actor,course_id,class_id,teaching=True)
+    try:
+        with _content_errors():
+            block_ids = json.loads(source_block_ids)
+            if not isinstance(block_ids,list) or not 1<=len(block_ids)<=8 or any(not isinstance(value,str) or not value or len(value)>100 for value in block_ids):
+                raise ValueError("source_block_ids must be a JSON array of one to eight IDs")
+            _assert_source_access(content,platform,actor,course_id,block_ids,purpose="generation",class_id=class_id)
+            data = await file.read(IMPORT_MAX_BYTES+1)
+            if len(data)>IMPORT_MAX_BYTES:
+                raise MaterialParseError("file_too_large","题目文件超过 2 MiB")
+            job = import_preview(content,request.app.state.runtime.learning,course_id=course_id,owner_id=actor.id,
+                source_block_ids=block_ids,filename=file.filename or "",data=data,class_id=class_id)
+        return preview_view(job)
+    finally:
+        await file.close()
+
+
+def _question_import(content,platform,actor,course_id,import_id):
+    job = content.get_job(import_id)
+    if (job is None or job["course_id"]!=course_id or job["owner_id"]!=actor.id
+            or job["stage"] not in {"import_preview","import_confirmed"} or job["input"].get("origin")!="import_preview"):
+        raise HTTPException(404,detail={"code":"import_not_found","message":"导入预览不存在"})
+    _scope(platform,actor,course_id,job["class_id"],teaching=True)
+    return job
+
+
+@router.get("/courses/{course_id}/question-imports/{import_id}")
+def get_question_import(course_id: str,import_id: str,actor: User = Depends(require_platform_roles("teacher","admin")),
+                        platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
+    return preview_view(_question_import(content,platform,actor,course_id,import_id))
+
+
+@router.post("/courses/{course_id}/question-imports/{import_id}/confirm",status_code=status.HTTP_202_ACCEPTED)
+def confirm_question_import(course_id: str,import_id: str,payload: QuestionImportConfirmation,request: Request,
+                            actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),
+                            content: ContentStore = Depends(get_content_store)):
+    job = _question_import(content,platform,actor,course_id,import_id)
+    with _content_errors():
+        _assert_source_access(content,platform,actor,course_id,job["input"]["source_block_ids"],purpose="generation",class_id=job["class_id"])
+        confirmed = confirm_import(content,request.app.state.runtime.learning,job,**payload.model_dump())
+    result = preview_view(confirmed)
+    result.update(confirmed["state"]["confirmation"])
+    result["jobs"] = [{**question_job_view(request.app.state.runtime,content.get_job(item["job_id"])),"row_number":item["row_number"]}
+                      for item in result["jobs"]]
+    return result
+
+
+@router.get("/courses/{course_id}/question-jobs")
+def list_course_question_jobs(course_id: str,request: Request,class_id: str | None = Query(default=None,max_length=100),
+                              status: str | None = Query(default=None,max_length=40),limit: int = Query(default=50,ge=1,le=100),
+                              offset: int = Query(default=0,ge=0),actor: User = Depends(require_platform_roles("teacher","admin")),
+                              platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
+    _scope(platform,actor,course_id,class_id,teaching=True)
+    jobs = []
+    for job in content.list_question_jobs(course_id,owner_id=None if actor.role=="admin" else actor.id,class_id=class_id):
+        try:
+            _scope(platform,actor,course_id,job["class_id"],teaching=True)
+        except HTTPException:
+            continue
+        projected = question_job_view(request.app.state.runtime,job)
+        if status is None or projected["status"]==status or projected["queue_status"]==status:
+            jobs.append(projected)
+    return {"items":jobs[offset:offset+limit],"total":len(jobs),"limit":limit,"offset":offset}
+
+
+@router.get("/courses/{course_id}/question-jobs/{job_id}")
+def get_course_question_job(course_id: str,job_id: str,request: Request,
+                            actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),
+                            content: ContentStore = Depends(get_content_store)):
+    job = content.get_job(job_id)
+    if (job is None or job["course_id"]!=course_id or job["kind"] not in {"question_generate","question_edit"}
+            or job["stage"] in {"import_preview","import_confirmed"} or (job["owner_id"]!=actor.id and actor.role!="admin")):
+        raise HTTPException(404,detail={"code":"job_not_found","message":"任务不存在"})
+    _scope(platform,actor,course_id,job["class_id"],teaching=True)
+    return {"job":question_job_view(request.app.state.runtime,job)}
 
 
 @router.get("/content-jobs/{job_id}")
-def get_content_job(job_id: str,actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
+def get_content_job(job_id: str,request: Request,actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
     job = content.get_job(job_id)
     if job is None or (job["owner_id"]!=actor.id and actor.role!="admin"):
         raise HTTPException(404,detail={"code":"job_not_found","message":"任务不存在"})
     _scope(platform,actor,job["course_id"],job["class_id"],teaching=True)
-    return {"job":job}
+    return {"job":question_job_view(request.app.state.runtime,job)}
 
 
 @router.post("/courses/{course_id}/requirements",status_code=status.HTTP_201_CREATED)

@@ -1,0 +1,129 @@
+.teacher-app { grid-template-columns: 224px minmax(0, 1fr); }
+.teacher-app .side { position: sticky; top: 0; height: 100vh; }
+.teacher-app .side .brand { position: static; width: auto; font-family: var(--cjk); font-weight: 600; font-size: 25px; }
+.teacher-app .nav-btn { font-size: 15px; min-height: 48px; }
+.teacher-app .main { width: 100%; max-width: 1600px; margin-inline: auto; }
+.teacher-app .page { font-family: var(--cjk); font-size: clamp(27px, 2.5vw, 36px); font-weight: 600; }
+.teacher-context { margin: 0 0 24px; display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.teacher-context .field { margin: 0; min-width: 200px; max-width: 520px; flex: 1; font-size: 13px; }
+.teacher-context select { font-size: 14px; min-height: 44px; }
+.teacher-context .muted { margin: 0 0 10px; }
+.goal-modal-open { overflow: hidden; }
+.goal-drawer { width: min(820px, 100%); padding: 0; overscroll-behavior: contain; background: #f3f9fc; }
+.goal-drawer .goal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 24px 30px 18px; border-bottom: 1px solid var(--line); background: rgba(247,252,254,.97); }
+.goal-header h2 { margin: 0; font-family: var(--cjk); font-size: 30px; font-weight: 600; }
+.goal-header p { margin: 8px 0 0; font-size: 13px; color: var(--ink-soft); line-height: 1.6; }
+.goal-header .icon-btn { flex: none; min-height: 44px; }
+.goal-drawer form { padding: 22px 30px 0; }
+.goal-fields { padding: 0; border: 0; margin: 0; min-width: 0; }
+.goal-fields > .field { margin-bottom: 18px; gap: 7px; position: relative; }
+.goal-drawer .field { font-size: 14px; }
+.goal-drawer .field input, .goal-drawer .field textarea, .goal-drawer .field select { font-size: 15px; border-radius: 9px; min-height: 46px; }
+.goal-drawer .field textarea { min-height: 70px; }
+.goal-drawer .field > small { font-size: 12px; color: var(--ink-soft); }
+.goal-optional { font-size: 12px; position: absolute; left: 70px; top: 2px; opacity: .7; }
+.goal-object { margin-bottom: 16px; font-size: 14px; color: var(--ink-soft); }
+.goal-object > small { display: block; font-size: 12px; line-height: 1.65; margin-top: 7px; }
+.goal-members { margin-top: 7px; border: 1px solid #b5d2df; border-radius: 10px; background: #fff; }
+.goal-members summary { display: flex; align-items: center; justify-content: space-between; gap: 15px; min-height: 49px; padding: 11px 14px; list-style: none; cursor: pointer; font-size: 16px; color: var(--ink); }
+.goal-members summary::-webkit-details-marker { display: none; }
+.goal-members summary span:last-child { font-size: 22px; transition: transform 150ms ease; }
+.goal-members[open] summary span:last-child { transform: rotate(180deg); }
+.goal-members[open] summary { border-bottom: 1px solid var(--line); }
+.goal-members summary:focus-visible, .goal-drawer input:focus-visible, .goal-papers summary:focus-visible { outline: 3px solid var(--cyan-deep); outline-offset: 2px; }
+.goal-members-menu { padding: 12px; }
+.goal-members-tools { display: flex; gap: 12px; align-items: center; }
+.goal-members-tools input { min-width: 0; flex: 1; width: 100%; height: 42px; border: 1px solid var(--line); border-radius: 6px; background: #f5fafc; padding: 8px 10px; font-size: 14px; }
+.goal-members-tools .linkish { flex: none; font-size: 13px; min-height: 42px; }
+.goal-member-list { max-height: 235px; overflow: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 8px; }
+.goal-member { min-height: 60px; display: flex; align-items: center; gap: 10px; padding: 9px; border-radius: 6px; cursor: pointer; }
+.goal-member:hover { background: #eef7fb; }
+.goal-member:has(input:checked) { background: #e3f3f9; }
+.goal-member[hidden] { display: none; }
+.goal-member input, .goal-policy input, .goal-knowledge input { width: 18px; height: 18px; min-height: 18px; margin: 0; flex: none; accent-color: var(--cyan-deep); }
+.goal-member strong { font-size: 14px; font-weight: 500; color: var(--ink); }
+.goal-member small { display: block; margin-top: 3px; font-size: 12px; color: var(--ink-soft); }
+.goal-saved { margin: 0 0 15px; }
+.goal-knowledge { border: 0; padding: 0; margin: 15px 0 20px; min-width: 0; }
+.goal-knowledge legend { font-size: 14px; margin-bottom: 8px; }
+.goal-knowledge legend small { font-size: 12px; color: var(--ink-soft); font-weight: 400; }
+.goal-knowledge > div { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.goal-knowledge label { display: flex; align-items: center; gap: 8px; min-height: 36px; font-size: 13px; }
+.goal-config-row { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 18px 0; }
+.goal-config-row .field { margin: 0; }
+.goal-type-group, .goal-level-group { min-width: 0; border: 0; padding: 0; margin: 20px 0; }
+.goal-type-group legend, .goal-level-group legend { margin-bottom: 10px; font-size: 14px; color: var(--ink-soft); width: 100%; }
+.goal-type-group legend span { float: right; font-size: 13px; color: var(--cyan-deep); }
+.goal-types { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.goal-types > label { display: flex; flex-direction: column; gap: 9px; border: 1px solid #c8dfe8; border-radius: 10px; padding: 12px; font-size: 14px; background: #fff; }
+.goal-types label > span { display: flex; align-items: center; gap: 5px; }
+.goal-types input { width: 100%; min-width: 0; border: 0; border-bottom: 1px solid #c8dfe8; min-height: 38px; font-size: 23px; font-variant-numeric: tabular-nums; background: transparent; }
+.goal-types small { font-size: 12px; color: var(--ink-soft); }
+.goal-type-group .linkish { font-size: 12px; margin-top: 6px; min-height: 34px; }
+.goal-levels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.goal-level { display: flex; gap: 8px; align-items: center; background: #fff; border: 1px solid #c8dfe8; padding: 12px; border-radius: 10px; cursor: pointer; }
+.goal-level:has(input:checked) { background: #e2f2f8; border-color: var(--cyan-deep); box-shadow: inset 0 0 0 1px var(--cyan-deep); }
+.goal-level input { width: 16px; height: 16px; margin: 0; accent-color: var(--cyan-deep); flex: none; }
+.goal-level strong { font-size: 15px; font-weight: 600; }
+.goal-level small { display: block; margin-top: 4px; color: var(--ink-soft); font-size: 11px; line-height: 1.5; }
+.goal-level-group .muted { margin-bottom: 0; }
+.goal-advice { margin: 22px 0; padding: 17px 20px; background: #e5f2f8; border-left: 3px solid #5a9ab4; border-radius: 0 12px 12px 0; }
+.goal-advice-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.goal-advice h3 { font-size: 16px; margin: 0; font-weight: 600; }
+.goal-advice-head span { font-size: 12px; color: var(--ink-soft); }
+.goal-advice p { font-size: 13px; color: #375e6e; line-height: 1.75; margin: 8px 0; overflow-wrap: anywhere; }
+.goal-advice > small { display: block; font-size: 11px; color: #557785; line-height: 1.65; margin-top: 10px; }
+.goal-policy { display: grid; gap: 4px; margin: 18px 0; }
+.goal-policy label { display: flex; gap: 10px; align-items: center; font-size: 13px; min-height: 38px; color: var(--ink-soft); cursor: pointer; }
+.goal-drawer .state-banner { font-size: 14px; line-height: 1.7; border-radius: 12px; }
+.goal-drawer .state-banner ul { padding-left: 20px; margin: 8px 0 0; }
+.goal-drawer .state-banner p { margin: 5px 0 0; }
+.goal-warning { color: var(--warn); font-size: 13px; line-height: 1.6; }
+.goal-papers { border: 1px solid var(--line); padding: 0 14px; background: #fff; border-radius: 10px; }
+.goal-papers summary { cursor: pointer; font-size: 14px; padding: 14px 0; }
+.goal-papers section { border-top: 1px solid var(--line); padding: 14px 0; }
+.goal-papers h4 { margin: 0; font-size: 15px; }
+.goal-papers h4 small { font-size: 12px; font-weight: 400; margin-left: 10px; color: var(--ink-soft); }
+.goal-papers ol { padding-left: 22px; margin-bottom: 0; }
+.goal-papers li { font-size: 14px; line-height: 1.8; margin-bottom: 8px; overflow-wrap: anywhere; }
+.goal-papers li small { color: var(--ink-soft); white-space: nowrap; }
+.goal-footer { position: sticky; bottom: 0; background: rgba(243,249,252,.97); border-top: 1px solid #c8dfe8; margin: 24px -30px 0; padding: 12px 30px max(18px, env(safe-area-inset-bottom)); backdrop-filter: blur(10px); }
+.goal-footer p { margin: 0 0 10px; font-size: 12px; line-height: 1.5; color: var(--ink-soft); }
+.goal-footer > div { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+.goal-drawer .btn { border-radius: 8px; font-size: 14px; min-height: 44px; }
+.goal-drawer button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 850px) {
+  .teacher-app { grid-template-columns: 1fr; }
+  .teacher-app .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 14px 16px; gap: 5px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .teacher-app .side .brand { width: 100%; margin: 0 0 8px; font-size: 22px; }
+  .teacher-app .side .who { display: none; }
+  .teacher-app .side .spacer { display: none; }
+  .teacher-app .nav-btn { border-radius: 9px; font-size: 13px; padding-inline: 10px; }
+  .teacher-app .main { padding: 22px 18px 60px; }
+  .teacher-app .top-note { flex-wrap: wrap; align-items: flex-start; }
+  .teacher-app .grid.two { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  .goal-drawer .goal-header { padding: 20px 16px 16px; gap: 12px; }
+  .goal-header h2 { font-size: 26px; }
+  .goal-drawer form { padding: 18px 16px 0; }
+  .goal-config-row { gap: 12px; }
+  .goal-config-row:has(input[type="datetime-local"]) { grid-template-columns: 1fr; }
+  .goal-types { gap: 7px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .goal-types > label { padding: 10px 12px; }
+  .goal-levels { gap: 6px; }
+  .goal-level { padding: 10px 7px; gap: 5px; align-items: flex-start; }
+  .goal-level strong { font-size: 14px; }
+  .goal-level small { font-size: 10px; }
+  .goal-level input { margin-top: 3px; width: 14px; height: 14px; }
+  .goal-member-list { grid-template-columns: 1fr; max-height: 250px; }
+  .goal-advice { padding: 14px; }
+  .goal-advice-head { flex-wrap: wrap; }
+  .goal-footer { margin-inline: -16px; padding-inline: 16px; }
+  .goal-footer > div { gap: 7px; }
+  .goal-footer .btn { padding-inline: 12px; flex: 1; white-space: nowrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .goal-drawer { animation: none; transform: none; }
+  .goal-members summary span:last-child { transition: none; }
+}

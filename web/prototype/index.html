@@ -7,6 +7,8 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/prototype/styles.css">
   <link rel="stylesheet" href="/prototype/student.css">
+  <link rel="stylesheet" href="/prototype/teacher-planning.css">
+  <link rel="stylesheet" href="/prototype/teacher-library.css">
 </head>
 <body>
   <a class="skip" href="#view">跳到主要内容</a>
@@ -19,8 +21,12 @@
     // 玻璃场景先就位，再把正式服务连接状态交给入口。
     import { createScene } from "/prototype/scene.js";
     import { api } from "/prototype/api.js";
+    import { createTeacherPlanning } from "/prototype/teacher-planning.js";
+    import { createTeacherLibrary } from "/prototype/teacher-library.js";
     window.createScene = createScene;
     window.api = api;
+    window.createTeacherPlanning = createTeacherPlanning;
+    window.createTeacherLibrary = createTeacherLibrary;
     // 正式服务不可用时暂停认证，不创建本地虚构会话。
     await api.probe();
     await import("/prototype/app.js");

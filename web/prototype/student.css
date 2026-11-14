@@ -257,6 +257,10 @@
 .student-app .student-question-card .option[aria-pressed="true"] { border-color: var(--student-accent); background: var(--ice); box-shadow: inset 3px 0 var(--cyan); }
 .student-app .option[aria-pressed="true"] > b { background: var(--student-accent); color: #fff; }
 .student-app .student-question-card .field { margin-top: 24px; }
+.student-app .student-fill-answers { display: grid; gap: 16px; max-width: 34rem; }
+.student-app .student-fill-answers .field { margin: 0; }
+.student-app .student-fill-answers input { width: 100%; }
+.student-app .student-question-card :is(input, textarea)[readonly] { background: var(--ice); }
 .student-app .student-question-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
 .student-app .student-question-footer > .row { justify-content: flex-start; gap: 10px; }
 .student-app .student-draft-state { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.7; }

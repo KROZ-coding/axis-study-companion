@@ -85,6 +85,8 @@ const state = {
   classId: null,
   className: "",
   liveStudents: [],
+  teacherCourses: [],
+  teacherContextVersion: 0,
   liveGoals: [],
   liveTasks: [],
   liveTask: null,
@@ -107,6 +109,20 @@ const state = {
 let leaseTimer = 0;
 let workspaceRequest = 0;
 let toastTimer = 0;
+
+const teacherLibrary = window.createTeacherLibrary({
+  api, state, render, toast,
+  onPrepareGoal: (options = {}) => teacherComposer.open(options),
+});
+const teacherComposer = window.createTeacherPlanning({
+  api, state, render, toast,
+  onPublished: () => loadWorkspace(),
+  onLibrary: (options = {}) => {
+    state.teacherView = "materials";
+    render();
+    teacherLibrary.load(options);
+  },
+});
 
 function toast(text) {
   toastEl.textContent = text;
@@ -437,21 +453,40 @@ function renderTeacher() {
     reports: teacherReports,
   }[state.teacherView];
   view.innerHTML = `
-    <div class="app">
+    <div class="app teacher-app" ${state.drawer ? "inert" : ""}>
       <aside class="side">
         <div class="brand">伴星导学</div>
-        ${nav("home", "班级学情")}${nav("student", "学生依据")}${nav("materials", "课程与题目")}${nav("reports", "阶段成果")}
+        ${nav("home", "班级学情")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("reports", "阶段成果")}
         <div class="spacer"></div>
         <p class="who muted">${escapeHtml(state.who)} · ${escapeHtml(state.className || "教师工作区")}</p>
         <button class="nav-btn" data-action="logout">退出</button>
       </aside>
-      <main class="main">${page()}</main>
+      <main class="main">${teacherContext()}${page()}</main>
     </div>
     ${state.drawer ? drawer() : ""}`;
 }
 
 function nav(id, label) {
   return `<button class="nav-btn" data-view="${id}" aria-current="${state.teacherView === id ? "page" : "false"}">${label}</button>`;
+}
+
+function teacherContext() {
+  const entries = state.teacherCourses || [];
+  if (!entries.length) return "";
+  return `<div class="teacher-context"><label class="field">课程与班级<select data-teacher-class aria-label="课程与班级" ${state.loading ? "disabled" : ""}>${entries.map(({ course, classes }) => classes.length ? `<optgroup label="${escapeHtml(course.name)}">${classes.map((classroom) => `<option value="${escapeHtml(classroom.id)}" ${state.classId === classroom.id ? "selected" : ""}>${escapeHtml(course.name)} / ${escapeHtml(classroom.name)}</option>`).join("")}</optgroup>` : "").join("")}</select></label><p class="muted">题库按课程共享，发布范围由所选班级和学生确定。</p></div>`;
+}
+
+async function selectTeacherClass(classId) {
+  const entry = state.teacherCourses.find((item) => item.classes.some((classroom) => classroom.id === classId));
+  if (!entry || state.loading || state.drawer) return;
+  const classroom = entry.classes.find((item) => item.id === classId);
+  state.teacherContextVersion += 1;
+  state.courseId = entry.course.id; state.courseName = entry.course.name;
+  state.classId = classroom.id; state.className = classroom.name;
+  state.openStudent = null; state.liveStudents = []; state.liveGoals = [];
+  teacherLibrary.reset(); teacherComposer.reset();
+  await loadWorkspace();
+  if (state.teacherView === "materials") teacherLibrary.load();
 }
 
 /** 连上后端时的教师首页：全部来自正式接口。 */
@@ -468,6 +503,8 @@ function teacherHomeLive() {
   const goal = state.liveGoals[0];
   const students = state.liveStudents;
   const scored = students.filter((item) => item.mastery !== null);
+  // 本轮范围只统计实际拿到任务的学生；勾选发布后未选中的学生不属于“涉及学生”。
+  const participants = students.filter((item) => item.task);
   return `
     <div class="top-note">
       <h1 class="page">${escapeHtml(state.className)}</h1>
@@ -483,8 +520,8 @@ function teacherHomeLive() {
       </section>
       <section class="panel">
         <h3>涉及学生</h3>
-        <p>共 ${students.length} 人，其中 ${scored.length} 人已有本轮记录。</p>
-        <p class="muted">没有记录的学生显示「待评估」，不会写成 0%。</p>
+        <p>${participants.length ? `本轮共 ${participants.length} 位学生，其中 ${scored.length} 人已有评分记录。` : `本轮任务名单暂未读到，其中 ${scored.length} 人已有评分记录。`}</p>
+        <p class="muted">班级共 ${students.length} 人；未勾选的学生不会收到这一轮任务。</p>
       </section>
     </div>` : `<div class="state-banner">这个班还没有发布过目标。</div>`}
     <h2 class="section">相关学生</h2>
@@ -578,7 +615,7 @@ function teacherStudentLive() {
   return `
     <div class="top-note">
       <h1 class="page">${escapeHtml(student.name)}</h1>
-      <button class="btn primary" data-action="open-drawer">给${escapeHtml(student.name)}安排</button>
+      <button class="btn primary" data-action="open-drawer" data-goal-student="${escapeHtml(student.id)}">给${escapeHtml(student.name)}安排</button>
     </div>
     <div class="grid two">
       <section class="panel">
@@ -594,7 +631,7 @@ function teacherStudentLive() {
         <p><span class="pct">${student.mastery === null ? "待评估" : student.mastery + "%"}</span> 本轮得分比例</p>
         <p class="muted">这是本轮已评分题目的得分比例，不是掌握概率。记录不足时写「待评估」，不显示 0%。</p>
         ${goal ? `<p class="muted">范围：${escapeHtml(goal.title)}</p>` : ""}
-        <button class="btn" data-action="open-drawer">按此依据出目标</button>
+        <button class="btn" data-action="open-drawer" data-goal-student="${escapeHtml(student.id)}">按此依据出目标</button>
       </section>
     </div>
     <h2 class="section">短评</h2>
@@ -605,13 +642,7 @@ function teacherStudentLive() {
 }
 
 function teacherMaterials() {
-  return `
-    <h1 class="page">课程与题目</h1>
-    <div class="state-banner warn">扫描页只登记了来源，尚未识别。不能当作已确认材料出题。</div>
-    <div class="grid two">
-      <section class="panel"><h3>已确认</h3><p>七上 2.2 去括号，页 38–40。锚点可回到原文。</p><span class="tag ok">可用于讲解</span></section>
-      <section class="panel"><h3>待核对</h3><p>一题答案与独立求解不一致，已隔离，不再分发。</p><span class="tag bad">暂停使用</span></section>
-    </div>`;
+  return teacherLibrary.render();
 }
 
 function teacherReports() {
@@ -625,25 +656,7 @@ function teacherReports() {
 }
 
 function drawer() {
-  return `
-    <div class="drawer-back" data-action="close-drawer"></div>
-    <aside class="drawer" role="dialog" aria-labelledby="drawer-title">
-      <div class="row" style="justify-content:space-between"><h2 id="drawer-title" class="section" style="margin:0">学习目标</h2><button class="icon-btn" data-action="close-drawer">关闭</button></div>
-      <p class="muted">从${state.openStudent ? "学生依据" : "班级问题"}带入。发布后题目和评分规则固定，只能另发。</p>
-      <form data-action="publish">
-        <label class="field">目标<input name="goal" value="能正确去括号并检验方程的解"></label>
-        <label class="field">对象<select name="who"><option>${sample.className} · 18 人</option><option>只给林夏</option></select></label>
-        <div class="grid two">
-          <label class="field">每人题量<input name="count" value="3"></label>
-          <label class="field">共同题比例<input name="ratio" value="1 / 3"></label>
-        </div>
-        <label class="field">建议<p class="muted">两人题量和难度接近。林夏先看 2.2 讲解，周予直接做含检验的题。预计 18 分钟。</p></label>
-        <label class="field"><input type="checkbox" name="late" checked> 截止后允许迟交，迟交会标明</label>
-        <label class="field"><input type="checkbox" name="retry"> 截止后允许重做，不改首次成绩</label>
-        <div class="state-banner warn">备题还差 1 道已审查的检验题。现在不能发布残缺任务。</div>
-        <div class="row"><button class="btn" type="button" data-action="prepare">查看准备状态</button><button class="btn primary" type="submit">确认并等待备齐</button></div>
-      </form>
-    </aside>`;
+  return teacherComposer.render();
 }
 
 function studentIcon(name) {
@@ -738,9 +751,9 @@ function studentContext() {
   const goal = state.liveGoals.find((item) => item.id === task?.goal_id);
   const workspace = state.studentPage === "workspace";
   const questions = task?.questions || [];
-  const answered = workspace ? state.answers.filter((value) => value !== "" && value !== undefined).length : 0;
-  return `<section class="student-context-block"><p class="student-context-label">${workspace ? "作答进度" : "学习概况"}</p><h2>${workspace ? `${answered} / ${questions.length} 题` : "让进步看得见"}</h2>
-      ${workspace ? `<div class="student-progress-line"><span style="width:${questions.length ? answered / questions.length * 100 : 0}%"></span></div><div class="q-nav" aria-label="题目导航">${questions.map((_, index) => `<button class="chip" data-q="${index}" aria-label="第 ${index + 1} 题${state.answers[index] !== "" && state.answers[index] !== undefined ? "，已作答" : "，未作答"}" aria-pressed="${state.currentQ === index}">${index + 1}</button>`).join("")}</div><p class="student-draft-state" role="status">${state.draftDirty ? "有未同步的选择，请保存进度。" : state.savedAt ? `上次保存于 ${new Date(state.savedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "选择答案后，点击保存进度。"}</p>`
+  const answered = workspace ? questions.filter((question, index) => !answerMissing(state.answers[index], question)).length : 0;
+  return `<section class="student-context-block"><p class="student-context-label">${workspace ? "作答进度" : "学习概况"}</p><h2${workspace ? " data-answer-progress" : ""}>${workspace ? `${answered} / ${questions.length} 题` : "让进步看得见"}</h2>
+      ${workspace ? `<div class="student-progress-line"><span data-answer-progress-bar style="width:${questions.length ? answered / questions.length * 100 : 0}%"></span></div><div class="q-nav" aria-label="题目导航">${questions.map((question, index) => `<button class="chip" data-q="${index}" aria-label="第 ${index + 1} 题${answerMissing(state.answers[index], question) ? "，未作答" : "，已作答"}" aria-pressed="${state.currentQ === index}">${index + 1}</button>`).join("")}</div><p class="student-draft-state" role="status">${state.draftDirty ? "有未同步的作答，请保存进度。" : state.savedAt ? `上次保存于 ${new Date(state.savedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "作答后，点击保存进度。"}</p>`
         : `<div class="student-stat-pair"><div><strong>${state.liveTasks.length}</strong><small>已分配任务</small></div><div><strong>${completed}</strong><small>已完成任务</small></div></div>`}
     </section>
     <section class="student-context-block"><p class="student-context-label">${task ? "当前学习目标" : "学习提示"}</p><h2>${escapeHtml(task ? taskTitle(task) : "从一个任务开始")}</h2>${goal?.description ? `<p class="student-context-note">${escapeHtml(goal.description)}</p>` : ""}
@@ -860,10 +873,91 @@ function resultPage() {
     </div>`;
 }
 
+function questionType(question) {
+  return question?.type || (question?.options?.length ? "single_choice" : "text");
+}
+
+function questionBlankCount(question) {
+  if (questionType(question) !== "fill") return 1;
+  // 空数只来自公开作答格式，参考答案数组也可能只是等价答案，不能用于推断。
+  const count = question.blank_count ?? question.answer_format?.blank_count;
+  return Number.isInteger(count) && count > 0 && count <= 32 ? count : 1;
+}
+
+function answerMissing(value, question) {
+  if (value === undefined || value === null || typeof value === "string" && !value.trim()) return true;
+  const count = questionBlankCount(question);
+  if (count > 1 && (!Array.isArray(value) || value.length !== count)) return true;
+  return Array.isArray(value) && (!value.length || Array.from(value).some((item) => answerMissing(item)));
+}
+
+function questionChoiceValue(question, chosen, value) {
+  const type = questionType(question);
+  if (type === "judge") return value === "true" ? true : value === "false" ? false : undefined;
+  const index = Number(value);
+  if (!["single_choice", "multi_choice"].includes(type) || !Number.isInteger(index)
+    || index < 0 || index >= (question?.options?.length || 0)) return undefined;
+  if (type !== "multi_choice") return index;
+  const selected = Array.isArray(chosen) ? chosen : [];
+  return selected.includes(index) ? selected.filter((item) => item !== index) : [...selected, index].sort((a, b) => a - b);
+}
+
+function questionInputValue(question, chosen, value, blank) {
+  const count = questionBlankCount(question);
+  if (count === 1) return value;
+  const index = Number(blank);
+  if (!Number.isInteger(index) || index < 0 || index >= count) return undefined;
+  return Array.from({ length: count }, (_, position) => position === index ? value : String((Array.isArray(chosen) ? chosen[position] : "") ?? ""));
+}
+
+function questionAnswerText(question, value) {
+  const type = questionType(question);
+  if (type === "fill" && questionBlankCount(question) > 1 && Array.isArray(value)) {
+    return Array.from({ length: questionBlankCount(question) }, (_, index) => `第 ${index + 1} 空：${answerMissing(value[index]) ? "未作答" : String(value[index])}`).join("；");
+  }
+  if (answerMissing(value)) return "未作答";
+  if (type === "judge") return value === true ? "正确" : value === false ? "错误" : String(value);
+  if (type === "single_choice" || type === "multi_choice") {
+    const optionText = (index) => Number.isInteger(index) && question.options?.[index] !== undefined
+      ? `${String.fromCharCode(65 + index)}. ${question.options[index]}` : String(index);
+    return (Array.isArray(value) ? value : [value]).map(optionText).join("；");
+  }
+  return Array.isArray(value) ? value.map(String).join(type === "fill" ? " 或 " : "；") : String(value);
+}
+
+function refreshAnswerProgress(diagnostic = false) {
+  const questions = (diagnostic ? state.diagnostic : state.liveTask)?.questions || [];
+  const answers = diagnostic ? state.diagnosticAnswers : state.answers;
+  const answered = questions.filter((question, index) => !answerMissing(answers[index], question)).length;
+  const count = view.querySelector("[data-answer-progress]");
+  const progress = view.querySelector("[data-answer-progress-bar]");
+  if (!diagnostic && count) count.textContent = `${answered} / ${questions.length} 题`;
+  if (!diagnostic && progress) progress.style.width = `${questions.length ? answered / questions.length * 100 : 0}%`;
+  view.querySelectorAll(diagnostic ? '[aria-label="短诊题目"] [data-q]' : '[aria-label="题目导航"] [data-q]').forEach((node) => {
+    const index = Number(node.dataset.q);
+    const complete = !answerMissing(answers[index], questions[index]);
+    node.setAttribute("aria-label", `第 ${index + 1} 题${complete ? "，已作答" : "，未作答"}`);
+    if (diagnostic) node.textContent = `${index + 1}${complete ? " · 已答" : ""}`;
+  });
+}
+
 /** 连上后端时的作答区：题目、选项、保存、交卷都是真的。 */
 function questionChoices(question, chosen, locked, diagnostic = false) {
-  if (!(question.options || []).length) return `<label class="field">${diagnostic ? "独立作答" : "这一题的作答"}<textarea data-answer-input="${diagnostic ? "diagnostic" : "task"}" rows="5" ${locked ? "readonly" : ""}>${escapeHtml(chosen ?? "")}</textarea></label>`;
-  return `<div class="options" role="group" aria-label="选择答案">${question.options.map((option, index) => `<button class="option" ${diagnostic ? "data-diagnostic-choose" : "data-choose"}="${index}" aria-pressed="${chosen === index}" ${locked ? "disabled" : ""}><b>${String.fromCharCode(65 + index)}</b><span>${escapeHtml(option)}</span></button>`).join("")}</div>`;
+  const type = questionType(question);
+  const target = diagnostic ? "diagnostic" : "task";
+  const choose = diagnostic ? "data-diagnostic-choose" : "data-choose";
+  if (type === "judge") {
+    return `<div class="options" role="group" aria-label="判断正误">${[true, false].map((value) => `<button type="button" class="option" ${choose}="${value}" aria-pressed="${chosen === value}" ${locked ? "disabled" : ""}><span>${value ? "正确" : "错误"}</span></button>`).join("")}</div>`;
+  }
+  if (type === "single_choice" || type === "multi_choice") {
+    const multiple = type === "multi_choice";
+    return `${multiple ? '<p class="student-compose-note">请选择所有符合的选项，再次点击可以取消。</p>' : ""}<div class="options" role="group" aria-label="${multiple ? "选择答案，可多选" : "选择答案"}">${(question.options || []).map((option, index) => `<button type="button" class="option" ${choose}="${index}" aria-pressed="${multiple ? Array.isArray(chosen) && chosen.includes(index) : chosen === index}" ${locked ? "disabled" : ""}><b>${String.fromCharCode(65 + index)}</b><span>${escapeHtml(option)}</span></button>`).join("")}</div>`;
+  }
+  if (type === "fill") {
+    const count = questionBlankCount(question);
+    return `<div class="student-fill-answers">${Array.from({ length: count }, (_, index) => `<label class="field">${count > 1 ? `第 ${index + 1} 空` : diagnostic ? "独立填空" : "填空作答"}<input type="text" data-answer-input="${target}"${count > 1 ? ` data-answer-blank="${index}"` : ""} value="${escapeHtml((count > 1 ? Array.isArray(chosen) ? chosen[index] : "" : chosen) ?? "")}" placeholder="填写数值、公式或文字" autocomplete="off" spellcheck="false" ${locked ? "readonly" : ""}></label>`).join("")}</div>`;
+  }
+  return `<label class="field">${diagnostic ? "独立作答" : "这一题的作答"}<textarea data-answer-input="${target}" rows="5" ${locked ? "readonly" : ""}>${escapeHtml(chosen ?? "")}</textarea></label>`;
 }
 
 function workspaceLive() {
@@ -894,7 +988,7 @@ function diagnosticPage() {
   const current = Math.min(state.currentQ, Math.max(0, questions.length - 1));
   const question = questions[current];
   return `${studentHeading("先做一次独立短诊", "不计入任务成绩，也不会自动替你选择答案。完成后开放正式卷。")}
-    ${question ? `<div class="q-nav" aria-label="短诊题目">${questions.map((_, index) => `<button class="chip" data-q="${index}" aria-pressed="${current === index}">${index + 1}${state.diagnosticAnswers[index] !== "" && state.diagnosticAnswers[index] !== undefined ? " · 已答" : ""}</button>`).join("")}</div><section class="student-question-card"><div class="student-question-meta"><span>第 ${current + 1} / ${questions.length} 题</span><span>独立短诊</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>${questionChoices(question, state.diagnosticAnswers[current], state.loading, true)}</section><div class="student-focus-actions"><button class="btn" data-tab="tasks">返回任务</button><button class="btn primary" data-action="submit-diagnostic" ${state.loading ? "disabled" : ""}>${state.loading ? "正在提交" : "提交短诊"}</button></div>` : '<div class="state-banner warn">暂时没有短诊题目，请返回任务后重试。</div><button class="btn" data-tab="tasks">返回任务</button>'}`;
+    ${question ? `<div class="q-nav" aria-label="短诊题目">${questions.map((item, index) => `<button class="chip" data-q="${index}" aria-pressed="${current === index}">${index + 1}${!answerMissing(state.diagnosticAnswers[index], item) ? " · 已答" : ""}</button>`).join("")}</div><section class="student-question-card"><div class="student-question-meta"><span>第 ${current + 1} / ${questions.length} 题</span><span>独立短诊</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>${questionChoices(question, state.diagnosticAnswers[current], state.loading, true)}</section><div class="student-focus-actions"><button class="btn" data-tab="tasks">返回任务</button><button class="btn primary" data-action="submit-diagnostic" ${state.loading ? "disabled" : ""}>${state.loading ? "正在提交" : "提交短诊"}</button></div>` : '<div class="state-banner warn">暂时没有短诊题目，请返回任务后重试。</div><button class="btn" data-tab="tasks">返回任务</button>'}`;
 }
 
 /** 连上后端时的结果页：分数与逐题对错都来自真实评卷。 */
@@ -910,7 +1004,7 @@ function resultPageLive() {
   return `${heading}${summary}<div class="student-section-head"><h2>逐题反馈</h2><small>${task.questions?.length || 0} 道题</small></div><div class="student-result-list">${(task.questions || []).map((question, index) => {
     const item = byId[question.id] || {};
     const yours = attempt.answers?.[question.id];
-    const answerText = (value) => value === undefined ? "未作答" : question.options?.[value] ?? String(value);
+    const answerText = (value) => questionAnswerText(question, value);
     return `<section class="panel"><div class="student-result-heading"><h3>第 ${index + 1} 题</h3><span class="tag${item.score === undefined ? " warn" : item.score >= question.points ? " ok" : ""}">${item.score === undefined ? "待评分" : `${item.score} / ${question.points} 分`}</span></div><p class="formula">${escapeHtml(question.stem)}</p><p class="muted">你的作答：${escapeHtml(answerText(yours))}</p>${question.answer !== undefined ? `<p>参考答案：${escapeHtml(answerText(question.answer))}</p>` : ""}${item.result?.why ? `<p class="muted">判定：${escapeHtml(item.result.why)}</p>` : ""}${question.explanation ? `<p>${escapeHtml(question.explanation)}</p>` : ""}</section>`;
   }).join("")}</div>${task.status === "results_ready" && task.allow_retries ? '<button class="btn" data-action="retry">再做一次，保留首次成绩</button>' : ""}`;
 }
@@ -982,7 +1076,9 @@ function bind() {
   view.querySelectorAll("[data-view]").forEach((node) => node.addEventListener("click", () => {
     state.teacherView = node.dataset.view;
     render();
+    if (state.teacherView === "materials") teacherLibrary.load();
   }));
+  view.querySelectorAll("[data-teacher-class]").forEach((node) => node.addEventListener("change", () => selectTeacherClass(node.value)));
   view.querySelectorAll("[data-open-student]").forEach((node) => node.addEventListener("click", () => {
     state.openStudent = node.dataset.openStudent;
     state.teacherView = "student";
@@ -1002,24 +1098,35 @@ function bind() {
   }));
   // 选中先保留在本页，保存和交卷仍由正式接口确认。
   view.querySelectorAll("[data-choose]").forEach((node) => node.addEventListener("click", () => {
-    if (state.loading || state.banner === "takeover") return;
-    state.answers[state.currentQ] = Number(node.dataset.choose);
+    if (state.loading || state.banner === "takeover" || node.disabled) return;
+    const question = state.liveTask?.questions?.[state.currentQ];
+    const value = questionChoiceValue(question, state.answers[state.currentQ], node.dataset.choose);
+    if (value === undefined) return;
+    state.answers[state.currentQ] = value;
     rememberStudentDraft();
     render();
   }));
   view.querySelectorAll("[data-diagnostic-choose]").forEach((node) => node.addEventListener("click", () => {
-    if (state.loading) return;
-    state.diagnosticAnswers[state.currentQ] = Number(node.dataset.diagnosticChoose);
+    if (state.loading || node.disabled) return;
+    const question = state.diagnostic?.questions?.[state.currentQ];
+    const value = questionChoiceValue(question, state.diagnosticAnswers[state.currentQ], node.dataset.diagnosticChoose);
+    if (value === undefined) return;
+    state.diagnosticAnswers[state.currentQ] = value;
     render();
   }));
   view.querySelectorAll("[data-answer-input]").forEach((node) => node.addEventListener("input", () => {
-    if (state.loading) return;
-    if (node.dataset.answerInput === "diagnostic") state.diagnosticAnswers[state.currentQ] = node.value;
-    else {
-      state.answers[state.currentQ] = node.value;
+    const diagnostic = node.dataset.answerInput === "diagnostic";
+    if (state.loading || node.disabled || node.readOnly || !diagnostic && state.banner === "takeover") return;
+    const questions = (diagnostic ? state.diagnostic : state.liveTask)?.questions || [];
+    const answers = diagnostic ? state.diagnosticAnswers : state.answers;
+    const value = questionInputValue(questions[state.currentQ], answers[state.currentQ], node.value, node.dataset.answerBlank);
+    if (value === undefined) return;
+    answers[state.currentQ] = value;
+    if (!diagnostic) {
       rememberStudentDraft();
       view.querySelectorAll(".student-draft-state").forEach((status) => { status.textContent = "有未保存的作答"; });
     }
+    refreshAnswerProgress(diagnostic);
   }));
   view.querySelectorAll("[data-state]").forEach((node) => node.addEventListener("click", () => {
     state.banner = node.dataset.state;
@@ -1057,11 +1164,15 @@ function bind() {
     node.setAttribute("aria-label", masked ? "显示口令" : "隐藏口令");
     node.innerHTML = masked ? EYE_CLOSED : EYE_OPEN;
   }));
+  teacherLibrary.bind(view);
+  teacherComposer.bind(view);
 }
 
 async function finishLogout() {
   const generation = ++state.transitionId;
   workspaceRequest += 1;
+  teacherLibrary.reset();
+  teacherComposer.reset();
   clearInterval(leaseTimer);
   leaseTimer = 0;
   cancelAnimationFrame(revealTimer);
@@ -1077,6 +1188,7 @@ async function finishLogout() {
     liveConversations: [], liveMessages: [], activeConversation: null, conversationError: "", studentDrafts: {},
     conversations: [], activeChat: 0, openStudent: null, teacherView: "home", goalLabel: "", exportName: "",
     liveReportFormats: [], liveError: "", loading: false, courseId: null, courseName: "", classId: null, className: "",
+    teacherCourses: [], teacherContextVersion: 0,
     diagnostic: null, diagnosticAnswers: [], answers: [], submitted: false, seenSolution: false,
     draftDirty: false, savedAt: null, selectedAttemptId: null, banner: "", mode: "tutor",
     liveReport: null, railEvents: [], railLabel: "入口 · 正式服务已连接", step: 0,
@@ -1126,13 +1238,15 @@ function onAction(event) {
     }
     return;
   }
-  if (action === "open-drawer") state.drawer = true;
-  if (action === "close-drawer") state.drawer = false;
+  if (action === "open-drawer") {
+    teacherComposer.open({ studentId: event.currentTarget.dataset.goalStudent || null });
+    return;
+  }
+  if (action === "close-drawer") { teacherComposer.close(); return; }
   if (action === "reload") {
     loadWorkspace();
     return;
   }
-  if (action === "prepare") toast("还差 1 道检验题，备齐前不会发布");
   if (action === "banner") state.banner = event.currentTarget.dataset.banner;
   if (action === "clear-banner") state.banner = "";
   if (action === "export") {
@@ -1196,12 +1310,6 @@ function onSubmit(event) {
   const action = form.dataset.action;
   const data = new FormData(form);
   if (action === "auth") return submitAuth(data);
-  if (action === "publish") {
-    state.drawer = false;
-    toast("已记下目标，等检验题备齐再发布");
-    render();
-    return;
-  }
   if (action === "comment") {
     toast("短评已发送，没有改动学生答案");
     form.reset();
@@ -1383,18 +1491,26 @@ async function loadWorkspace() {
 
 async function loadTeacher() {
   const generation = state.transitionId;
+  const context = state.teacherContextVersion;
+  const current = () => generation === state.transitionId && context === state.teacherContextVersion && state.role === "teacher";
   const courses = await api.teacherClasses();
-  if (generation !== state.transitionId || state.role !== "teacher") return;
-  const withClasses = courses.find((entry) => entry.classes.length) || courses[0];
+  if (!current()) return;
+  state.teacherCourses = courses;
+  const withClasses = courses.find((entry) => entry.course.id === state.courseId)
+    || courses.find((entry) => entry.classes.length) || courses[0];
   if (!withClasses) {
     state.liveError = "这个账号还没有可访问的课程";
     return;
   }
   state.courseId = withClasses.course.id;
   state.courseName = withClasses.course.name;
-  const classroom = withClasses.classes[0];
+  const classroom = withClasses.classes.find((item) => item.id === state.classId) || withClasses.classes[0];
   if (!classroom) {
-    state.liveError = "这门课还没有班级";
+    state.classId = null;
+    state.className = "";
+    state.liveStudents = [];
+    state.liveGoals = [];
+    state.liveError = "这门课还没有班级，可先在题库与材料中准备课程内容。";
     return;
   }
   state.classId = classroom.id;
@@ -1404,18 +1520,19 @@ async function loadTeacher() {
     api.classMembers(state.classId),
     api.goals(state.classId),
   ]);
-  if (generation !== state.transitionId) return;
+  if (!current()) return;
   state.liveGoals = goalList;
   const goal = goalList[0];
 
   // 任务只读一次；没有分配任务的新成员仍保留在班级列表中。
   const tasks = goal ? await api.myTasks(goal.id).catch(() => []) : [];
-  if (generation !== state.transitionId) return;
+  if (!current()) return;
   const students = [];
   for (const member of members) {
     students.push({
       id: member.user_id,
       name: member.display_name || member.username,
+      active: member.status === "active",
       status: member.status === "active" ? "在班" : "未激活",
       note: "",
       mastery: null,
@@ -1429,7 +1546,7 @@ async function loadTeacher() {
   if (goal && students.length) {
     try {
       const evidence = await api.goalEvidence(goal.id);
-      if (generation !== state.transitionId) return;
+      if (!current()) return;
       const items = Array.isArray(evidence) ? evidence : (evidence.items || []);
       for (const entry of students) {
         const scored = items.filter((item) => item.student_id === entry.id && typeof item.score_units === "number" && item.max_score_units);
@@ -1442,8 +1559,8 @@ async function loadTeacher() {
           entry.evidence = `本轮 ${scored.length} 条评分记录，来自 ${new Set(scored.map((i) => i.attempt_id)).size} 次作答。`;
           entry.note = entry.mastery === null
             ? "记录不足，先不判断。"
-            : entry.mastery >= 80 ? "本轮已能独立完成，可进入目标题。"
-            : entry.mastery >= 50 ? "部分掌握，先补讲解再练。" : "需要先补基础，建议先看讲解。";
+            : entry.mastery >= 80 ? "本轮得分比例较高，可继续练习目标题。"
+            : entry.mastery >= 50 ? "本轮仍有失分，建议结合逐题反馈复习。" : "本轮得分比例较低，建议先复习基础材料。";
         } else {
           entry.note = "还没有本轮作答记录。";
           entry.evidence = "记录不足以判断，不显示 0%。";
@@ -1455,7 +1572,7 @@ async function loadTeacher() {
       }
     }
   }
-  if (generation !== state.transitionId) return;
+  if (!current()) return;
   state.liveStudents = students;
   state.liveGoals = goalList;
 }
@@ -1578,7 +1695,7 @@ function submitPaper() {
   if (state.loading) return;
   const count = state.liveTask?.questions?.length ?? state.answers.length;
   const missing = Array.from({ length: count }, (_, index) => state.answers[index])
-    .findIndex((item) => item === undefined || item === null || typeof item === "string" && !item.trim());
+    .findIndex((value, index) => answerMissing(value, state.liveTask?.questions?.[index]));
   if (missing >= 0) {
     state.currentQ = missing;
     toast(`第 ${missing + 1} 题还没作答`);
@@ -1742,8 +1859,7 @@ async function runDiagnostic() {
 async function submitLiveDiagnostic() {
   if (!state.diagnostic || state.loading) return;
   const questions = state.diagnostic.questions || [];
-  const missing = questions.findIndex((_, index) => state.diagnosticAnswers[index] === undefined
-    || state.diagnosticAnswers[index] === "");
+  const missing = questions.findIndex((question, index) => answerMissing(state.diagnosticAnswers[index], question));
   if (missing >= 0) {
     state.currentQ = missing;
     toast(`第 ${missing + 1} 题还没作答`);
@@ -1807,18 +1923,21 @@ async function saveLiveDraft() {
   render();
   try {
     const payload = {};
+    let incomplete = false;
     (task.questions || []).forEach((question, index) => {
       const value = state.answers[index];
-      if (value !== undefined && value !== "") payload[question.id] = value;
+      if (!answerMissing(value, question)) payload[question.id] = value;
+      else if (questionBlankCount(question) > 1 && Array.isArray(value) && value.some((item) => !answerMissing(item))) incomplete = true;
     });
     const saved = await api.saveDraft(task.id, task.version, state.liveLease, payload, `draft-${Date.now()}`);
     if (generation !== state.transitionId || state.liveTask?.id !== task.id) return;
     updateStudentTask({ ...task, version: saved.version, status: saved.status || "in_progress", draft_answers: payload });
-    delete state.studentDrafts[task.id];
-    state.draftDirty = false;
+    if (incomplete) state.studentDrafts[task.id] = { answers: [...state.answers], dirty: true };
+    else delete state.studentDrafts[task.id];
+    state.draftDirty = incomplete;
     state.savedAt = Date.now();
     state.banner = "";
-    toast("进度已保存");
+    toast(incomplete ? "完整作答已保存，未填完的题目仍留在本页" : "进度已保存");
   } catch (error) {
     if (generation !== state.transitionId) return;
     state.banner = "save-fail";

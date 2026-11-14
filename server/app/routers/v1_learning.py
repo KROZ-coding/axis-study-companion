@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ..learning_store import (GoalNotFound, IdempotencyConflict, InvalidTransition,
                               LeaseLost, TaskNotFound, VersionConflict)
 from ..runtime import get_runtime
+from ..services.question_library import list_question_library
 from ..schemas.v1_learning import (AppealCreate, DeadlineExtension, DiagnosticSubmission, DraftSave,
                                    EvidenceEvent, GoalCreate, GoalPlan, GoalUpdate, LeaseAcquire,
                                    LeaseRenew, ManualGrade, PlanConfigure, QuestionStatus, TeacherJudgment, RoundPublish, Submit, Versioned)
@@ -37,9 +38,19 @@ def _class(runtime, actor, class_id: str, course_id: str, *, write=False):
 @router.get("/courses/{course_id}/questions")
 def list_course_questions(course_id: str, request: Request,
                           actor=Depends(require_platform_roles("teacher")),
+                          q: str | None = Query(None, max_length=200),
+                          question_type: str | None = Query(None, alias="type", max_length=30),
+                          status: str | None = Query(None, max_length=30),
+                          knowledge_point: str | None = Query(None, max_length=200),
+                          difficulty: str | None = Query(None, max_length=30),
+                          class_id: str | None = Query(None, max_length=100),
                           limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
-    rows = _invoke(lambda: get_runtime(request).learning.list_questions(course_id, actor.id, limit=limit, offset=offset))
-    return {"items": [{key: row.get(key) for key in ("question_id", "version", "status", "course_id", "content")} for row in rows]}
+    runtime = get_runtime(request)
+    if class_id:
+        _class(runtime, actor, class_id, course_id)
+    return _invoke(lambda: list_question_library(runtime.learning, course_id, actor.id,
+        q=q, question_type=question_type, status=status, knowledge_point=knowledge_point,
+        difficulty=difficulty, class_id=class_id, limit=limit, offset=offset))
 
 
 @router.post("/questions/{question_id}/versions/{version}/status")

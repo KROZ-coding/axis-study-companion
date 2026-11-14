@@ -78,6 +78,21 @@ async function request(method, path, { body, expect = 200, extraHeaders = {} } =
 const get = (path, options) => request("GET", path, options).then((r) => r.data);
 const post = (path, body, options = {}) => request("POST", path, { ...options, body }).then((r) => r.data);
 const put = (path, body, options = {}) => request("PUT", path, { ...options, body }).then((r) => r.data);
+const call = (method, path, body) => request(method, path, { body }).then((result) => result.data);
+
+async function upload(path, formData) {
+  const url = path.startsWith("/api/") ? path : `${API_BASE}${path}`;
+  let response;
+  try {
+    response = await fetch(url, { method: "POST", credentials: "same-origin", headers: originHeaders(), body: formData });
+  } catch {
+    throw new ApiError(0, "network_unavailable", "上传未完成，请确认服务可用后重试", true);
+  }
+  let payload = null;
+  try { payload = await response.json(); } catch { /* Empty successful responses carry no body. */ }
+  if (!response.ok) throw toApiError(response.status, payload);
+  return payload;
+}
 
 /** 探一次后端。失败就当成"没有后端"，不让整个原型崩掉。 */
 async function probe() {
@@ -273,7 +288,7 @@ const exportUrl = (reportId, format) =>
   `${API_BASE}/reports/${encodeURIComponent(reportId)}/export/${format}`;
 
 export const api = {
-  state, probe, currentUser, login, logout,
+  state, probe, currentUser, login, logout, call, upload,
   applyTeacherAccount, activateAccount, resetPassword,
   teacherClasses, classMembers, goals, goalEvidence,
   myTasks, task, courses, conversations, conversationMessages, retryTask,

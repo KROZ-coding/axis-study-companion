@@ -283,7 +283,7 @@ class LearningOperations:
         normalized["score_units"] = normalized["points_units"]
         normalized["points"] = question.get("points", normalized["points"])
         for key in ("course_id", "class_id", "content_sha", "family_sha", "family_id", "source_anchors", "review_evidence",
-                    "external_processing_permission", "pipeline_job_id", "source_revision", "knowledge_points", "difficulty", "answer_format", "reference_answer"):
+                    "external_processing_permission", "pipeline_job_id", "source_revision", "knowledge_points", "difficulty", "answer_format", "reference_answer", "provenance"):
             if key in question:
                 normalized[key] = question[key]
         return normalized
@@ -302,7 +302,7 @@ class LearningOperations:
             value = {**dict(question), "course_id": course_id}
             result = super().create_question_version(actor_id, question_id, version, value, status=status, course_id=course_id)
             content = result["content"]
-            metadata = {key: content[key] for key in ("content_sha", "family_sha", "source_anchors", "review_evidence", "external_processing_permission", "pipeline_job_id", "source_revision") if key in content}
+            metadata = {key: content[key] for key in ("content_sha", "family_sha", "source_anchors", "review_evidence", "external_processing_permission", "pipeline_job_id", "source_revision", "difficulty", "knowledge_points", "answer_format", "provenance") if key in content}
             db.execute("INSERT INTO question_metadata VALUES(?,?,?)", (question_id, version, self._json(metadata)))
             if course_id and content.get("content_sha") and content.get("family_sha"):
                 db.execute("INSERT INTO question_family_index VALUES(?,?,?,?,?)", (course_id, content["content_sha"], content["family_sha"], question_id, version))
@@ -329,12 +329,15 @@ class LearningOperations:
                 raise TaskNotFound("题目不存在")
             return {**json.loads(row["content_json"]), "question_id": question_id, "version": version, "status": row["status"]}
 
-    def list_questions(self, course_id, actor_id, *, status=None, limit=100, offset=0):
-        if self._access_checker:
-            self._require_access(actor_id, {"kind": "question", "course_id": course_id})
-        with self._using_connection() as db:
-            rows = db.execute("SELECT * FROM question_versions WHERE course_id=? AND (? IS NULL OR status=?) AND (? OR owner_id=?) ORDER BY question_id,version LIMIT ? OFFSET ?", (course_id, status, status, self._access_checker is not None, actor_id, limit, offset))
-            return [{**dict(row), "content": json.loads(row["content_json"])} for row in rows]
+    def list_questions(self, course_id, actor_id, *, status=None, limit=100, offset=0, q=None,
+                       question_type=None, knowledge_point=None, difficulty=None, class_id=None):
+        from .services.question_library import list_question_library
+        return list_question_library(self, course_id, actor_id, status=status, limit=limit, offset=offset, q=q,
+            question_type=question_type, knowledge_point=knowledge_point, difficulty=difficulty, class_id=class_id)["items"]
+
+    def get_question_detail(self, course_id, question_id, version, actor_id):
+        from .services.question_library import question_detail
+        return question_detail(self, course_id, question_id, version, actor_id)
 
     def find_question_duplicate(self, course_id, content_sha, family_sha):
         with self._using_connection() as db:
