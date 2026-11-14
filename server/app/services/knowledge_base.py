@@ -1,12 +1,12 @@
 """Local knowledge base: parse documents once, then BM25 keyword retrieval.
 
 MaxKB (vector search) is not available on this machine, so course material is
-indexed offline into a single pickle: chunk texts + an inverted index. Retrieval
-is BM25 over jieba tokens, which needs no model and no network.
+indexed offline into a single JSON document: chunk texts + an inverted index.
+Retrieval is BM25 over jieba tokens, which needs no model and no network.
 """
 
 import html
-import pickle
+import json
 import re
 import time
 from pathlib import Path
@@ -230,15 +230,16 @@ class LocalKnowledgeBase:
         configured = self.settings.knowledge_index_path.strip()
         if configured:
             return Path(configured)
-        return Path(self.settings.data_dir) / "knowledge" / "index.pkl"
+        return Path(self.settings.data_dir) / "knowledge" / "index.json"
 
     def load(self) -> bool:
         path = self.index_path
         if not path.is_file():
             return False
         try:
-            with path.open("rb") as handle:
-                payload = pickle.load(handle)
+            # JSON instead of pickle: the index never executes embedded code on load.
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
             self.chunks = payload["chunks"]
             self.postings = payload["postings"]
             self.lengths = payload["lengths"]
@@ -247,7 +248,7 @@ class LocalKnowledgeBase:
             self.source_dir = payload.get("source_dir")
             self.loaded = True
             return True
-        except (OSError, KeyError, pickle.UnpicklingError, EOFError, ValueError):
+        except (OSError, KeyError, EOFError, ValueError):
             return False
 
     def ensure_loaded(self) -> bool:
@@ -351,8 +352,11 @@ def build_index(
 
 def reindex_existing(index_path: Path, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
     """Re-tokenize already-extracted chunks without re-parsing any document."""
-    with index_path.open("rb") as handle:
-        payload = pickle.load(handle)
+    try:
+        with index_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except ValueError as error:
+        raise ValueError("知识索引不是 JSON 格式，请用 build_index 重建后重试") from error
     chunks = payload["chunks"]
     if progress:
         progress(f"  复用 {len(chunks)} 个知识块，仅重建倒排索引…")
@@ -386,7 +390,7 @@ def _write_index(chunks: list[dict[str, Any]], index_path: Path, *, source_dir: 
     }
     index_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = index_path.with_suffix(".tmp")
-    with temporary.open("wb") as handle:
-        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
     temporary.replace(index_path)
     return {"chunks": len(chunks), "tokens": len(postings), "index_path": str(index_path)}
