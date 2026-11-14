@@ -185,13 +185,52 @@ button { cursor: pointer; }
   color: var(--ink-soft); left: 44px; width: 236px; margin: 28px 0 0;
   transform-origin: left top; transition: font-size 100ms linear;
 }
-.rail-log { left: 44px; margin-top: 16px; display: flex; flex-direction: column; gap: 7px; }
+/* 左栏实时监控：类后台的状态网格 + 带时间戳的事件流，全部来自真实本机状态 */
+.rail-monitor {
+  left: 44px; top: 664px; width: 242px;
+  border-top: 1px solid var(--faint);
+  font-family: var(--mono);
+}
+.mon-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; padding-top: 9px; }
+.mon-grid span {
+  font-family: var(--cjk); font-size: calc(10px + var(--reveal) * 2px);
+  color: var(--mute); white-space: nowrap;
+}
+.mon-grid b {
+  font-family: var(--mono); font-size: calc(10px + var(--reveal) * 2px); font-weight: 600;
+  color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mon-grid b.ok { color: var(--ok); }
+.mon-led {
+  width: 6px; height: 6px; margin-right: 7px; display: inline-block; flex: none;
+  background: #e8b4bc; animation: mon-pulse 1.6s ease-in-out infinite;
+}
+.mon-led.on { background: #9fe8c6; }
+@keyframes mon-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.rail-monitor .rail-log {
+  position: static; left: auto; margin-top: 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
 .rail-log .row {
-  display: flex; align-items: center; gap: 8px; white-space: nowrap;
+  display: flex; align-items: center; gap: 7px; white-space: nowrap;
   font-family: var(--cjk); font-size: calc(12px + var(--reveal) * 3px); color: var(--ink-soft);
   transition: font-size 100ms linear;
 }
-.rail-log .row i { width: 4px; height: 4px; background: var(--ink); flex: none; }
+.rail-log .row em {
+  font-style: normal; flex: none;
+  font-family: var(--mono); font-size: 9.5px; color: var(--mute); letter-spacing: 0.02em;
+}
+.mon-cursor {
+  display: inline-block; width: 7px; height: 11px; margin-top: 9px;
+  background: var(--accent); animation: mon-blink 1.1s steps(2, start) infinite;
+}
+@keyframes mon-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
 .rail-hints {
   left: 44px; width: 340px; display: flex; flex-wrap: wrap; gap: 10px 14px;
   font-family: var(--latin); font-size: 11px; font-weight: 500; color: var(--ink-soft);
@@ -331,7 +370,7 @@ button { cursor: pointer; }
   white-space: nowrap; pointer-events: none;
 }
 .auth-slab .ghost-name {
-  position: absolute; left: 286px; top: -22px;
+  position: absolute; left: 238px; top: -22px;
   font-family: var(--cjk); font-size: 104px; font-weight: 700;
   color: rgba(20, 52, 63, 0.06); white-space: nowrap; pointer-events: none;
 }
@@ -368,35 +407,35 @@ button { cursor: pointer; }
   letter-spacing: 0.1em; padding: 3px 8px;
 }
 
-/* 数学公式卷轴：留出档案照片位，但展示的是克制的公式故障信号。 */
+/* 数学公式卷轴：收敛为小张信号卡，把宽度让给姓名条。 */
 .auth-photo {
-  position: absolute; left: 30px; top: 74px; width: 232px; height: 180px;
+  position: absolute; left: 30px; top: 74px; width: 184px; height: 136px;
   background: rgba(255, 255, 255, 0.86);
   border: 1px solid rgba(20, 52, 63, 0.10);
   box-shadow: 0 10px 28px -6px rgba(18, 62, 82, 0.16);
 }
 .auth-photo .film {
-  position: absolute; inset: 9px; overflow: hidden;
+  position: absolute; inset: 8px; overflow: hidden;
   background: linear-gradient(155deg, rgba(236,246,250,.95), rgba(209,232,241,.84));
 }
 .formula-film::before, .formula-film::after {
   content: ""; position: absolute; left: 13px; right: 13px; height: 1px; background: rgba(20,52,63,.20);
 }
-.formula-film::before { top: 42px; }
-.formula-film::after { bottom: 38px; }
+.formula-film::before { top: 34px; }
+.formula-film::after { bottom: 30px; }
 .formula-index, .formula-coord {
-  position: absolute; left: 14px; font-family: var(--mono); font-size: 9px; color: var(--ink-soft);
+  position: absolute; left: 13px; font-family: var(--mono); font-size: 8.5px; color: var(--ink-soft);
 }
-.formula-index { top: 18px; }
-.formula-coord { bottom: 16px; right: 14px; left: auto; }
+.formula-index { top: 14px; }
+.formula-coord { bottom: 13px; right: 13px; left: auto; }
 .formula-rule {
   position: absolute; left: 0; top: 50%; width: 100%; height: 1px;
   background: rgba(31,138,168,.35); transform: rotate(-18deg);
 }
 .equation-reel {
-  position: absolute; left: 14px; right: 10px; top: 50%; transform: translateY(-50%);
+  position: absolute; left: 13px; right: 9px; top: 50%; transform: translateY(-50%);
   color: var(--ink); font-family: "Cambria Math", "Times New Roman", serif;
-  font-size: 17px; line-height: 1.4; overflow-wrap: anywhere;
+  font-size: 15px; line-height: 1.4; overflow-wrap: anywhere;
   animation: formula-signal 4.8s steps(1, end) infinite;
 }
 .auth-photo .badge {
@@ -411,8 +450,8 @@ button { cursor: pointer; }
 .auth-photo .tick::before { left: 7.5px; top: 0; width: 1px; height: 16px; }
 .auth-photo .tick::after { top: 7.5px; left: 0; height: 1px; width: 16px; }
 
-/* 身份区：职别标签 + 名字条 */
-.auth-id { position: absolute; left: 286px; top: 74px; right: 24px; }
+/* 身份区：职别标签 + 名字条。公式卡缩小后，名字条占据剩余整幅宽度。 */
+.auth-id { position: absolute; left: 238px; top: 74px; right: 24px; }
 .auth-rank { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .auth-role {
   background: var(--ink); color: #f2f7fa;
@@ -426,16 +465,16 @@ button { cursor: pointer; }
 .auth-state.alert { color: var(--warn); border-color: var(--warn); }
 .auth-state.ok { color: var(--ok); border-color: var(--ok); }
 .auth-name {
-  margin-top: 12px; min-height: 64px;
-  display: inline-flex; align-items: center; width: 100%; max-width: 360px;
-  background: var(--ink); padding: 10px 14px;
+  margin-top: 12px; min-height: 70px;
+  display: inline-flex; align-items: center; width: 100%;
+  background: var(--ink); padding: 10px 16px;
 }
 .auth-name b {
-  color: #f2f7fa; font-family: var(--cjk); font-size: 22px; font-weight: 650;
+  color: #f2f7fa; font-family: var(--cjk); font-size: 25px; font-weight: 650;
   line-height: 1.3; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .auth-file {
-  position: relative; margin-top: 10px; width: 100%; max-width: 360px; min-height: 70px;
+  position: relative; margin-top: 10px; width: 100%; min-height: 70px;
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(20, 52, 63, 0.06);
   display: flex; align-items: center; gap: 10px; padding: 8px 10px;
@@ -497,7 +536,6 @@ button { cursor: pointer; }
 }
 .auth-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .auth-fields.compact { grid-template-columns: 1fr; }
-.auth-title { font-family: var(--cjk); font-size: 20px; font-weight: 700; margin: 0 0 5px; }
 .auth-main-head {
   display: flex; justify-content: space-between; align-items: center;
   margin-bottom: 8px;
@@ -510,17 +548,24 @@ button { cursor: pointer; }
 .auth-main-head .attempt { font-family: var(--cjk); font-size: 10px; color: var(--mute); }
 .auth-main-head .attempt.hot { color: var(--warn); }
 .tabs { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
-.role-tabs { margin-top: 12px; margin-bottom: 8px; }
-.auth-tabs { margin-bottom: 10px; }
-.auth-link-note { min-height: 30px; display: inline-flex; align-items: center; font-family: var(--cjk); font-size: 14px; line-height: 1.5; color: var(--ink-soft); }
+.role-tabs { margin-top: 12px; margin-bottom: 10px; }
+/* 学生/教师是主切换器：两个等宽大按钮，一眼可点 */
+.role-tabs .chip { flex: 1 1 0; font-size: 15px; font-weight: 600; min-height: 48px; letter-spacing: 0.06em; }
+.auth-mode-row {
+  display: flex; align-items: center; gap: 4px 14px; flex-wrap: wrap;
+  margin-top: 10px; min-height: 30px;
+}
+.auth-mode-row .linkish { font-size: 12px; min-height: 26px; }
+.auth-mode-row .linkish[aria-pressed="true"] { color: var(--ink); font-weight: 700; text-decoration-thickness: 2px; }
+.auth-mode-row .linkish[aria-pressed="false"] { color: var(--ink-soft); }
 .error-line {
   min-height: 1.35em; margin: 6px 0; font-family: var(--cjk); font-size: 12px; line-height: 1.5;
   color: var(--bad); overflow-wrap: anywhere;
 }
 .error-line.service-offline { color: var(--ink-soft); }
 .auth-submit { width: 100%; margin-top: 0; }
-.auth-main .auth-alt { margin-top: 6px; }
-.auth-main .entry-note { margin-top: 4px; }
+.auth-main .entry-note { margin-top: 8px; }
+.auth-main .entry-note .chip { min-height: 44px; padding: 8px 18px; font-weight: 600; }
 .chip, .btn, .nav-btn, .icon-btn {
   border: 1px solid var(--line); background: rgba(255,255,255,.72); border-radius: 0;
   min-height: 44px; padding: 8px 14px;
@@ -613,17 +658,12 @@ button { cursor: pointer; }
   80% { transform: translateX(2px); }
 }
 
-.auth-alt { display: flex; flex-direction: column; align-items: flex-start; gap: 0; }
 .linkish {
   background: none; border: 0; color: var(--cyan-deep); padding: 0; min-height: 30px;
   font-family: var(--cjk); font-size: 11.5px; letter-spacing: 0.04em;
   text-decoration: underline; text-underline-offset: 3px;
 }
-.proto-note p, .auth-lede { line-height: 1.7; }
-.auth-lede {
-  font-family: var(--cjk); font-size: 14px; color: var(--ink-soft);
-  margin: 0 0 10px; display: block;
-}
+.proto-note p { line-height: 1.7; }
 
 .admin-boundary {
   min-height: 100vh; display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
@@ -834,18 +874,16 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
   .auth-file { display: none; }
   .auth-main { position: relative; left: auto; top: auto; bottom: auto; width: 100%; overflow: visible; padding: 0; }
   .auth-fields { grid-template-columns: 1fr; gap: 0; }
-  .auth-title { font-size: 18px; }
   .auth-main-head { margin-bottom: 6px; }
   .auth-main-head .label { font-size: 11px; }
-  .auth-lede { font-size: 13px; margin-bottom: 8px; }
   .tabs { gap: 5px; margin-bottom: 8px; }
+  .role-tabs .chip { font-size: 14px; min-height: 46px; }
   .chip { font-size: 12px; padding: 6px 9px; min-height: 42px; }
   .field input { min-height: 44px; font-size: 16px; }
   .keybar { height: 48px; }
   .keybar button { padding: 0 14px; font-size: 12px; letter-spacing: 0; }
-  .auth-link-note { min-height: 38px; font-size: 12px; }
   .entry-note { flex-direction: column; align-items: flex-start; gap: 6px; }
-  .entry-note .linkish, .auth-alt .linkish { min-height: 44px; display: inline-flex; align-items: center; }
+  .entry-note .linkish { min-height: 44px; display: inline-flex; align-items: center; }
   .error-line { font-size: 13px; }
   .auth-submit { min-height: 46px; }
 }

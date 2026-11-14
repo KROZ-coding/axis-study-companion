@@ -71,7 +71,7 @@ const state = {
   anchorYaw: 0.40,
   anchorPitch: 0.17,
   anchorSpin: 0,
-  railLog: ["等待账号口令", "会话未开启"],
+  railEvents: [],
   railLabel: "入口 · 会话未开启",
   fallback: false,
   // 真后端
@@ -121,36 +121,35 @@ function render() {
 }
 
 const AUTH_COPY = {
-  login: {
-    title: "回到学习现场",
-    lede: "学生和教师使用各自的正式账号。登录身份由服务核验。",
-    submit: "登录",
-    placeholder: "在这里输入口令",
-  },
-  activate: {
-    title: "首次激活学生账号",
-    lede: "输入教师提供的一次性码，设置至少 8 位的新密码。",
-    submit: "激活账号",
-    placeholder: "设置新密码",
-  },
-  reset: {
-    title: "重设登录口令",
-    lede: "向负责教师或管理员获取重设码，再设置新的登录口令。",
-    submit: "重设口令",
-    placeholder: "设置新的口令",
-  },
-  apply: {
-    title: "申请教师账号",
-    lede: "提交后创建待审核账号；通过审核后即可登录。",
-    submit: "提交审核",
-    placeholder: "创建一个登录口令",
-  },
+  login: { label: "账号验证", submit: "登录", placeholder: "在这里输入口令" },
+  activate: { label: "账号激活", submit: "激活账号", placeholder: "设置新密码" },
+  reset: { label: "口令重设", submit: "重设口令", placeholder: "设置新的口令" },
+  apply: { label: "教师账号申领", submit: "提交审核", placeholder: "创建一个登录口令" },
 };
 const AUTH_STATUS = { ready: "等待验证", checking: "正在验证", denied: "需要检查", sent: "等待审核" };
 const AUTH_ROLE = { login: "学习账号", activate: "学生激活", reset: "口令重设", apply: "教师申领" };
 const AUTH_STATE_LABEL = { denied: "未通过", checking: "核对中", sent: "等待审核" };
-const AUTH_ROLE_LABEL = { student: "学员", teacher: "教师", admin: "管理员" };
+const AUTH_ROLE_LABEL = { student: "学生", teacher: "教师", admin: "管理员" };
 const AUTH_FORMULAS = ["aₙ₊₁ = aₙ + d", "x = (−b ± √Δ) / 2a", "∫₀ᵗ v(τ) dτ = Δx", "∑ᵢ₌₁ⁿ i = n(n + 1) / 2"];
+// 侧栏实时监控：身份与会话状态都取自真实本机状态，事件流带真实时间戳
+const MON_SESSION = { ready: "未建立", checking: "核验中", denied: "未通过", sent: "待审核" };
+const RAIL_EVENT_MAX = 6;
+
+function monitorIdentity() {
+  return state.authTab === "apply" ? "教师申领"
+    : state.authTab === "activate" ? "学生激活"
+      : state.authTab === "reset" ? "口令重设" : AUTH_ROLE_LABEL[state.authRole];
+}
+
+function hhmmss() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
+function resetEvents(texts) {
+  state.railEvents = texts.slice(-RAIL_EVENT_MAX).map((text) => ({ t: hhmmss(), text }));
+}
 
 function renderEntry() {
   const open = state.reveal > 0.5;
@@ -168,9 +167,18 @@ function renderEntry() {
             <i class="rail-dash" style="top:358px"></i>
             <div class="rail-chip" style="left:44px; top:396px">智慧学伴 · 学习证据</div>
             <p class="rail-micro" style="top:416px">作答、提示与材料依据逐项留存。每个判断都有出处，尚无记录时如实说明。</p>
-            <div class="rail-chip" style="left:44px; top:632px">访问记录</div>
-            <div class="rail-log" style="top:656px">
-              ${state.railLog.map((row) => `<div class="row"><i></i>${escapeHtml(row)}</div>`).join("")}
+            <div class="rail-chip" style="left:44px; top:632px"><i class="mon-led ${state.live ? "on" : ""}" aria-hidden="true"></i>实时监控</div>
+            <div class="rail-monitor" style="--reveal:${rv}" aria-hidden="true">
+              <div class="mon-grid">
+                <span>服务</span><b class="${state.live ? "ok" : ""}">${state.live ? "已连接" : "未连接"}</b>
+                <span>身份</span><b>${escapeHtml(monitorIdentity())}</b>
+                <span>账号</span><b class="mon-account">${escapeHtml(state.authAccount || "—")}</b>
+                <span>会话</span><b>${MON_SESSION[state.authStatus] || "未建立"}</b>
+              </div>
+              <div class="rail-log">
+                ${state.railEvents.map((event) => `<div class="row"><em>${event.t}</em>${escapeHtml(event.text)}</div>`).join("")}
+              </div>
+              <span class="mon-cursor"></span>
             </div>
             <i class="rail-dash" style="left:44px; top:852px"></i>
             <i class="rail-hair" style="left:66px; top:853px"></i>
@@ -251,10 +259,24 @@ function tickClock() {
   };
   if (state.screen !== "entry") return;
   const root = view.querySelector(".chrono");
-  if (!root) return;
-  root.querySelector(".chrono-hm").textContent = state.clock.hm;
-  root.querySelector(".chrono-sec").textContent = state.clock.sec;
-  root.querySelector(".chrono-date").textContent = state.clock.date;
+  if (root) {
+    root.querySelector(".chrono-hm").textContent = state.clock.hm;
+    root.querySelector(".chrono-sec").textContent = state.clock.sec;
+    root.querySelector(".chrono-date").textContent = state.clock.date;
+  }
+  // 侧栏监控：每秒对齐一次真实连接/会话状态，不整屏重渲染
+  const monitor = view.querySelector(".rail-monitor");
+  if (!monitor) return;
+  const cells = monitor.querySelectorAll(".mon-grid b");
+  if (cells[0]) {
+    cells[0].textContent = state.live ? "已连接" : "未连接";
+    cells[0].classList.toggle("ok", state.live);
+  }
+  if (cells[1]) cells[1].textContent = monitorIdentity();
+  if (cells[2]) cells[2].textContent = state.authAccount || "—";
+  if (cells[3]) cells[3].textContent = MON_SESSION[state.authStatus] || "未建立";
+  const led = view.querySelector(".mon-led");
+  if (led) led.classList.toggle("on", state.live);
 }
 
 function authCard(open) {
@@ -271,7 +293,7 @@ function authCard(open) {
       : state.authTab === "reset" ? "口令重设" : AUTH_ROLE_LABEL[state.authRole];
   const service = state.live ? "正式认证服务已连接" : state.serviceError;
   const formula = AUTH_FORMULAS[state.formulaIndex % AUTH_FORMULAS.length];
-  return `<form class="auth-card ${state.authStatus === "denied" ? "denied" : ""}" data-action="auth" aria-labelledby="auth-title" ${open ? "" : "inert"}>
+  return `<form class="auth-card ${state.authStatus === "denied" ? "denied" : ""}" data-action="auth" aria-label="账号安全认证" ${open ? "" : "inert"}>
       <div class="auth-rear" aria-hidden="true"></div>
       <div class="auth-slab" aria-hidden="true">
         <div class="hatch"></div>
@@ -326,44 +348,31 @@ function authCard(open) {
 
         <div class="auth-main">
           <div class="auth-main-head">
-            <span class="label"><i></i>${state.authTab === "apply" ? "教师账号申领" : state.authTab === "login" ? "账号验证" : copy.submit}</span>
+            <span class="label"><i></i>${copy.label}</span>
             <span class="attempt ${state.authStatus === "denied" ? "hot" : ""}">${state.authStatus === "sent" ? "等待审核" : state.authStatus === "denied" ? "请检查信息" : state.live ? "安全连接" : "服务离线"}</span>
           </div>
-          <h2 id="auth-title" class="auth-title">${copy.title}</h2>
-          <p class="auth-lede">${copy.lede}</p>
-          <div class="tabs role-tabs" role="group" aria-label="账号入口">
-            <button class="chip" type="button" data-role="student" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "student" && state.authTab !== "apply"}">学员</button>
+          <div class="tabs role-tabs" role="group" aria-label="登录身份">
+            <button class="chip" type="button" data-role="student" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "student" && state.authTab !== "apply"}">学生</button>
             <button class="chip" type="button" data-role="teacher" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "teacher" && state.authTab !== "apply"}">教师</button>
-            <button class="chip" type="button" data-auth-mode="apply" ${busy ? "disabled" : ""} aria-pressed="${state.authTab === "apply"}">申领账号</button>
           </div>
-          ${state.authTab === "apply" ? "" : `<div class="tabs auth-tabs" role="group" aria-label="登录方式">
-            <button class="chip" type="button" data-tab="login" ${busy ? "disabled" : ""} aria-pressed="${state.authTab === "login"}">账号口令</button>
-            <button class="chip" type="button" data-tab="activate" ${busy ? "disabled" : ""} aria-pressed="${state.authTab === "activate"}">首次激活</button>
-            <button class="chip" type="button" data-tab="reset" ${busy ? "disabled" : ""} aria-pressed="${state.authTab === "reset"}">重设口令</button>
-          </div>`}
           ${authFields()}
           <p class="error-line ${state.live ? "" : "service-offline"}" role="alert">${escapeHtml(state.error || (!state.live ? service : ""))}</p>
           ${state.authTab === "login" ? keyBar(copy, locked)
             : `<label class="field secret-field">${state.authTab === "apply" ? "设置登录口令" : "新口令"}<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" ${locked ? "disabled" : ""} placeholder="至少 8 位"></label>
               <button class="btn primary wide auth-submit" type="submit" ${busy || !state.live || state.authStatus === "sent" ? "disabled" : ""}>${busy ? "正在核验…" : state.authStatus === "sent" ? "已提交审核" : copy.submit}</button>`}
-          <div class="auth-alt">${authLinks()}</div>
+          <div class="auth-mode-row" role="group" aria-label="登录方式">
+            ${state.authTab === "apply"
+              ? `<button class="linkish" type="button" data-tab="login" ${busy ? "disabled" : ""}>已有账号，返回登录</button>`
+              : [["login", "口令登录"], ["activate", "首次激活"], ["reset", "重设口令"]].map(([id, text]) =>
+                `<button class="linkish" type="button" data-tab="${id}" aria-pressed="${state.authTab === id}" ${busy ? "disabled" : ""}>${text}</button>`).join("")}
+          </div>
           <div class="entry-note">
+            ${state.authTab === "apply" ? "" : `<button class="chip" type="button" data-auth-mode="apply" ${busy ? "disabled" : ""}>申领账号</button>`}
             <span class="entry-note-spacer"></span>
-            <button class="linkish" type="button" data-action="back-entry" ${busy ? "disabled" : ""}>回到开场</button>
           </div>
         </div>
       </div>
     </form>`;
-}
-
-function authLinks() {
-  if (state.authTab === "apply") return `<button class="linkish" type="button" data-tab="login" ${state.authStatus === "checking" ? "disabled" : ""}>已有账号，返回登录</button>`;
-  if (state.authTab === "login") {
-    return state.authRole === "student"
-      ? `<span class="auth-link-note">请使用老师创建的账号；首次登录先完成激活。</span>`
-      : `<span class="auth-link-note">教师账号申请通过审核后即可登录。</span>`;
-  }
-  return `<span class="auth-link-note">${state.authTab === "activate" ? "账号由负责教师创建并提供激活码。" : "重设码由负责教师或管理员提供。"}</span>`;
 }
 
 function keyBar(copy, busy) {
@@ -919,8 +928,10 @@ function bind() {
     state.authAccount = input.value.trim();
     const label = view.querySelector(".auth-name b");
     const marker = view.querySelector(".auth-rings .ring:nth-child(2) i");
+    const monitorAccount = view.querySelector(".mon-account");
     if (label) label.textContent = state.authAccount || "等待身份核验";
     if (marker) marker.classList.toggle("on", Boolean(state.authAccount));
+    if (monitorAccount) monitorAccount.textContent = state.authAccount || "—";
   }));
   view.querySelectorAll("[data-view]").forEach((node) => node.addEventListener("click", () => {
     state.teacherView = node.dataset.view;
@@ -985,8 +996,10 @@ function finishLogout() {
   Object.assign(state, {
     screen: "entry", shifted: false, reveal: 0, authStatus: "ready",
     authAccount: "", authInput: "", role: null, drawer: false, sheet: null, error: "",
-    railLog: ["等待账号口令", "会话未开启"], railLabel: "入口 · 正式服务已连接", step: 0,
+    railEvents: [],
+    railLabel: "入口 · 正式服务已连接", step: 0,
   });
+  resetEvents(["会话已结束", "等待账号口令"]);
   if (scene) scene.setReveal(0);
   render();
 }
@@ -995,14 +1008,6 @@ function onAction(event) {
   const action = event.currentTarget.dataset.action;
   if (action === "reveal") {
     animateReveal(1);
-    return;
-  }
-  if (action === "back-entry") {
-    if (state.authStatus === "checking") return;
-    state.error = "";
-    state.authStatus = "ready";
-    state.authInput = "";
-    animateReveal(0);
     return;
   }
   if (action === "logout") {
@@ -1133,7 +1138,7 @@ function enterWorkspace(role, displayName, { live, message }) {
   state.who = displayName;
   state.step = 3;
   state.live = live;
-  state.railLog = ["身份已核验", "正式会话已开启"];
+  resetEvents(["身份已核验", "正式会话已开启"]);
   state.railLabel = "入口 · 正式会话";
   if (scene) {
     scene.setVerify(0);
@@ -1158,7 +1163,7 @@ function failAuth(message) {
   state.authInput = "";
   state.error = message;
   state.attempts += 1;
-  state.railLog = ["身份核验未通过", "请检查后重试"];
+  resetEvents(["身份核验未通过", "请检查后重试"]);
   state.railLabel = "入口 · 需要检查";
   state.step = 4;
   if (scene) scene.setDenied(1);
@@ -1179,7 +1184,7 @@ function submitAuth(data) {
   state.authAccount = account || state.authAccount;
   state.authStatus = "checking";
   state.error = "";
-  state.railLog = ["正在核验身份", "等待正式服务"];
+  resetEvents(["正在核验身份", "等待正式服务"]);
   state.railLabel = "入口 · 核验中";
   state.step = 2;
   if (scene) scene.setVerify(1);
@@ -1191,7 +1196,7 @@ function submitAuth(data) {
         const result = await api.applyTeacherAccount({ username: account, display_name: name, password });
         state.authStatus = "sent";
         state.error = "";
-        state.railLog = ["账号已建立", "等待管理员审核"];
+        resetEvents(["账号已建立", "等待管理员审核"]);
         state.railLabel = "教师申领 · 待审核";
         state.step = 3;
         if (scene) scene.setVerify(0);
@@ -1210,7 +1215,7 @@ function submitAuth(data) {
         state.authInput = "";
         state.error = "";
         state.step = 0;
-        state.railLog = [activating ? "账号已激活" : "口令已重设", "请使用新口令登录"];
+        resetEvents([activating ? "账号已激活" : "口令已重设", "请使用新口令登录"]);
         state.railLabel = "入口 · 等待登录";
         if (scene) scene.setVerify(0);
         render();
@@ -1716,7 +1721,7 @@ state.shifted = state.reveal > 0.5;
 // 后端探测结果由 index.html 里的 api.probe() 提供
 state.live = Boolean(window.api && window.api.state.live);
 if (state.live) {
-  state.railLog = ["已连上正式服务", "等待账号口令"];
+  resetEvents(["已连上正式服务", "等待账号口令"]);
   state.railLabel = "入口 · 已连服务";
   // 已经有会话就直接进工作区，刷新不会掉出来
   window.api.currentUser().then((user) => {
@@ -1726,7 +1731,7 @@ if (state.live) {
   });
 } else {
   state.serviceError = (window.api && window.api.state.lastError) || "正式认证服务未连接，登录与申领暂不可用";
-  state.railLog = ["正式服务未连接", "登录暂不可用"];
+  resetEvents(["正式服务未连接", "登录暂不可用"]);
   state.railLabel = "入口 · 服务未连接";
 }
 mountScene();
