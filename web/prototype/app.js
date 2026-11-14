@@ -59,9 +59,7 @@ const state = {
   reveal: 0,
   authStatus: "ready",
   authAccount: "",
-  authInput: "",
   attempts: 0,
-  capsLock: false,
   serviceError: "",
   formulaIndex: 0,
   clock: { hm: "--:--", sec: "--", date: "" },
@@ -121,16 +119,17 @@ function render() {
 }
 
 const AUTH_COPY = {
-  login: { label: "账号验证", submit: "登录", placeholder: "在这里输入口令" },
-  activate: { label: "账号激活", submit: "激活账号", placeholder: "设置新密码" },
-  reset: { label: "口令重设", submit: "重设口令", placeholder: "设置新的口令" },
-  apply: { label: "教师账号申领", submit: "提交审核", placeholder: "创建一个登录口令" },
+  login: { label: "账号验证", submit: "登录" },
+  activate: { label: "账号激活", submit: "激活账号" },
+  reset: { label: "口令重设", submit: "重设口令" },
+  apply: { label: "教师账号申领", submit: "提交审核" },
 };
-const AUTH_STATUS = { ready: "等待验证", checking: "正在验证", denied: "需要检查", sent: "等待审核" };
-const AUTH_ROLE = { login: "学习账号", activate: "学生激活", reset: "口令重设", apply: "教师申领" };
 const AUTH_STATE_LABEL = { denied: "未通过", checking: "核对中", sent: "等待审核" };
 const AUTH_ROLE_LABEL = { student: "学生", teacher: "教师", admin: "管理员" };
 const AUTH_FORMULAS = ["aₙ₊₁ = aₙ + d", "x = (−b ± √Δ) / 2a", "∫₀ᵗ v(τ) dτ = Δx", "∑ᵢ₌₁ⁿ i = n(n + 1) / 2"];
+// 口令框的眼睛：默认明文，点击后切换为方块遮蔽（-webkit-text-security: square）
+const EYE_OPEN = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_CLOSED = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 // 侧栏实时监控：身份与会话状态都取自真实本机状态，事件流带真实时间戳
 const MON_SESSION = { ready: "未建立", checking: "核验中", denied: "未通过", sent: "待审核" };
 const RAIL_EVENT_MAX = 6;
@@ -167,7 +166,7 @@ function renderEntry() {
             <i class="rail-dash" style="top:358px"></i>
             <div class="rail-chip" style="left:44px; top:396px">智慧学伴 · 学习证据</div>
             <p class="rail-micro" style="top:416px">作答、提示与材料依据逐项留存。每个判断都有出处，尚无记录时如实说明。</p>
-            <div class="rail-chip" style="left:44px; top:632px"><i class="mon-led ${state.live ? "on" : ""}" aria-hidden="true"></i>实时监控</div>
+            <div class="rail-chip" style="left:44px; top:608px"><i class="mon-led ${state.live ? "on" : ""}" aria-hidden="true"></i>实时监控</div>
             <div class="rail-monitor" style="--reveal:${rv}" aria-hidden="true">
               <div class="mon-grid">
                 <span>服务</span><b class="${state.live ? "ok" : ""}">${state.live ? "已连接" : "未连接"}</b>
@@ -176,7 +175,7 @@ function renderEntry() {
                 <span>会话</span><b>${MON_SESSION[state.authStatus] || "未建立"}</b>
               </div>
               <div class="rail-log">
-                ${state.railEvents.map((event) => `<div class="row"><em>${event.t}</em>${escapeHtml(event.text)}</div>`).join("")}
+                ${state.railEvents.map((event) => `<div class="row"><em>${event.t}</em><span>${escapeHtml(event.text)}</span></div>`).join("")}
               </div>
               <span class="mon-cursor"></span>
             </div>
@@ -357,34 +356,30 @@ function authCard(open) {
           </div>
           ${authFields()}
           <p class="error-line ${state.live ? "" : "service-offline"}" role="alert">${escapeHtml(state.error || (!state.live ? service : ""))}</p>
-          ${state.authTab === "login" ? keyBar(copy, locked)
-            : `<label class="field secret-field">${state.authTab === "apply" ? "设置登录口令" : "新口令"}<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" ${locked ? "disabled" : ""} placeholder="至少 8 位"></label>
-              <button class="btn primary wide auth-submit" type="submit" ${busy || !state.live || state.authStatus === "sent" ? "disabled" : ""}>${busy ? "正在核验…" : state.authStatus === "sent" ? "已提交审核" : copy.submit}</button>`}
-          <div class="auth-mode-row" role="group" aria-label="登录方式">
-            ${state.authTab === "apply"
-              ? `<button class="linkish" type="button" data-tab="login" ${busy ? "disabled" : ""}>已有账号，返回登录</button>`
-              : [["login", "口令登录"], ["activate", "首次激活"], ["reset", "重设口令"]].map(([id, text]) =>
-                `<button class="linkish" type="button" data-tab="${id}" aria-pressed="${state.authTab === id}" ${busy ? "disabled" : ""}>${text}</button>`).join("")}
-          </div>
-          <div class="entry-note">
-            ${state.authTab === "apply" ? "" : `<button class="chip" type="button" data-auth-mode="apply" ${busy ? "disabled" : ""}>申领账号</button>`}
-            <span class="entry-note-spacer"></span>
+          ${state.authTab === "login" ? passBar({ locked, autocomplete: "current-password", label: "登录口令" })
+            : `<label class="field">${state.authTab === "apply" ? "设置登录口令" : "新口令"}${passBar({ locked, autocomplete: "new-password", label: "新口令", placeholder: "至少 8 位" })}</label>`}
+          <button class="btn primary wide auth-submit" type="submit" ${busy || !state.live || state.authStatus === "sent" ? "disabled" : ""}>${busy ? "正在核验…" : state.authStatus === "sent" ? "已提交审核" : copy.submit}</button>
+          <div class="tabs subtabs" role="group" aria-label="${state.authRole === "teacher" || state.authTab === "apply" ? "教师入口" : "学生入口"}">
+            ${state.authRole === "teacher" || state.authTab === "apply"
+              ? `<button class="chip" type="button" data-tab="login" aria-pressed="${state.authTab === "login"}" ${busy ? "disabled" : ""}>口令登录</button>
+                 <button class="chip" type="button" data-tab="reset" aria-pressed="${state.authTab === "reset"}" ${busy ? "disabled" : ""}>重设口令</button>
+                 <button class="chip" type="button" data-auth-mode="apply" aria-pressed="${state.authTab === "apply"}" ${busy ? "disabled" : ""}>申领账号</button>`
+              : `<button class="chip" type="button" data-tab="login" aria-pressed="${state.authTab === "login"}" ${busy ? "disabled" : ""}>口令登录</button>
+                 <button class="chip" type="button" data-tab="activate" aria-pressed="${state.authTab === "activate"}" ${busy ? "disabled" : ""}>首次激活</button>
+                 <button class="chip" type="button" data-tab="reset" aria-pressed="${state.authTab === "reset"}" ${busy ? "disabled" : ""}>重设口令</button>`}
           </div>
         </div>
       </div>
     </form>`;
 }
 
-function keyBar(copy, busy) {
-  return `<div class="keybar">
-      <div class="keybar-cells" aria-hidden="true">
-        ${state.authInput
-          ? Array.from({ length: Math.min(state.authInput.length, 22) }, () => '<i class="keybar-cell"></i>').join("")
-          : `<span class="keybar-ghost">${copy.placeholder}</span>`}
-      </div>
-      <input name="password" type="password" aria-label="口令" required minlength="8" maxlength="128" ${busy ? "disabled" : ""} autocomplete="current-password" />
-      <button type="submit" ${busy ? "disabled" : ""}>${state.authStatus === "checking" ? "核对中" : copy.submit}<span aria-hidden="true">→</span></button>
-    </div>`;
+/** 口令框：默认明文，右侧眼睛切换方块遮蔽；登录按钮独立放在下方。 */
+function passBar({ locked, autocomplete, label, placeholder = "" }) {
+  return `<span class="passbar${locked ? " disabled" : ""}">
+      <input name="password" type="text" required minlength="8" maxlength="128" autocomplete="${autocomplete}"
+        aria-label="${label}" ${placeholder ? `placeholder="${placeholder}"` : ""} ${locked ? "disabled" : ""} spellcheck="false">
+      <button type="button" class="pass-eye" data-action="toggle-peek" aria-pressed="false" aria-label="隐藏口令" ${locked ? "disabled" : ""}>${EYE_OPEN}</button>
+    </span>`;
 }
 
 function authFields() {
@@ -894,7 +889,6 @@ function bind() {
     state.authRole = "teacher";
     state.authTab = "apply";
     state.authAccount = "";
-    state.authInput = "";
     state.authStatus = "ready";
     state.error = "";
     render();
@@ -904,7 +898,6 @@ function bind() {
     state.authRole = node.dataset.role;
     state.authTab = "login";
     state.authAccount = "";
-    state.authInput = "";
     state.authStatus = "ready";
     state.error = "";
     render();
@@ -920,7 +913,6 @@ function bind() {
       if (state.authTab === "apply") state.authRole = "teacher";
       state.error = "";
       state.authStatus = "ready";
-      state.authInput = "";
     }
     render();
   }));
@@ -976,26 +968,23 @@ function bind() {
     render();
   }));
   view.querySelectorAll("form").forEach((form) => form.addEventListener("submit", onSubmit));
-  // 口令条：每敲一个字符就落一个白格，反映的是条内那个密码输入本身
-  const keyInput = view.querySelector(".keybar input");
-  if (keyInput) {
-    keyInput.addEventListener("input", () => {
-      state.authInput = keyInput.value;
-      const cells = view.querySelector(".keybar-cells");
-      if (!cells) return;
-      const shown = Array.from({ length: Math.min(state.authInput.length, 22) }, () => '<i class="keybar-cell"></i>').join("");
-      cells.innerHTML = shown || `<span class="keybar-ghost">${AUTH_COPY[state.authTab].placeholder}</span>`;
-    });
-    keyInput.addEventListener("keyup", (event) => {
-      state.capsLock = typeof event.getModifierState === "function" && event.getModifierState("CapsLock");
-    });
-  }
+  // 眼睛按钮：明文与方块遮蔽之间切换。只改类名与图标，不重渲染，输入不会丢。
+  view.querySelectorAll('[data-action="toggle-peek"]').forEach((node) => node.addEventListener("click", () => {
+    const bar = node.closest(".passbar");
+    const input = bar ? bar.querySelector("input") : null;
+    if (!input || input.disabled) return;
+    const masked = !bar.classList.contains("masked");
+    bar.classList.toggle("masked", masked);
+    node.setAttribute("aria-pressed", String(masked));
+    node.setAttribute("aria-label", masked ? "显示口令" : "隐藏口令");
+    node.innerHTML = masked ? EYE_CLOSED : EYE_OPEN;
+  }));
 }
 
 function finishLogout() {
   Object.assign(state, {
     screen: "entry", shifted: false, reveal: 0, authStatus: "ready",
-    authAccount: "", authInput: "", role: null, drawer: false, sheet: null, error: "",
+    authAccount: "", role: null, drawer: false, sheet: null, error: "",
     railEvents: [],
     railLabel: "入口 · 正式服务已连接", step: 0,
   });
@@ -1006,6 +995,7 @@ function finishLogout() {
 
 function onAction(event) {
   const action = event.currentTarget.dataset.action;
+  if (action === "toggle-peek") return; // 由 bind 里的专用处理器接管，避免整屏重渲染丢输入
   if (action === "reveal") {
     animateReveal(1);
     return;
@@ -1133,7 +1123,6 @@ function onSubmit(event) {
 
 function enterWorkspace(role, displayName, { live, message }) {
   state.authStatus = "checking";
-  state.authInput = "";
   state.role = role;
   state.who = displayName;
   state.step = 3;
@@ -1160,7 +1149,6 @@ function enterWorkspace(role, displayName, { live, message }) {
 
 function failAuth(message) {
   state.authStatus = "denied";
-  state.authInput = "";
   state.error = message;
   state.attempts += 1;
   resetEvents(["身份核验未通过", "请检查后重试"]);
@@ -1212,7 +1200,6 @@ function submitAuth(data) {
         state.authRole = activating ? "student" : role;
         state.authAccount = account;
         state.authStatus = "ready";
-        state.authInput = "";
         state.error = "";
         state.step = 0;
         resetEvents([activating ? "账号已激活" : "口令已重设", "请使用新口令登录"]);
