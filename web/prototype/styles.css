@@ -56,6 +56,29 @@ button { cursor: pointer; }
 .stage:not(.show-glass) canvas, .stage:not(.show-glass) svg.fallback { opacity: 0; }
 .stage svg.fallback { opacity: 0.85; }
 
+/* 页面退场先让出玻璃装置；工作区只在散开终帧之后入场。 */
+.entry-canvas > :is(.brand, .rail, .chrono, .callouts, .entry-copy, .entry-foot, .auth-card) {
+  transition: opacity 240ms cubic-bezier(.23, 1, .32, 1);
+}
+.stage.entry-departing .entry-canvas > :not(svg.fallback) { opacity: 0; pointer-events: none; }
+.stage.entry-returning .entry-canvas > :is(.rail, .auth-card) { opacity: 0; pointer-events: none; }
+.entry-transition-status {
+  position: fixed; z-index: 4; inset: auto 24px 32px;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  color: var(--ink-soft); font-size: 13px; letter-spacing: .04em;
+}
+.entry-transition-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
+.stage.workspace-visible #view > :is(.student-app, .app, .admin-boundary) {
+  animation: workspace-enter 240ms cubic-bezier(.23, 1, .32, 1) both;
+}
+@keyframes workspace-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .entry-transition-status { display: none; }
+}
+
 /* ───────────────────────── 入口：设计画布 ─────────────────────────
    1920×1080 的设计坐标整体缩放贴到视口，所有元素按设计单位绝对定位。
    这样在大屏、1366×768、窄屏上版式关系完全一致，只是整体放大缩小。 */

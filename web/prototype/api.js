@@ -183,6 +183,13 @@ async function myTasks(goalId) {
 }
 
 const task = (taskId) => get(`/tasks/${encodeURIComponent(taskId)}`);
+const courses = () => get("/courses").then((data) => Array.isArray(data) ? data : data.items || []);
+const conversations = () => get("/companion/conversations").then((data) => Array.isArray(data) ? data : data.items || []);
+const conversationMessages = (id) => get(`/companion/conversations/${encodeURIComponent(id)}/messages`)
+  .then((data) => Array.isArray(data) ? data : data.items || []);
+const retryTask = (taskId, version, requestId) => post(`/tasks/${encodeURIComponent(taskId)}/retry`, {
+  expected_version: version, request_id: requestId,
+});
 
 /** 拿编辑租约。同一任务同一时刻只有一端能写，这是后端的并发契约。 */
 async function acquireLease(taskId, deviceId, { takeover = false, seconds = 180 } = {}) {
@@ -269,7 +276,8 @@ export const api = {
   state, probe, currentUser, login, logout,
   applyTeacherAccount, activateAccount, resetPassword,
   teacherClasses, classMembers, goals, goalEvidence,
-  myTasks, task, acquireLease, renewLease, saveDraft, submitTask,
+  myTasks, task, courses, conversations, conversationMessages, retryTask,
+  acquireLease, renewLease, saveDraft, submitTask,
   startDiagnostic, submitDiagnostic, answerPolicy, helpEvent,
   reportFormats, reportSource, generateReport, exportUrl,
   ApiError,

@@ -133,73 +133,146 @@ function sectionProfile(corner, perCorner) {
 
 function buildBand(shape) {
   const { segments: SEG, ring: RING, halfWidth, height } = shape;
-  const perCorner = Math.max(2, Math.round(RING / 4));
-  const profile = sectionProfile(shape.corner, perCorner);
+  const profile = sectionProfile(shape.corner, Math.max(2, Math.round(RING / 4)));
   const P = profile.length;
-  const positions = [];
-  const normals = [];
-  const params = [];
-  const indices = [];
+  const GROUPS = 26;
+  const surface = [];
+  const surfaceNormals = [];
+  const point = (s, r) => surface[((s + SEG) % SEG) * P + ((r + P) % P)];
 
-  for (let s = 0; s <= SEG; s += 1) {
+  for (let s = 0; s < SEG; s += 1) {
     const t = (s / SEG) * TAU;
     const center = curveAt(t, shape);
     const T = curveTangent(t, shape);
-    // 以 +Z 为参考建立截面基
-    const ref = [0, 0, 1];
-    const N0 = normalize([
-      ref[0] - dot(ref, T) * T[0],
-      ref[1] - dot(ref, T) * T[1],
-      ref[2] - dot(ref, T) * T[2],
-    ]);
+    const N0 = normalize([-T[2] * T[0], -T[2] * T[1], 1 - T[2] * T[2]]);
     const B0 = cross(T, N0);
-    // 沿曲线渐进扭转，带子才不是一片死板的传送带
-    const phi = shape.twist * t;
-    const W = [
-      Math.cos(phi) * N0[0] + Math.sin(phi) * B0[0],
-      Math.cos(phi) * N0[1] + Math.sin(phi) * B0[1],
-      Math.cos(phi) * N0[2] + Math.sin(phi) * B0[2],
-    ];
+    // 周期扭转：首尾截面和导数都闭合，保留原来的无限符号轮廓。
+    const phi = t + (shape.twist - 1) * Math.sin(t);
+    const W = N0.map((n, i) => Math.cos(phi) * n + Math.sin(phi) * B0[i]);
     const H = cross(T, W);
-
-    for (let r = 0; r < P; r += 1) {
-      const px = profile[r][0];
-      const py = profile[r][1];
-      positions.push(
-        center[0] + W[0] * px * halfWidth + H[0] * py * height,
-        center[1] + W[1] * px * halfWidth + H[1] * py * height,
-        center[2] + W[2] * px * halfWidth + H[2] * py * height,
-      );
-      // 截面法线：圆角轮廓上，从截面中心指向该点的方向是很好的近似
-      const len = Math.hypot(px, py) || 1;
-      const nx = px / len;
-      const ny = py / len;
-      normals.push(
-        W[0] * nx + H[0] * ny,
-        W[1] * nx + H[1] * ny,
-        W[2] * nx + H[2] * ny,
-      );
-      params.push(s / SEG, r / P);
+    for (const [px, py] of profile) {
+      surface.push(center.map((c, i) => c + W[i] * px * halfWidth + H[i] * py * height));
     }
   }
-
+  // 法线在完整曲面上求，再复制到分段边界，装配后没有分段明暗接缝。
   for (let s = 0; s < SEG; s += 1) {
     for (let r = 0; r < P; r += 1) {
-      const a = s * P + r;
-      const b = s * P + ((r + 1) % P);
-      const c = (s + 1) * P + ((r + 1) % P);
-      const d = (s + 1) * P + r;
-      indices.push(a, b, c, a, c, d);
+      const along = point(s + 1, r).map((v, i) => v - point(s - 1, r)[i]);
+      const around = point(s, r + 1).map((v, i) => v - point(s, r - 1)[i]);
+      surfaceNormals.push(normalize(cross(around, along)));
     }
   }
 
+  const positions = [], normals = [], params = [], pieces = [], scatters = [], indices = [];
+  const ringSeams = [], groupSeams = [];
+  const hash = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+  function vertex(position, normal, param, piece, scatter) {
+    const index = positions.length / 3;
+    positions.push(...position);
+    normals.push(...normal);
+    params.push(...param);
+    pieces.push(...piece);
+    scatters.push(...scatter);
+    return index;
+  }
+
+  for (let g = 0; g < GROUPS; g += 1) {
+    const first = Math.round(g * SEG / GROUPS);
+    const last = Math.round((g + 1) * SEG / GROUPS);
+    const center = curveAt((first + last) * 0.5 / SEG * TAU, shape);
+    const seed = hash(g + 1);
+    const radial = normalize([center[0], center[1] * 1.5, 0]);
+    const spread = 0.22 + seed * 0.13;
+    let radius = 0;
+    for (let s = first; s <= last; s += 1) {
+      for (let r = 0; r < P; r += 1) {
+        radius = Math.max(radius, Math.hypot(...point(s, r).map((v, i) => v - center[i])));
+      }
+    }
+    const piece = [...center, seed];
+    const scatter = [
+      radial[0] * spread + (hash(g + 31) - 0.5) * 0.055,
+      radial[1] * spread * 0.78 + (hash(g + 73) - 0.5) * 0.055,
+      // 大于刚体旋转的最大前向位移，任意拖拽朝向下都不会靠近相机。
+      -radius * (0.40 + seed * 0.60) - 0.06 - hash(g + 91) * 0.06,
+      g / GROUPS * 0.12 + seed * 0.10,
+    ];
+    const base = positions.length / 3;
+    for (let s = first; s <= last; s += 1) {
+      const ringStart = positions.length / 3;
+      for (let r = 0; r <= P; r += 1) {
+        vertex(point(s, r), surfaceNormals[(s % SEG) * P + (r % P)], [s / SEG, r / P, 0], piece, scatter);
+      }
+      ringSeams.push([ringStart, ringStart + P]);
+    }
+    if (g > 0) groupSeams.push([base - (2 * (P + 2)) - (P + 1), base]);
+    for (let s = 0; s < last - first; s += 1) {
+      for (let r = 0; r < P; r += 1) {
+        const a = base + s * (P + 1) + r;
+        const b = a + 1, d = a + P + 1, c = d + 1;
+        indices.push(a, b, c, a, c, d);
+      }
+    }
+    // 封口单独使用端面法线；散开后才显示，完整轮廓不叠出接缝。
+    for (const [s, sign] of [[first, -1], [last, 1]]) {
+      const t = (s % SEG) / SEG * TAU;
+      const normal = curveTangent(t, shape).map((v) => v * sign);
+      const cap = vertex(curveAt(t, shape), normal, [s / SEG, 0.5, 1], piece, scatter);
+      for (let r = 0; r <= P; r += 1) {
+        vertex(point(s, r), normal, [s / SEG, r / P, 1], piece, scatter);
+        if (r < P) {
+          const a = cap + 1 + r, b = a + 1;
+          indices.push(cap, sign > 0 ? a : b, sign > 0 ? b : a);
+        }
+      }
+    }
+  }
+  // 最后一段与第一段共用同一组位置/法线，参数仍保留 1 / 0 的周期边界。
+  const lastSide = positions.length / 3 - 2 * (P + 2) - (P + 1);
+  groupSeams.push([lastSide, 0]);
+  function seamError(pairs, values, width, count = 1) {
+    let max = 0;
+    for (const [a, b] of pairs) {
+      for (let r = 0; r < count; r += 1) {
+        for (let k = 0; k < width; k += 1) {
+          max = Math.max(max, Math.abs(values[(a + r) * width + k] - values[(b + r) * width + k]));
+        }
+      }
+    }
+    return max;
+  }
+  const stats = Object.freeze({
+    vertices: positions.length / 3,
+    triangles: indices.length / 3,
+    segments: SEG,
+    ring: P,
+    groups: GROUPS,
+    ringSeam: Object.freeze({
+      count: ringSeams.length,
+      duplicated: true,
+      maxPositionDelta: seamError(ringSeams, positions, 3),
+      maxNormalDelta: seamError(ringSeams, normals, 3),
+    }),
+    groupSeam: Object.freeze({
+      count: groupSeams.length,
+      maxPositionDelta: seamError(groupSeams, positions, 3, P + 1),
+      maxNormalDelta: seamError(groupSeams, normals, 3, P + 1),
+    }),
+    loopSeam: Object.freeze({
+      vertices: P + 1,
+      maxPositionDelta: seamError([[lastSide, 0]], positions, 3, P + 1),
+      maxNormalDelta: seamError([[lastSide, 0]], normals, 3, P + 1),
+    }),
+  });
   return {
     position: new Float32Array(positions),
     normal: new Float32Array(normals),
     param: new Float32Array(params),
+    piece: new Float32Array(pieces),
+    scatter: new Float32Array(scatters),
     index: new Uint16Array(indices),
     count: indices.length,
-    vertices: (SEG + 1) * P,
+    stats,
   };
 }
 
@@ -338,42 +411,42 @@ const BAND_VS = `
 precision highp float;
 attribute vec3 aPos;
 attribute vec3 aNrm;
-attribute vec2 aParam;
+attribute vec3 aParam;
+attribute vec4 aPiece;
+attribute vec4 aScatter;
 uniform mat4 uProj;
 uniform mat4 uView;
 uniform mat4 uModel;
+uniform mat3 uScatterBasis;
 uniform float uTime;
 uniform float uAssemble;
 uniform float uDissolve;
-uniform float uReveal;
 uniform float uWobble;
 varying vec3 vWorld;
 varying vec3 vNrm;
 varying vec2 vParam;
 varying float vTip;
 varying float vSeed;
+varying float vCap;
+varying float vOpacity;
 
-float b_hash(float p) {
-  p = fract(p * 0.1031);
-  p *= p + 33.33;
-  p *= p + p;
-  return fract(p);
+vec3 rotatePiece(vec3 v, vec3 axis, float angle) {
+  float c = cos(angle), s = sin(angle);
+  return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
 
 void main() {
   vec3 p = aPos;
+  vec3 n = aNrm;
   float param = aParam.x;
-  float seed = b_hash(floor(param * 487.0) * 1.618 + 4.7);
-
-  // 液态呼吸：沿带子传播的缓慢形变。
-  // 位移都以物体自身的尺度为单位（曲线半径 = 1），所以这里的系数都很小；
-  // 参考作品里那些几十、几百的常数是按半径 285 的场景写的，直接搬会炸开。
+  float seed = aPiece.w;
+  // 呼吸在分离时收敛；每个玻璃段随后只做刚体运动。
   vec3 radial = normalize(p + vec3(0.0, 0.0, 0.001));
   float breath = sin(param * 6.2831853 * 2.0 + uTime * 0.62) * 0.6
                + sin(param * 6.2831853 * 5.0 - uTime * 0.41 + 1.7) * 0.4;
-  p += radial * breath * uWobble * 0.022;
+  p += radial * breath * uWobble * (1.0 - smoothstep(0.0, 0.22, uDissolve)) * 0.022;
 
-  // 装配：像笔尖沿带子把材料画出来
+  // 装配笔尖保留；分段边界只复制顶点，不再连接会被拉长的三角形。
   float win = 0.085;
   float local = clamp((uAssemble * (1.0 + win) - param) / win, 0.0, 1.0);
   float settle = 1.0 - pow(1.0 - local, 3.0);
@@ -382,20 +455,26 @@ void main() {
     : 0.0;
   p = p * grow + normalize(p + vec3(0.0, 0.0, 40.0)) * (1.0 - settle) * 0.55;
 
-  // 化散：解锁时逐段剥离并飞开
-  float peel = clamp(uDissolve * 1.7 - param * 0.65 - seed * 0.22, 0.0, 1.0);
-  float peelE = peel * peel * (3.0 - 2.0 * peel);
-  vec3 away = normalize(vec3(seed - 0.5, 0.62, 0.36 + seed));
-  p += away * peelE * (0.9 + seed * 1.1);
-  p = mix(p, p * 0.72, peelE * 0.6);
+  // 整段剥离、错开旋转、缓慢外漂，再淡出；最迟一段也在进度 1 前归零。
+  float peel = clamp((uDissolve - aScatter.w) / (1.0 - aScatter.w), 0.0, 1.0);
+  float spread = peel * peel * (3.0 - 2.0 * peel);
+  vec3 axis = normalize(vec3(0.35 + seed, 0.8 - seed * 1.4, 0.45));
+  float angle = spread * (0.40 + seed * 0.60) * (seed < 0.5 ? -1.0 : 1.0);
+  p = aPiece.xyz + rotatePiece(p - aPiece.xyz, axis, angle);
+  n = rotatePiece(n, axis, angle);
+  // 位移转换自相机平面；后退量还覆盖局部旋转，不会因拖拽朝向而冲向镜头。
+  p += uScatterBasis * aScatter.xyz * spread;
 
   vec4 world = uModel * vec4(p, 1.0);
   vWorld = world.xyz;
-  vNrm = mat3(uModel) * aNrm;
-  vParam = aParam;
+  vNrm = mat3(uModel) * n;
+  vParam = aParam.xy;
   float dt = param - uAssemble * (1.0 + win) + win * 0.5;
   vTip = exp(-dt * dt * 3200.0) * (1.0 - smoothstep(0.9, 1.0, uAssemble));
-  vSeed = seed;
+  vSeed = 0.5 + 0.5 * sin(param * 18.8495559);
+  vCap = aParam.z;
+  vOpacity = (1.0 - smoothstep(0.45, 1.0, peel)) * smoothstep(0.0, 0.10, local)
+           * mix(1.0, smoothstep(0.0, 0.12, peel), aParam.z);
   gl_Position = uProj * uView * world;
 }`;
 
@@ -405,6 +484,8 @@ varying vec3 vNrm;
 varying vec2 vParam;
 varying float vTip;
 varying float vSeed;
+varying float vCap;
+varying float vOpacity;
 uniform vec3 uEye;
 uniform float uTime;
 uniform float uAssemble;
@@ -415,15 +496,17 @@ uniform sampler2D uBgTex;
 uniform vec2 uRes;
 
 void main() {
+  if (vOpacity <= 0.001) discard;
   vec3 N = normalize(vNrm);
   vec3 V = normalize(uEye - vWorld);
   if (!gl_FrontFacing) N = -N;
 
-  // 液面细纹：扰动一点点法线，反射才不是死平的镜子
-  float ripple = sin(vParam.x * 197.0 + uTime * 1.35)
-               + sin(vParam.x * 59.0 - uTime * 0.88 + vParam.y * 9.0) * 0.7;
-  vec3 jitter = vec3(cos(vParam.y * 6.2831853) * ripple, sin(vParam.y * 6.2831853) * ripple, 0.0);
-  N = normalize(N + jitter * 0.010 * (0.4 + vSeed * 0.8));
+  // 细纹沿两个周期闭合，复制的截面边界保持同一法线。
+  float ringAngle = vParam.y * 6.2831853;
+  float ripple = sin(vParam.x * 194.7787445 + uTime * 1.35)
+               + sin(vParam.x * 56.5486678 - uTime * 0.88 + ringAngle) * 0.7;
+  vec3 jitter = vec3(cos(ringAngle) * ripple, sin(ringAngle) * ripple, 0.0);
+  N = normalize(N + jitter * 0.010 * (0.4 + vSeed * 0.8) * (1.0 - vCap));
 
   float facing = clamp(dot(N, V), 0.0, 1.0);
 
@@ -486,7 +569,7 @@ void main() {
   glass *= mix(0.86, 1.0, clamp(uReveal * 1.6, 0.0, 1.0));
 
   // 半透明：正面透得多，边缘几乎实心
-  float alpha = clamp(mix(0.30, 0.80, fres), 0.0, 1.0);
+  float alpha = clamp(mix(0.30, 0.80, fres), 0.0, 1.0) * vOpacity;
   gl_FragColor = vec4(clamp(glass, 0.0, 1.0), alpha);
 }`;
 
@@ -505,7 +588,11 @@ function compile(gl, type, source) {
 function link(gl, vsSource, fsSource) {
   const vs = compile(gl, gl.VERTEX_SHADER, vsSource);
   const fs = compile(gl, gl.FRAGMENT_SHADER, fsSource);
-  if (!vs || !fs) return null;
+  if (!vs || !fs) {
+    if (vs) gl.deleteShader(vs);
+    if (fs) gl.deleteShader(fs);
+    return null;
+  }
   const program = gl.createProgram();
   gl.attachShader(program, vs);
   gl.attachShader(program, fs);
@@ -514,6 +601,7 @@ function link(gl, vsSource, fsSource) {
   gl.deleteShader(fs);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     console.warn("液态金属程序链接失败：", gl.getProgramInfoLog(program));
+    gl.deleteProgram(program);
     return null;
   }
   return program;
@@ -530,166 +618,137 @@ export function createScene(canvas, options = {}) {
   });
   if (!gl) return null;
 
-  const bgProgram = link(gl, BACKGROUND_VS, BACKGROUND_FS);
-  const bandProgram = link(gl, BAND_VS, BAND_FS);
-  if (!bgProgram || !bandProgram) return null;
-
   const band = buildBand(SHAPE);
-  const reduce = () => Boolean(options.reduce && options.reduce());
+  const doc = canvas.ownerDocument || document;
+  const win = doc.defaultView || window;
+  const unit = (v) => clamp(Number(v) || 0, 0, 1);
+  const hidden = () => Boolean(doc.hidden);
+  const clock = () => performance.now();
+  let reducedOverride = null;
+  const reduce = () => reducedOverride === null
+    ? Boolean(typeof options.reduce === "function" ? options.reduce() : options.reduce)
+    : reducedOverride;
+  let resources = null;
+  let transition = null;
+  // 完成帧绘制后，还要经过下一次 rAF，父层才可以遮住或移走画布。
+  let painted = [];
+  const s = {
+    time: 0, yaw: 0.40, pitch: 0.17, baseYaw: 0.40, basePitch: 0.17,
+    spin: 0, spinSpeed: 0.14, reveal: 0, pull: 0, assemble: 0, dissolve: 0,
+    verify: 0, deny: 0, standby: 0, running: false, raf: 0, last: 0,
+    contextLost: false, destroyed: false,
+  };
 
-  const quadBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  function releaseResources() {
+    if (!resources) return;
+    for (const buffer of Object.values(resources.buffers)) gl.deleteBuffer(buffer);
+    if (resources.bgTex) gl.deleteTexture(resources.bgTex);
+    if (resources.bgFbo) gl.deleteFramebuffer(resources.bgFbo);
+    if (resources.bgProgram) gl.deleteProgram(resources.bgProgram);
+    if (resources.bandProgram) gl.deleteProgram(resources.bandProgram);
+    resources = null;
+  }
 
-  // 背景先画进这张离屏纹理，玻璃再按法线偏移去采样它。
-  // 这是"折射"的关键：玻璃后面的背景真的被扭曲，而不是只加一层半透明色。
-  const bgTex = gl.createTexture();
-  const bgFbo = gl.createFramebuffer();
-  let bgTexW = 0, bgTexH = 0;
+  function initResources() {
+    resources = {
+      bgProgram: link(gl, BACKGROUND_VS, BACKGROUND_FS),
+      bandProgram: link(gl, BAND_VS, BAND_FS),
+      buffers: {}, bgTex: null, bgFbo: null, bgTexW: 0, bgTexH: 0,
+    };
+    const r = resources;
+    if (!r.bgProgram || !r.bandProgram) { releaseResources(); return false; }
+    function buffer(name, data, target = gl.ARRAY_BUFFER) {
+      r.buffers[name] = gl.createBuffer();
+      gl.bindBuffer(target, r.buffers[name]);
+      gl.bufferData(target, data, gl.STATIC_DRAW);
+    }
+    buffer("quad", new Float32Array([-1, -1, 3, -1, -1, 3]));
+    buffer("position", band.position);
+    buffer("normal", band.normal);
+    buffer("param", band.param);
+    buffer("piece", band.piece);
+    buffer("scatter", band.scatter);
+    buffer("index", band.index, gl.ELEMENT_ARRAY_BUFFER);
+    r.bgTex = gl.createTexture();
+    r.bgFbo = gl.createFramebuffer();
+    const bg = (name) => gl.getUniformLocation(r.bgProgram, name);
+    const mesh = (name) => gl.getUniformLocation(r.bandProgram, name);
+    r.u = {
+      bgPos: gl.getAttribLocation(r.bgProgram, "aPos"),
+      bgRes: bg("uRes"), bgTime: bg("uTime"), bgReveal: bg("uReveal"),
+      bgVerify: bg("uVerify"), bgDeny: bg("uDeny"), bgStandby: bg("uStandby"),
+      pos: gl.getAttribLocation(r.bandProgram, "aPos"),
+      nrm: gl.getAttribLocation(r.bandProgram, "aNrm"),
+      prm: gl.getAttribLocation(r.bandProgram, "aParam"),
+      piece: gl.getAttribLocation(r.bandProgram, "aPiece"),
+      scatter: gl.getAttribLocation(r.bandProgram, "aScatter"),
+      proj: mesh("uProj"), view: mesh("uView"), model: mesh("uModel"),
+      scatterBasis: mesh("uScatterBasis"), eye: mesh("uEye"), time: mesh("uTime"),
+      assemble: mesh("uAssemble"), dissolve: mesh("uDissolve"),
+      verify: mesh("uVerify"), deny: mesh("uDeny"), reveal: mesh("uReveal"),
+      bgTex: mesh("uBgTex"), res: mesh("uRes"), wobble: mesh("uWobble"),
+    };
+    return true;
+  }
+  if (!initResources()) return null;
+  // 供入口网格检查使用，数值来自真实重复顶点，而不是预设为零的标记。
+  canvas.__sceneStats = band.stats;
+  win.__sceneStats = band.stats;
+
   function ensureBgTarget(w, h) {
-    if (bgTexW === w && bgTexH === h) return;
-    bgTexW = w; bgTexH = h;
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
+    const r = resources;
+    if (r.bgTexW === w && r.bgTexH === h) return;
+    gl.bindTexture(gl.TEXTURE_2D, r.bgTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, bgFbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bgTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, r.bgFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, r.bgTex, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    r.bgTexW = w;
+    r.bgTexH = h;
   }
 
-  const positionBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, band.position, gl.STATIC_DRAW);
-  const normalBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, band.normal, gl.STATIC_DRAW);
-  const paramBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, paramBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, band.param, gl.STATIC_DRAW);
-  const indexBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, band.index, gl.STATIC_DRAW);
-
-  const u = {
-    bgPos: gl.getAttribLocation(bgProgram, "aPos"),
-    bgRes: gl.getUniformLocation(bgProgram, "uRes"),
-    bgTime: gl.getUniformLocation(bgProgram, "uTime"),
-    bgReveal: gl.getUniformLocation(bgProgram, "uReveal"),
-    bgVerify: gl.getUniformLocation(bgProgram, "uVerify"),
-    bgDeny: gl.getUniformLocation(bgProgram, "uDeny"),
-    bgStandby: gl.getUniformLocation(bgProgram, "uStandby"),
-    bgTex: gl.getUniformLocation(bgProgram, "uBgTex"),
-
-    pos: gl.getAttribLocation(bandProgram, "aPos"),
-    nrm: gl.getAttribLocation(bandProgram, "aNrm"),
-    prm: gl.getAttribLocation(bandProgram, "aParam"),
-    proj: gl.getUniformLocation(bandProgram, "uProj"),
-    view: gl.getUniformLocation(bandProgram, "uView"),
-    model: gl.getUniformLocation(bandProgram, "uModel"),
-    eye: gl.getUniformLocation(bandProgram, "uEye"),
-    time: gl.getUniformLocation(bandProgram, "uTime"),
-    assemble: gl.getUniformLocation(bandProgram, "uAssemble"),
-    dissolve: gl.getUniformLocation(bandProgram, "uDissolve"),
-    verify: gl.getUniformLocation(bandProgram, "uVerify"),
-    deny: gl.getUniformLocation(bandProgram, "uDeny"),
-    reveal: gl.getUniformLocation(bandProgram, "uReveal"),
-    bgTex: gl.getUniformLocation(bandProgram, "uBgTex"),
-    res: gl.getUniformLocation(bandProgram, "uRes"),
-    wobble: gl.getUniformLocation(bandProgram, "uWobble"),
-  };
-
-  const s = {
-    time: 0,
-    yaw: 0.40,
-    pitch: 0.17,
-    baseYaw: 0.40,
-    basePitch: 0.17,
-    spin: 0,
-    spinSpeed: 0.14,
-    reveal: 0,
-    pull: 0,
-    assemble: 0,
-    assembleAnim: null,
-    dissolve: 0,
-    dissolveAnim: null,
-    verify: 0,
-    deny: 0,
-    standby: 0,
-    running: false,
-    raf: 0,
-    last: 0,
-  };
-
-  function resize() {
+  function render() {
+    if (s.destroyed || s.contextLost || !resources || hidden()) return false;
+    if (gl.isContextLost && gl.isContextLost()) return false;
     const rect = canvas.getBoundingClientRect();
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = Math.max(1, Math.floor((rect.width || window.innerWidth) * dpr));
-    const h = Math.max(1, Math.floor((rect.height || window.innerHeight) * dpr));
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
-    }
-  }
-
-  function frame(now) {
-    if (!s.running) return;
-    s.raf = requestAnimationFrame(frame);
-    const dt = s.last ? Math.min(0.05, (now - s.last) / 1000) : 0.016;
-    s.last = now;
+    const dpr = Math.min(win.devicePixelRatio || 1, 2);
+    const W = Math.max(1, Math.floor((rect.width || win.innerWidth) * dpr));
+    const H = Math.max(1, Math.floor((rect.height || win.innerHeight) * dpr));
+    if (canvas.width !== W) canvas.width = W;
+    if (canvas.height !== H) canvas.height = H;
+    const r = resources, u = r.u;
     const still = reduce();
-    if (!still) s.time += dt;
-
-    resize();
-    const W = canvas.width;
-    const H = canvas.height;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
-    // 深度缓冲每帧都要清：背景只是盖上去的颜色，金属仍按深度排序
+    gl.depthMask(true);
     gl.clearColor(0, 0, 0, 1);
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     const aspect = W / Math.max(H, 1);
 
-    // 动效推进
-    if (s.assembleAnim) {
-      const a = s.assembleAnim;
-      const x = Math.min(1, (s.time - a.t0) / a.dur);
-      s.assemble = a.from + (a.to - a.from) * (0.5 - 0.5 * Math.cos(Math.PI * x));
-      if (x >= 1) s.assembleAnim = null;
-    }
-    if (s.dissolveAnim) {
-      const x = Math.min(1, (s.time - s.dissolveAnim.t0) / s.dissolveAnim.dur);
-      s.dissolve = x * x;
-    }
-    if (!still) {
-      s.spin += dt * s.spinSpeed;
-      s.yaw = s.baseYaw + Math.sin(s.time * 0.085) * 0.26;
-      s.pitch = s.basePitch + Math.sin(s.time * 0.052 + 0.8) * 0.08;
-    }
-
-    // 相机：物体横向半径约 1.1，让整条带子留出边距落进画面。
-    // 纵向要容纳标题，所以整体往上抬、稍微拉远。
-    // 窄屏（手机）画面更高更窄，拉近一点让它占满上半屏。
+    // 保留原有完整玻璃的构图；外漂在相机平面内完成，深度只会后退。
     const narrow = aspect < 0.85;
     const fov = narrow ? 0.78 : 0.92;
     const tan = Math.tan(fov / 2);
-    const needH = 1.46 / tan;
-    const needW = 1.46 / (tan * aspect);
-    const dist = Math.max(needH, needW) * (narrow ? 0.92 : 1.06);
+    const dist = Math.max(1.46 / tan, 1.46 / (tan * aspect)) * (narrow ? 0.92 : 1.06);
     const eye = [0, narrow ? 0.10 : 0.16, dist];
-    // 窄屏把注视点抬高，玻璃整体上移到上半屏（文案在它下方）
     const target = narrow ? [0, -0.42, 0] : [0, 0, 0];
     const proj = perspective(fov, aspect, 0.1, 60);
     const view = lookAt(eye, target, [0, 1, 0]);
 
-    // ── 背景：先画进离屏纹理（玻璃要折射它） ──
+    // 背景先画入折射纹理，再铺回屏幕；先解绑采样纹理，避免反馈环。
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, null);
     ensureBgTarget(W, H);
+    gl.bindTexture(gl.TEXTURE_2D, null);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
-    gl.useProgram(bgProgram);
-    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.useProgram(r.bgProgram);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.buffers.quad);
     gl.enableVertexAttribArray(u.bgPos);
     gl.vertexAttribPointer(u.bgPos, 2, gl.FLOAT, false, 0, 0);
     gl.uniform2f(u.bgRes, W, H);
@@ -698,59 +757,43 @@ export function createScene(canvas, options = {}) {
     gl.uniform1f(u.bgVerify, s.verify);
     gl.uniform1f(u.bgDeny, s.deny);
     gl.uniform1f(u.bgStandby, s.standby);
-    // 画进离屏之前必须把这张纹理从采样单元上解掉，
-    // 否则它同时是"绘制目标"和"采样源"，GL 会报 INVALID_OPERATION
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, bgFbo);
-    gl.viewport(0, 0, W, H);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, r.bgFbo);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    // 再把这张背景铺回屏幕，同时留给玻璃采样
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, W, H);
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
+    gl.bindTexture(gl.TEXTURE_2D, r.bgTex);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // ── 玻璃体 ──
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(false);
-    // 玻璃要真的透出背景：用标准 alpha 混合。
-    // 不能用 (ONE, ONE_MINUS_SRC_ALPHA)——那是加法混合，会把亮面烧白。
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    // 双面绘制：前后两层玻璃重叠，自然叠出厚度
     gl.disable(gl.CULL_FACE);
-    gl.useProgram(bandProgram);
+    gl.useProgram(r.bandProgram);
+    for (const [name, location, size] of [
+      ["position", u.pos, 3], ["normal", u.nrm, 3], ["param", u.prm, 3],
+      ["piece", u.piece, 4], ["scatter", u.scatter, 4],
+    ]) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, r.buffers[name]);
+      gl.enableVertexAttribArray(location);
+      gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+    }
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.buffers.index);
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.enableVertexAttribArray(u.pos);
-    gl.vertexAttribPointer(u.pos, 3, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
-    gl.enableVertexAttribArray(u.nrm);
-    gl.vertexAttribPointer(u.nrm, 3, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, paramBuffer);
-    gl.enableVertexAttribArray(u.prm);
-    gl.vertexAttribPointer(u.prm, 2, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-
-    // 居中时略偏左；登录面板展开后让到左侧三分之一处。
-    // 窄屏画面窄，横向让位幅度要收小，否则玻璃会被挤出画面。
     const shiftX = narrow ? (-0.02 - s.pull * 0.10) : (-0.06 - s.pull * 0.46);
-    // 抬到画面中上部，标题落在下方而不是压在中心。
-    // 窄屏的注视点已经抬高过，这里只做小幅让位。
     const lift = (narrow ? 0.06 : 0.62) + s.pull * (narrow ? 0.02 : 0.06);
-    const model = multiply(
-      translation(shiftX, lift, 0),
-      multiply(
-        rotationY(s.yaw + s.spin),
-        multiply(rotationX(s.pitch), rotationZ(-0.07)),
-      ),
-    );
-
+    const rotation = multiply(rotationY(s.yaw + s.spin), multiply(rotationX(s.pitch), rotationZ(-0.07)));
+    const model = multiply(translation(shiftX, lift, 0), rotation);
+    const viewRotation = multiply(view, rotation);
+    // (view * modelRotation)^T 把相机 XY / 后退 Z 位移变回模型空间。
+    const scatterBasis = new Float32Array([
+      viewRotation[0], viewRotation[4], viewRotation[8],
+      viewRotation[1], viewRotation[5], viewRotation[9],
+      viewRotation[2], viewRotation[6], viewRotation[10],
+    ]);
     gl.uniformMatrix4fv(u.proj, false, proj);
     gl.uniformMatrix4fv(u.view, false, view);
     gl.uniformMatrix4fv(u.model, false, model);
+    gl.uniformMatrix3fv(u.scatterBasis, false, scatterBasis);
     gl.uniform3fv(u.eye, eye);
     gl.uniform1f(u.time, still ? 0 : s.time);
     gl.uniform1f(u.assemble, s.assemble);
@@ -762,66 +805,213 @@ export function createScene(canvas, options = {}) {
     gl.uniform1i(u.bgTex, 0);
     gl.uniform2f(u.res, W, H);
     gl.drawElements(gl.TRIANGLES, band.count, gl.UNSIGNED_SHORT, 0);
+    gl.depthMask(true);
+    return true;
   }
 
-  return {
-    start() {
-      if (s.running) return;
-      s.running = true;
-      s.last = 0;
+  function resolve(task) {
+    if (!task || task.settled) return;
+    task.settled = true;
+    task.resolve();
+  }
+  function cancelTransitions() {
+    const task = transition;
+    transition = null;
+    resolve(task);
+    for (const pending of painted) resolve(pending);
+    painted = [];
+  }
+  function settleEndpoint(draw = true) {
+    const task = transition;
+    transition = null;
+    if (task) s[task.channel] = task.to;
+    if (draw) render();
+    resolve(task);
+    for (const pending of painted) resolve(pending);
+    painted = [];
+  }
+  function cancelFrame() {
+    if (s.raf) cancelAnimationFrame(s.raf);
+    s.raf = 0;
+    s.last = 0;
+  }
+  function schedule() {
+    if (s.running && !s.destroyed && !s.contextLost && resources && !hidden() && !s.raf) {
       s.raf = requestAnimationFrame(frame);
-    },
+    }
+  }
+  function frame(now) {
+    s.raf = 0;
+    if (!s.running || s.destroyed || s.contextLost || hidden()) return;
+    const previousPaint = painted;
+    painted = [];
+    const wasTransitioning = Boolean(transition || previousPaint.length);
+    const dt = s.last ? clamp((now - s.last) / 1000, 0, 0.05) : 0;
+    s.last = now;
+    const still = reduce();
+    let finished = null;
+    if (transition) {
+      const task = transition;
+      // 真实毫秒时钟与背景动画的限幅 dt 分开，低帧率也按约定时间完成。
+      const x = still ? 1 : clamp((now - task.t0) / task.duration, 0, 1);
+      const eased = x * x * (3 - 2 * x);
+      s[task.channel] = task.from + (task.to - task.from) * eased;
+      if (x >= 1) {
+        s[task.channel] = task.to;
+        transition = null;
+        finished = task;
+      }
+    }
+    // 过渡期间保持朝向稳定，重组终点严格回到规范姿态。
+    if (!still && !wasTransitioning) {
+      s.time += dt;
+      s.spin += dt * s.spinSpeed;
+      s.yaw = s.baseYaw + Math.sin(s.time * 0.085) * 0.26;
+      s.pitch = s.basePitch + Math.sin(s.time * 0.052) * 0.08;
+    }
+    const drew = render();
+    for (const task of previousPaint) resolve(task);
+    if (finished) {
+      if (drew && !still) painted.push(finished);
+      else resolve(finished);
+    }
+    schedule();
+  }
+  function beginTransition(type, channel, from, to, ms, fallback) {
+    cancelTransitions();
+    s[channel] = from;
+    const duration = Number.isFinite(Number(ms)) ? Math.max(0, Number(ms)) : fallback;
+    let complete;
+    const promise = new Promise((done) => { complete = done; });
+    transition = { type, channel, from, to, duration, t0: clock(), resolve: complete, settled: false };
+    if (s.destroyed || s.contextLost || !s.running || hidden() || reduce() || duration === 0) {
+      settleEndpoint(!s.destroyed);
+    } else {
+      render();
+      schedule();
+    }
+    return promise;
+  }
+  function canonical(reveal) {
+    cancelTransitions();
+    s.time = 0;
+    s.spin = 0;
+    s.baseYaw = s.yaw = 0.40;
+    s.basePitch = s.pitch = 0.17;
+    s.reveal = s.pull = unit(reveal);
+    s.assemble = 1;
+    s.dissolve = 0;
+    s.verify = s.deny = s.standby = 0;
+    s.last = 0;
+  }
+  function redrawPaused() {
+    if (!s.running) render();
+  }
+  function resume() {
+    if (s.destroyed) return;
+    if (!s.running) { s.running = true; s.last = 0; }
+    schedule();
+  }
+  function visibilityChanged() {
+    if (s.destroyed) return;
+    if (hidden()) {
+      cancelFrame();
+      settleEndpoint(false);
+    } else {
+      s.last = 0;
+      if (s.running) schedule();
+      else render();
+    }
+  }
+  function contextLost(event) {
+    event.preventDefault();
+    if (s.destroyed) return;
+    s.contextLost = true;
+    cancelFrame();
+    settleEndpoint(false);
+    // 丢失的 WebGL 对象已失效；恢复时重建，不继续使用旧句柄。
+    resources = null;
+  }
+  function contextRestored() {
+    if (s.destroyed) return;
+    s.contextLost = false;
+    if (!initResources()) { settleEndpoint(false); return; }
+    s.last = 0;
+    render();
+    schedule();
+  }
+  doc.addEventListener("visibilitychange", visibilityChanged);
+  canvas.addEventListener("webglcontextlost", contextLost);
+  canvas.addEventListener("webglcontextrestored", contextRestored);
+
+  return {
+    __sceneStats: band.stats,
+    start: resume,
+    resume,
     stop() {
       s.running = false;
-      cancelAnimationFrame(s.raf);
+      cancelFrame();
+      settleEndpoint();
     },
-    /** 0..1：金属的出场进度（影响透明度），同时决定让位程度 */
+    reset({ reveal = 0 } = {}) {
+      canonical(reveal);
+      redrawPaused();
+    },
+    setReducedMotion(value) {
+      reducedOverride = Boolean(value);
+      s.last = 0;
+      if (reducedOverride) settleEndpoint();
+      else redrawPaused();
+      schedule();
+    },
+    /** 0..1：玻璃出场状态，同时决定为登录面板让位的程度。 */
     setReveal(v) {
-      const x = clamp(v, 0, 1);
-      s.reveal = x;
-      s.pull = x;
+      s.reveal = s.pull = unit(v);
+      redrawPaused();
     },
-    /** 只控制让位，不改出场透明度——滚轮切换时用 */
-    setPull(v) {
-      s.pull = clamp(v, 0, 1);
-    },
-    setVerify(v) {
-      s.verify = clamp(v, 0, 1);
-    },
-    setDenied(v) {
-      s.deny = clamp(v, 0, 1);
-    },
-    setStandby(v) {
-      s.standby = clamp(v, 0, 1);
-    },
-    playAssemble(ms = 1800) {
-      s.assemble = 0;
-      s.assembleAnim = { from: 0, to: 1, t0: s.time, dur: ms / 1000 };
+    setPull(v) { s.pull = unit(v); redrawPaused(); },
+    setVerify(v) { s.verify = unit(v); redrawPaused(); },
+    setDenied(v) { s.deny = unit(v); redrawPaused(); },
+    setStandby(v) { s.standby = unit(v); redrawPaused(); },
+    playAssemble(durationMs = 1800) {
+      s.dissolve = 0;
+      return beginTransition("assemble", "assemble", 0, 1, durationMs, 1800);
     },
     setAssembled() {
+      cancelTransitions();
       s.assemble = 1;
-      s.assembleAnim = null;
-    },
-    playDissolve(ms = 900) {
       s.dissolve = 0;
-      s.dissolveAnim = { t0: s.time, dur: ms / 1000 };
+      redrawPaused();
     },
-    /** 拖拽旋转 */
+    playDissolve(durationMs = 1500) {
+      s.assemble = 1;
+      s.verify = s.deny = s.standby = 0;
+      return beginTransition("dissolve", "dissolve", 0, 1, durationMs, 1500);
+    },
+    playReassemble(durationMs = 1000) {
+      // 保留父层 reset({reveal}) 的选择，其余状态（包括拖拽）一并归零。
+      canonical(s.reveal);
+      return beginTransition("reassemble", "dissolve", 1, 0, durationMs, 1000);
+    },
     rotateBy(dx, dy) {
-      s.baseYaw = s.yaw + dx * 0.0075;
-      s.basePitch = clamp(s.pitch + dy * 0.0048, -0.62, 0.85);
-      s.yaw = s.baseYaw;
-      s.pitch = s.basePitch;
+      s.baseYaw += (Number(dx) || 0) * 0.0075;
+      s.basePitch = clamp(s.basePitch + (Number(dy) || 0) * 0.0048, -0.62, 0.85);
+      s.yaw = s.baseYaw + Math.sin(s.time * 0.085) * 0.26;
+      s.pitch = s.basePitch + Math.sin(s.time * 0.052) * 0.08;
+      redrawPaused();
     },
     destroy() {
-      this.stop();
-      gl.deleteBuffer(quadBuffer);
-      gl.deleteBuffer(positionBuffer);
-      gl.deleteBuffer(normalBuffer);
-      gl.deleteBuffer(paramBuffer);
-      gl.deleteBuffer(indexBuffer);
-      gl.deleteProgram(bgProgram);
-      gl.deleteProgram(bandProgram);
+      if (s.destroyed) return;
+      s.running = false;
+      s.destroyed = true;
+      cancelFrame();
+      settleEndpoint(false);
+      doc.removeEventListener("visibilitychange", visibilityChanged);
+      canvas.removeEventListener("webglcontextlost", contextLost);
+      canvas.removeEventListener("webglcontextrestored", contextRestored);
+      releaseResources();
+      if (canvas.__sceneStats === band.stats) delete canvas.__sceneStats;
+      if (win.__sceneStats === band.stats) delete win.__sceneStats;
     },
   };
 }
