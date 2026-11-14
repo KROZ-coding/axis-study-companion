@@ -105,11 +105,13 @@ button { cursor: pointer; }
 }
 .brand-rule { margin-top: 14px; width: 232px; height: 2px; background: var(--ink); }
 
-/* 右上：钟面与轻量牛顿摆。摆随登录卡展开逐渐隐去，把注意力交给时钟。 */
+/* 右上：钟面与轻量牛顿摆。摆随登录卡展开渐隐并让出位置，
+   时钟字号字重同步渐进加大，最终占据两块共有的位置。 */
 .chrono { z-index: 2; right: 64px; top: 34px; display: flex; flex-direction: column; align-items: flex-end; }
 .chrono-cradle {
   position: relative; width: 118px; height: 66px; margin-right: 4px;
-  opacity: calc(max(0, 1 - var(--reveal) * 1.5));
+  opacity: calc(max(0, 1 - var(--reveal) * 1.6));
+  margin-bottom: calc(-66px * var(--reveal));
 }
 .chrono-cradle::before {
   content: ""; position: absolute; left: 4px; right: 4px; top: 3px; height: 3px;
@@ -148,9 +150,9 @@ button { cursor: pointer; }
   78% { transform: rotate(-3deg); }
 }
 .chrono-time { display: flex; align-items: flex-start; gap: 8px; margin-top: 2px; }
-.chrono-hm { font-family: var(--latin); font-size: 90px; font-weight: 200; line-height: 1; }
-.chrono-sec { font-family: var(--mono); font-size: 16px; color: var(--mute); margin-top: 14px; }
-.chrono-date { margin-top: 7px; font-family: var(--latin); font-size: 13px; font-weight: 500; color: var(--ink-soft); }
+.chrono-hm { font-family: var(--latin); font-size: calc(68px + var(--reveal) * 34px); font-weight: 200; line-height: 1; }
+.chrono-sec { font-family: var(--mono); font-size: calc(14px + var(--reveal) * 3px); color: var(--mute); margin-top: 14px; }
+.chrono-date { margin-top: 7px; font-family: var(--latin); font-size: calc(12px + var(--reveal) * 2px); font-weight: 600; color: var(--ink-soft); }
 .chrono-term {
   margin-top: 8px; font-family: var(--cjk); font-size: 11px;
   color: var(--mute); display: flex; align-items: center; gap: 8px;
@@ -234,15 +236,6 @@ button { cursor: pointer; }
 @keyframes mon-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
-}
-.rail-hints {
-  left: 44px; width: 340px; display: flex; flex-wrap: wrap; gap: 10px 14px;
-  font-family: var(--latin); font-size: 11px; font-weight: 500; color: var(--ink-soft);
-}
-.rail-hints span { display: inline-flex; align-items: center; gap: 5px; }
-.rail-hints b {
-  font-family: var(--mono); font-weight: 700; color: var(--ink);
-  border: 1px solid var(--ink); padding: 3px 5px; font-size: 10px;
 }
 .rail-foot { left: 0; width: 46px; height: 14px; background: var(--ink); }
 .rail-label {
@@ -460,12 +453,12 @@ button { cursor: pointer; }
 .auth-role {
   background: rgba(20, 52, 63, 0.10); color: var(--ink);
   border: 1px solid rgba(20, 52, 63, 0.24);
-  font-family: var(--cjk); font-size: 17px; font-weight: 700;
-  letter-spacing: 0.02em; padding: 9px 16px;
+  font-family: var(--cjk); font-size: 20px; font-weight: 700;
+  letter-spacing: 0.02em; padding: 11px 20px;
 }
 .auth-state {
-  font-family: var(--cjk); font-size: 11px;
-  color: var(--ink-soft); border: 1px solid var(--faint); padding: 4px 7px;
+  font-family: var(--cjk); font-size: 12px;
+  color: var(--ink-soft); border: 1px solid var(--faint); padding: 5px 9px;
 }
 .auth-state.alert { color: var(--warn); border-color: var(--warn); }
 .auth-state.ok { color: var(--ok); border-color: var(--ok); }
@@ -547,20 +540,20 @@ button { cursor: pointer; }
 }
 .auth-main-head .label {
   display: inline-flex; align-items: center; gap: 8px;
-  font-family: var(--cjk); font-size: 12px; font-weight: 700; color: var(--ink-soft);
+  font-family: var(--cjk); font-size: 13.5px; font-weight: 700; color: var(--ink-soft);
 }
 .auth-main-head .label i { width: 12px; height: 4px; background: var(--ink); }
-.auth-main-head .attempt { font-family: var(--cjk); font-size: 10px; color: var(--mute); }
+.auth-main-head .attempt { font-family: var(--cjk); font-size: 12px; color: var(--mute); }
 .auth-main-head .attempt.hot { color: var(--warn); }
 .tabs { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
 .role-tabs { margin-top: 12px; margin-bottom: 10px; }
 /* 学生/教师是主切换器：两个等宽大按钮，一眼可点 */
-.role-tabs .chip { flex: 1 1 0; font-size: 15px; font-weight: 600; min-height: 48px; letter-spacing: 0.06em; }
+.role-tabs .chip { flex: 1 1 0; font-size: 17px; font-weight: 600; min-height: 52px; letter-spacing: 0.06em; }
 /* 角色子模块：学生 → 口令登录/首次激活/重设口令；教师 → 口令登录/重设口令/申领账号 */
 .subtabs { margin-top: 12px; margin-bottom: 0; gap: 6px; }
-.subtabs .chip { flex: 1 1 0; min-height: 44px; font-size: 13.5px; }
+.subtabs .chip { flex: 1 1 0; min-height: 48px; font-size: 15px; }
 .error-line {
-  min-height: 1.35em; margin: 6px 0; font-family: var(--cjk); font-size: 12px; line-height: 1.5;
+  min-height: 1.35em; margin: 6px 0; font-family: var(--cjk); font-size: 15px; line-height: 1.5;
   color: var(--bad); overflow-wrap: anywhere;
 }
 .error-line.service-offline { color: var(--ink-soft); }
@@ -571,7 +564,7 @@ button { cursor: pointer; }
 }
 .passbar input {
   flex: 1; min-width: 0; border: 0; background: none; padding: 0 12px;
-  font-family: var(--mono); font-size: 16px; color: var(--ink); letter-spacing: 0.04em;
+  font-family: var(--mono); font-size: 17px; color: var(--ink); letter-spacing: 0.04em;
 }
 .passbar input:focus { outline: none; }
 .passbar:focus-within { box-shadow: inset 0 -2px 0 var(--cyan-deep); }
@@ -586,7 +579,7 @@ button { cursor: pointer; }
 .passbar.disabled { background: rgba(230, 239, 243, 0.72); }
 .passbar.disabled input { color: var(--mute); cursor: not-allowed; }
 .passbar.disabled .pass-eye { color: var(--mute); cursor: default; }
-.auth-submit { width: 100%; margin-top: 12px; min-height: 56px; font-size: 17px; font-weight: 700; letter-spacing: 0.12em; }
+.auth-submit { width: 100%; margin-top: 12px; min-height: 58px; font-size: 18px; font-weight: 700; letter-spacing: 0.12em; }
 .chip, .btn, .nav-btn, .icon-btn {
   border: 1px solid var(--line); background: rgba(255,255,255,.72); border-radius: 0;
   min-height: 44px; padding: 8px 14px;
@@ -609,10 +602,10 @@ button { cursor: pointer; }
 }
 
 /* 表单：扁平的、像填表，不是卡片输入框 */
-.field { display: grid; gap: 5px; margin: 0 0 8px; font-family: var(--cjk); font-size: 14px; color: var(--ink-soft); min-width: 0; }
+.field { display: grid; gap: 5px; margin: 0 0 8px; font-family: var(--cjk); font-size: 16px; color: var(--ink-soft); min-width: 0; }
 .field input, .field textarea, .field select {
   width: 100%; border: 1px solid var(--faint); border-radius: 0; background: rgba(255, 255, 255, 0.92);
-  padding: 8px 10px; min-height: 46px; font-family: var(--cjk); font-size: 16px; color: var(--ink);
+  padding: 8px 10px; min-height: 48px; font-family: var(--cjk); font-size: 17px; color: var(--ink);
 }
 .field input:disabled { color: var(--mute); background: rgba(230,239,243,.72); cursor: not-allowed; }
 .field input:focus, .field textarea:focus, .field select:focus {
@@ -739,7 +732,7 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
 .formula { font-family: "Cambria Math", "Times New Roman", serif; font-size: 22px; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .muted { color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
-.error-line { color: var(--bad); font-size: 14px; min-height: 1.4em; }
+.error-line { color: var(--bad); font-size: 15px; min-height: 1.4em; }
 .state-banner { border-radius: 16px; padding: 12px 14px; margin: 10px 0; }
 .state-banner.warn { background: var(--warn-bg); }
 .state-banner.bad { background: var(--bad-bg); }
@@ -774,8 +767,8 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
 
 @media (min-width: 901px) and (max-height: 820px) {
   .chrono { right: 42px; top: 22px; }
-  .chrono-cradle { transform: scale(.82); transform-origin: right top; margin-bottom: -12px; }
-  .chrono-hm { font-size: 78px; }
+  .chrono-cradle { transform: scale(.82); transform-origin: right top; margin-bottom: calc(-12px - 54px * var(--reveal)); }
+  .chrono-hm { font-size: calc(62px + var(--reveal) * 30px); }
   .chrono-date { font-size: 11px; }
   .chrono-term { font-size: 9px; }
   .auth-card { top: 236px; height: 820px; }
@@ -870,9 +863,9 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
   .auth-main-head { margin-bottom: 6px; }
   .auth-main-head .label { font-size: 11px; }
   .tabs { gap: 5px; margin-bottom: 8px; }
-  .role-tabs .chip { font-size: 14px; min-height: 46px; }
-  .chip { font-size: 12px; padding: 6px 9px; min-height: 42px; }
-  .subtabs .chip { font-size: 12.5px; min-height: 44px; }
+  .role-tabs .chip { font-size: 16px; min-height: 48px; }
+  .chip { font-size: 13px; padding: 6px 9px; min-height: 42px; }
+  .subtabs .chip { font-size: 14px; min-height: 46px; }
   .field input { min-height: 44px; font-size: 16px; }
   .passbar { height: 48px; }
   .passbar input { font-size: 16px; }

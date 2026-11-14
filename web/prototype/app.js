@@ -164,7 +164,7 @@ function renderEntry() {
           <div class="rail-body" style="--reveal:${rv}">
             <i class="rail-bar"></i>
             <i class="rail-dash" style="top:358px"></i>
-            <div class="rail-chip" style="left:44px; top:396px">智慧学伴 · 学习证据</div>
+            <div class="rail-chip" style="left:44px; top:396px">伴星导学 · 学习证据</div>
             <p class="rail-micro" style="top:416px">作答、提示与材料依据逐项留存。每个判断都有出处，尚无记录时如实说明。</p>
             <div class="rail-chip" style="left:44px; top:608px"><i class="mon-led ${state.live ? "on" : ""}" aria-hidden="true"></i>实时监控</div>
             <div class="rail-monitor" style="--reveal:${rv}" aria-hidden="true">
@@ -181,17 +181,13 @@ function renderEntry() {
             </div>
             <i class="rail-dash" style="left:44px; top:852px"></i>
             <i class="rail-hair" style="left:66px; top:853px"></i>
-            <div class="rail-hints" style="top:872px">
-              <span><b>↓</b>展开登录</span><span><b>拖</b>转动装置</span>
-              <span><b>Tab</b>切换栏位</span><span><b>Enter</b>确认</span>
-            </div>
             <i class="rail-foot" style="top:946px"></i>
             <div class="rail-label" style="left:71px; top:944px">${escapeHtml(state.railLabel)}</div>
           </div>
         </div>
 
         <div class="entry-layer keep brand" aria-hidden="true">
-          <div class="brand-l1">智慧学伴</div>
+          <div class="brand-l1">伴星导学</div>
           <div class="brand-l2"><span class="axis">AXIS</span></div>
           <div class="brand-l3">LEARNING EVIDENCE OS</div>
           <div class="brand-rule"></div>
@@ -204,7 +200,7 @@ function renderEntry() {
             <span class="cradle-balls"><i></i><i></i><i></i><i></i><i></i></span>
           </div>
           <div class="chrono-time">
-            <span class="chrono-hm">${state.clock.hm}</span><span class="chrono-sec">${state.clock.sec}</span>
+            <span class="chrono-hm" style="font-weight:${200 + Math.round(state.reveal * 3) * 100}">${state.clock.hm}</span><span class="chrono-sec">${state.clock.sec}</span>
           </div>
           <div class="chrono-date">${state.clock.date}</div>
           <div class="chrono-term"><i class="${state.live ? "online" : "offline"}"></i>${escapeHtml(state.live ? "正式服务 · 安全登录" : state.serviceError || "正式服务连接中断")}</div>
@@ -305,7 +301,7 @@ function authCard(open) {
           <span class="auth-mark"><i aria-hidden="true"></i>账号 · 安全认证</span>
           <div class="auth-head-right">
             <span class="auth-outline">学习证据系统</span>
-            <span class="auth-brandtag">智慧学伴 AXIS</span>
+            <span class="auth-brandtag">伴星导学 AXIS</span>
           </div>
         </header>
 
@@ -351,12 +347,12 @@ function authCard(open) {
             <span class="attempt ${state.authStatus === "denied" ? "hot" : ""}">${state.authStatus === "sent" ? "等待审核" : state.authStatus === "denied" ? "请检查信息" : state.live ? "安全连接" : "服务离线"}</span>
           </div>
           <div class="tabs role-tabs" role="group" aria-label="登录身份">
-            <button class="chip" type="button" data-role="student" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "student" && state.authTab !== "apply"}">学生</button>
-            <button class="chip" type="button" data-role="teacher" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "teacher" && state.authTab !== "apply"}">教师</button>
+            <button class="chip" type="button" data-role="student" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "student"}">学生</button>
+            <button class="chip" type="button" data-role="teacher" ${busy ? "disabled" : ""} aria-pressed="${state.authRole === "teacher"}">教师</button>
           </div>
           ${authFields()}
           <p class="error-line ${state.live ? "" : "service-offline"}" role="alert">${escapeHtml(state.error || (!state.live ? service : ""))}</p>
-          ${state.authTab === "login" ? passBar({ locked, autocomplete: "current-password", label: "登录口令" })
+          ${state.authTab === "login" ? `<label class="field">登录口令${passBar({ locked, autocomplete: "current-password", label: "登录口令" })}</label>`
             : `<label class="field">${state.authTab === "apply" ? "设置登录口令" : "新口令"}${passBar({ locked, autocomplete: "new-password", label: "新口令", placeholder: "至少 8 位" })}</label>`}
           <button class="btn primary wide auth-submit" type="submit" ${busy || !state.live || state.authStatus === "sent" ? "disabled" : ""}>${busy ? "正在核验…" : state.authStatus === "sent" ? "已提交审核" : copy.submit}</button>
           <div class="tabs subtabs" role="group" aria-label="${state.authRole === "teacher" || state.authTab === "apply" ? "教师入口" : "学生入口"}">
@@ -404,7 +400,7 @@ function authFields() {
 
 function renderAdmin() {
   view.innerHTML = `<main class="admin-boundary" aria-labelledby="admin-title">
-    <p class="eyebrow">智慧学伴 · 管理员会话</p>
+    <p class="eyebrow">伴星导学 · 管理员会话</p>
     <h1 id="admin-title">此账号仅用于平台管理</h1>
     <p>教师审核与账号管理尚未接入当前工作区。为保护权限范围，管理员账号不会进入教师或学生界面。</p>
     <button class="btn primary" type="button" data-action="logout">安全退出</button>
@@ -421,7 +417,7 @@ function renderTeacher() {
   view.innerHTML = `
     <div class="app">
       <aside class="side">
-        <div class="brand">智慧学伴</div>
+        <div class="brand">伴星导学</div>
         ${nav("home", "班级学情")}${nav("student", "学生依据")}${nav("materials", "课程与题目")}${nav("reports", "阶段成果")}
         <div class="spacer"></div>
         <p class="who muted">${escapeHtml(state.who)} · ${escapeHtml(state.className || "教师工作区")}</p>
@@ -634,7 +630,7 @@ function renderStudent() {
     <div class="phone-frame">
       <header class="phone-top row" style="justify-content:space-between">
         <button class="icon-btn" data-action="chats" aria-label="会话">会话</button>
-        <strong>智慧学伴</strong>
+        <strong>伴星导学</strong>
         <button class="linkish" data-action="logout">退出</button>
       </header>
       ${page === "workspace" ? workspace() : page === "result" ? resultPage() : studentTab()}
@@ -1509,6 +1505,9 @@ function setReveal(value) {
   for (const node of entry.querySelectorAll("[style*='--reveal']")) {
     node.style.setProperty("--reveal", state.reveal.toFixed(3));
   }
+  // 时钟字重分档加粗（200→500），与字号 calc 同步渐进
+  const hm = entry.querySelector(".chrono-hm");
+  if (hm) hm.style.fontWeight = String(200 + Math.round(state.reveal * 3) * 100);
   refreshAnchors();
 }
 
