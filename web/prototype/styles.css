@@ -84,10 +84,10 @@ button { cursor: pointer; }
 }
 .entry-layer.keep { opacity: 1; }
 
-/* 页头：三行锁定排版，第二行靠字距、第三行靠字号各自与首行等宽 */
-.brand { left: 62px; top: 104px; display: inline-flex; flex-direction: column; }
+/* 页头：三行锁定排版。整体在竖轴线（300）左侧，第三行收紧字距保证不越线 */
+.brand { left: 42px; top: 104px; display: inline-flex; flex-direction: column; }
 .brand-l1 {
-  font-family: var(--cjk); font-size: 44px; font-weight: 700;
+  font-family: var(--cjk); font-size: 50px; font-weight: 700;
   letter-spacing: 0.06em; line-height: 1; align-self: flex-start;
 }
 .brand-l2 {
@@ -95,15 +95,15 @@ button { cursor: pointer; }
   margin-top: 10px; align-self: flex-start;
 }
 .brand-l2 .axis {
-  font-family: var(--latin); font-size: 26px; font-weight: 700;
+  font-family: var(--latin); font-size: 30px; font-weight: 700;
   letter-spacing: 0.34em; color: var(--mute); line-height: 1;
 }
 .brand-l3 {
   margin-top: 8px; font-family: var(--latin);
-  font-size: 15px; font-weight: 500; letter-spacing: 0.30em;
+  font-size: 17px; font-weight: 500; letter-spacing: 0.18em;
   color: var(--mute); align-self: flex-start; white-space: nowrap;
 }
-.brand-rule { margin-top: 14px; width: 232px; height: 2px; background: var(--ink); }
+.brand-rule { margin-top: 14px; width: 252px; height: 2px; background: var(--ink); }
 
 /* 右上：钟面与轻量牛顿摆。摆随登录卡展开渐隐并让出位置，
    时钟字号字重同步渐进加大，最终占据两块共有的位置。 */
