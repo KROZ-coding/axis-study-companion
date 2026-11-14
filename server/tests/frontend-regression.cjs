@@ -404,6 +404,104 @@ test("opening completed tasks shows their result without acquiring an editing le
   assert.equal(leases, 0);
 });
 
+test("each learning record opens its own submission, including while a retry is in progress", async () => {
+  for (const status of ["results_ready", "in_progress"]) {
+    const current = task("history", {
+      status, answer_released: status === "results_ready",
+      attempts: [
+        { id: "first", kind: "first", status: "graded", total_score: 0, max_score: 1, submitted_at: 10 },
+        { id: "retry", kind: "retry", status: "graded", total_score: 1, max_score: 1, submitted_at: 20 },
+      ],
+    });
+    let leases = 0;
+    const h = harness([...taskFunctions, "escapeHtml", "mine", "resultPageLive", "onAction"], {
+      state: { liveTask: current, liveTasks: [current], studentPage: "home" },
+      globals: { studentHeading: () => "", studentDate: () => "", studentIcon: () => "", taskStatus: () => "" },
+      api: { task: async () => plain(current), acquireLease: async () => { leases += 1; return lease(current.id); } },
+    });
+    const markup = h.context.mine();
+    const buttons = [...markup.matchAll(/<button\b([^>]+)>查看反馈<\/button>/g)];
+    assert.equal(buttons.length, 2);
+    for (const button of buttons) {
+      const dataset = {};
+      for (const [, key, value] of button[1].matchAll(/data-([a-z-]+)="([^"]*)"/g)) {
+        dataset[key.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
+      }
+      assert.ok(dataset.attemptId, "every feedback button must identify its submission");
+      h.context.onAction({ currentTarget: { dataset } });
+      await settle();
+      assert.equal(h.state.studentPage, "result", "past feedback must not open the current retry editor");
+      const result = h.context.resultPageLive();
+      assert.match(result, dataset.attemptId === "first" ? /首次成绩/ : /重做成绩/);
+      assert.match(result, new RegExp(`<div class="student-score">${dataset.attemptId === "first" ? 0 : 1}<small>`));
+      if (!current.answer_released) assert.ok(!result.includes("参考答案"));
+    }
+    assert.equal(leases, 0, "reading history must not acquire a draft lease");
+  }
+});
+
+test("an unavailable historical submission never falls back to someone else's latest record", async () => {
+  const current = task("history", { status: "results_ready", attempts: [{ id: "latest", kind: "retry", total_score: 1, max_score: 1 }] });
+  const h = harness([...taskFunctions, "resultPageLive"], {
+    state: { liveTask: current, liveTasks: [current], studentPage: "home" },
+    globals: { studentHeading: () => "", studentDate: () => "", taskStatus: () => "" },
+    api: { task: async () => current },
+  });
+  await h.context.selectLiveTask("history", "removed-attempt");
+  assert.equal(h.state.studentPage, "home");
+  assert.ok(h.calls.some(([name, message]) => name === "toast" && message.includes("记录")));
+  h.state.selectedAttemptId = "removed-attempt";
+  assert.ok(!h.context.resultPageLive().includes("重做成绩"));
+});
+
+test("reloading the same tab reopens its draft immediately without taking over another device", async () => {
+  const storage = new Map();
+  const sessionStorage = { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) };
+  let owner;
+  for (const device of ["first-load", "after-reload"]) {
+    const current = task("reload", { draft_answers: { "reload-q": 0 } });
+    const h = harness(taskFunctions, {
+      state: { liveTask: current, liveTasks: [current], studentPage: "home" },
+      window: { sessionStorage },
+      globals: { crypto: { randomUUID: () => device } },
+      api: {
+        acquireLease: async (id, deviceId, options) => {
+          assert.ok(!options?.takeover, "refresh cannot force a different device out");
+          if (owner && deviceId !== owner) throw new Error("another device currently owns the draft lease");
+          owner = deviceId;
+          return lease(id);
+        },
+        task: async () => current,
+      },
+    });
+    await h.context.openLiveTask();
+    assert.equal(h.state.studentPage, "workspace", "a reload must recover the same tab's valid lease owner");
+    assert.deepEqual(plain(h.state.answers), [0]);
+  }
+  assert.equal(storage.size, 1, "persist only the anonymous tab identifier, not answers or lease tokens");
+});
+
+test("independent tabs get different editing identities and storage failure does not block drafting", async () => {
+  const ids = [];
+  for (const tab of ["alpha", "beta", "blocked-storage"]) {
+    const values = new Map();
+    const unavailable = tab === "blocked-storage";
+    const current = task(tab);
+    const h = harness(taskFunctions, {
+      state: { liveTask: current, liveTasks: [current] },
+      window: { sessionStorage: {
+        getItem: (key) => { if (unavailable) throw new Error("storage disabled"); return values.get(key) ?? null; },
+        setItem: (key, value) => { if (unavailable) throw new Error("storage disabled"); values.set(key, value); },
+      } },
+      globals: { crypto: { randomUUID: () => tab } },
+      api: { acquireLease: async (id, deviceId) => { ids.push(deviceId); return lease(id); }, task: async () => current },
+    });
+    await h.context.openLiveTask();
+    assert.equal(h.state.studentPage, "workspace");
+  }
+  assert.equal(new Set(ids).size, 3);
+});
+
 test("retry uses the current task version, clears only that task's draft and preserves first-attempt history", async () => {
   const first = { id: "first-attempt", kind: "first", total_score: 0, max_score: 1 };
   const current = task("retry", { status: "results_ready", allow_retries: true, version: 11, attempts: [first] });

@@ -815,7 +815,7 @@ function mine() {
   return `${studentHeading("我的学习", "先看具体的作答与反馈，让每一步进步都有来处。")}
     ${state.liveError ? `<div class="state-banner bad">${escapeHtml(state.liveError)}</div>` : ""}
     <div class="student-section-head"><h2>作答记录</h2><small>${records.length} 次真实提交</small></div>
-    ${records.length ? `<div class="student-record-list">${records.map(({ task, attempt }) => `<article><div><span class="tag${attempt.status === "graded" ? " ok" : " warn"}">${attempt.kind === "first" ? "首次作答" : "重做"}</span><h3>${escapeHtml(taskTitle(task))}</h3><p>${studentDate(attempt.submitted_at, true)} · ${attempt.independent_evidence ? "独立作答记录" : "复习作答记录"}</p></div><div><strong>${attempt.total_score !== undefined ? `${attempt.total_score} / ${attempt.max_score}` : "等待评分"}</strong><p>${attempt.status === "graded" ? "已完成评分" : "完整评分后开放反馈"}</p></div><button class="btn" data-action="open-task" data-task-id="${escapeHtml(task.id)}">查看反馈</button></article>`).join("")}</div>` : '<section class="student-empty">' + studentIcon("mine") + '<h2>第一份学习记录，等你写下</h2><p>完成任务并交卷后，首次成绩、重做与具体反馈会保存在这里。</p><button class="btn primary" data-tab="tasks">去看我的任务</button></section>'}
+    ${records.length ? `<div class="student-record-list">${records.map(({ task, attempt }) => `<article><div><span class="tag${attempt.status === "graded" ? " ok" : " warn"}">${attempt.kind === "first" ? "首次作答" : "重做"}</span><h3>${escapeHtml(taskTitle(task))}</h3><p>${studentDate(attempt.submitted_at, true)} · ${attempt.independent_evidence ? "独立作答记录" : "复习作答记录"}</p></div><div><strong>${attempt.total_score !== undefined ? `${attempt.total_score} / ${attempt.max_score}` : "等待评分"}</strong><p>${attempt.status === "graded" ? "已完成评分" : "完整评分后开放反馈"}</p></div><button class="btn" data-action="open-task" data-task-id="${escapeHtml(task.id)}" data-attempt-id="${escapeHtml(attempt.id)}">查看反馈</button></article>`).join("")}</div>` : '<section class="student-empty">' + studentIcon("mine") + '<h2>第一份学习记录，等你写下</h2><p>完成任务并交卷后，首次成绩、重做与具体反馈会保存在这里。</p><button class="btn primary" data-tab="tasks">去看我的任务</button></section>'}
     <section class="student-context-block"><h2>比一个百分比，多看一步</h2><p class="student-context-note">是否独立完成、在哪里需要提示、哪些步骤还不熟悉，都要结合具体作答判断。记录不足时，不生成掌握度。</p></section>`;
 }
 
@@ -901,9 +901,9 @@ function diagnosticPage() {
 function resultPageLive() {
   const task = state.liveTask;
   const attempts = task?.attempts || [];
-  const attempt = attempts.find((item) => item.id === state.selectedAttemptId) || attempts[attempts.length - 1];
+  const attempt = state.selectedAttemptId ? attempts.find((item) => item.id === state.selectedAttemptId) : attempts[attempts.length - 1];
   const heading = `<div class="student-workspace-head"><button class="btn" data-tab="tasks">返回任务</button><span class="tag">${taskStatus(task || {})}</span></div>${studentHeading(task ? taskTitle(task) : "本轮结果", "把每次作答和具体反馈放在一起看。")}`;
-  if (!task || !attempt) return `${heading}<div class="state-banner warn">还在评卷，成绩稍后出现在这里。</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
+  if (!task || !attempt) return `${heading}<div class="state-banner warn">${state.selectedAttemptId ? "这次作答记录暂时不可用，请返回我的学习后重试。" : "还在评卷，成绩稍后出现在这里。"}</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
   const summary = `<section class="student-result-summary"><div class="student-score">${attempt.total_score ?? "—"}<small> / ${attempt.max_score ?? "—"}</small></div><div><h2>${attempt.kind === "first" ? "首次成绩" : "重做成绩"}</h2><p>${attempt.independent_evidence ? "独立作答与提示记录分开保留。" : "这次是复习记录，首次成绩保持不变。"}</p><small>${studentDate(attempt.submitted_at, true)}</small></div></section>`;
   if (!task.answer_released) return `${heading}${summary}<div class="state-banner warn">整轮评分完成前，不显示对错和解析。</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
   const byId = Object.fromEntries((attempt.items || []).map((item) => [item.question_id, item]));
@@ -1150,7 +1150,7 @@ function onAction(event) {
   }
   if (action === "open-task") {
     if (state.live) {
-      selectLiveTask(event.currentTarget.dataset.taskId || state.liveTask?.id);
+      selectLiveTask(event.currentTarget.dataset.taskId || state.liveTask?.id, event.currentTarget.dataset.attemptId);
       return;
     }
     state.studentPage = "workspace";
@@ -1503,7 +1503,7 @@ function updateStudentTask(task) {
   state.goalLabel = taskTitle(task);
 }
 
-async function selectLiveTask(taskId) {
+async function selectLiveTask(taskId, attemptId = null) {
   if (state.loading || !taskId) return;
   const generation = state.transitionId;
   try {
@@ -1511,6 +1511,10 @@ async function selectLiveTask(taskId) {
     render();
     const full = await api.task(taskId);
     if (generation !== state.transitionId) return;
+    if (attemptId && !(full.attempts || []).some((item) => item.id === attemptId)) {
+      toast("这次作答记录暂时不可用，请刷新后重试");
+      return;
+    }
     const sameTask = state.liveTask?.id === full.id;
     if (!sameTask) {
       clearInterval(leaseTimer);
@@ -1521,10 +1525,11 @@ async function selectLiveTask(taskId) {
     updateStudentTask(full);
     state.sheet = null;
     state.banner = "";
-    state.selectedAttemptId = null;
+    state.selectedAttemptId = attemptId;
     state.currentQ = 0;
     state.loading = false;
-    if (full.diagnostic_required) await runDiagnostic();
+    if (attemptId) state.studentPage = "result";
+    else if (full.diagnostic_required) await runDiagnostic();
     else if (taskFinished(full)) state.studentPage = "result";
     else if (full.scheduled_at && full.scheduled_at * 1000 > Date.now()) toast("尚未到任务开放时间");
     else await openLiveTask();
@@ -1656,7 +1661,17 @@ async function openLiveTask() {
   try {
     state.loading = true;
     render();
-    const deviceId = window.__studentDeviceId ||= `student-${crypto.randomUUID()}`;
+    // 标签页刷新后沿用同一匿名标识，避免被自己的有效租约锁住。
+    let deviceId = window.__studentDeviceId;
+    if (!deviceId) {
+      try {
+        deviceId = window.sessionStorage.getItem("axis-student-device-id") || `student-${crypto.randomUUID()}`;
+        window.sessionStorage.setItem("axis-student-device-id", deviceId);
+      } catch {
+        deviceId ||= `student-${crypto.randomUUID()}`;
+      }
+      window.__studentDeviceId = deviceId;
+    }
     const lease = state.liveLease?.task_id === taskId && state.liveLease.lease_until * 1000 > Date.now()
       ? state.liveLease : await api.acquireLease(taskId, deviceId);
     const full = await api.task(taskId);
