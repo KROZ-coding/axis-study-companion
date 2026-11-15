@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720" role="img" aria-labelledby="title description">
+  <title id="title">伴星导学 AXIS · 让每一步学习，都有迹可循。</title>
+  <desc id="description">冰蓝色轨道环绕学习证据核心，连接目标、作答与反馈。伴星导学是一套面向师生的学习证据系统。</desc>
+  <defs>
+    <linearGradient id="paper" x2="1" y2="1">
+      <stop stop-color="#f6fcff"/>
+      <stop offset=".58" stop-color="#e9f6fb"/>
+      <stop offset="1" stop-color="#c5e4f1"/>
+    </linearGradient>
+    <radialGradient id="halo">
+      <stop stop-color="#fff" stop-opacity=".95"/>
+      <stop offset=".6" stop-color="#8ad3e8" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#84cde3" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#fff" stop-opacity=".95"/>
+      <stop offset=".24" stop-color="#8bbdce" stop-opacity=".3"/>
+      <stop offset=".5" stop-color="#fff" stop-opacity=".88"/>
+      <stop offset=".78" stop-color="#338cab" stop-opacity=".65"/>
+      <stop offset="1" stop-color="#e7f9ff" stop-opacity=".85"/>
+    </linearGradient>
+    <linearGradient id="core" x2="1" y2="1">
+      <stop stop-color="#fff" stop-opacity=".95"/>
+      <stop offset="1" stop-color="#d4eaf4" stop-opacity=".82"/>
+    </linearGradient>
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+    <pattern id="dots" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#57889b" opacity=".13"/>
+    </pattern>
+  </defs>
+  <rect width="1600" height="720" rx="28" fill="url(#paper)"/>
+  <rect x="810" y="32" width="758" height="656" fill="url(#dots)"/>
+  <circle cx="1210" cy="326" r="389" fill="url(#halo)"/>
+  <g fill="none" stroke="#50889b" opacity=".18">
+    <path d="M898 56V608M1544 56V608M866 88H1572M866 568H1572"/>
+    <circle cx="1210" cy="326" r="249" stroke-dasharray="2 10"/>
+    <path d="M1189 326h42m-21-21v42"/>
+  </g>
+  <g transform="translate(74 67)">
+    <circle cx="24" cy="25" r="16" fill="none" stroke="#1f8aa8" stroke-width="3"/>
+    <ellipse cx="24" cy="25" rx="31" ry="10" transform="rotate(-38 24 25)" fill="none" stroke="#14343f" stroke-width="2"/>
+    <circle cx="45" cy="8" r="4.5" fill="#1f8aa8"/>
+    <text x="72" y="38" fill="#14343f" font-family="'Segoe UI','Microsoft YaHei',sans-serif" font-size="36" font-weight="700">伴星导学</text>
+  </g>
+  <text x="68" y="302" fill="#14343f" font-family="Bahnschrift,'Segoe UI',sans-serif" font-size="164" font-weight="600" letter-spacing="4">AXIS</text>
+  <text x="77" y="385" fill="#14343f" font-family="'Microsoft YaHei','Segoe UI',sans-serif" font-size="41" font-weight="700">让每一步学习，都有迹可循。</text>
+  <text x="80" y="439" fill="#476d7b" font-family="'Microsoft YaHei','Segoe UI',sans-serif" font-size="23">连接课程要求、学习证据与下一步安排</text>
+  <path d="M80 495H666" stroke="#9cbfcf"/>
+  <g fill="#315b6b" font-family="'Microsoft YaHei','Segoe UI',sans-serif" font-size="21">
+    <text x="80" y="538">独立首诊</text>
+    <circle cx="196" cy="530" r="3" fill="#1f8aa8"/>
+    <text x="224" y="538">师生协作</text>
+    <circle cx="340" cy="530" r="3" fill="#1f8aa8"/>
+    <text x="368" y="538">可追溯报告</text>
+  </g>
+  <g transform="translate(1210 326)">
+    <ellipse cy="38" rx="224" ry="157" transform="rotate(-30)" fill="none" stroke="#4484a0" stroke-width="25" opacity=".17" filter="url(#shadow)"/>
+    <ellipse rx="267" ry="113" transform="rotate(-34)" fill="none" stroke="url(#glass)" stroke-width="39"/>
+    <ellipse rx="267" ry="113" transform="rotate(-34)" fill="none" stroke="#fff" stroke-width="1.5" opacity=".8"/>
+    <ellipse rx="191" ry="259" transform="rotate(-34)" fill="none" stroke="url(#glass)" stroke-width="18" opacity=".8"/>
+    <ellipse rx="191" ry="259" transform="rotate(-34)" fill="none" stroke="#fff" stroke-width="1"/>
+    <circle r="88" fill="#579bb6" opacity=".15" filter="url(#shadow)"/>
+    <circle r="87" fill="url(#core)" stroke="#fff" stroke-width="2"/>
+    <circle r="73" fill="none" stroke="#85b8ca" opacity=".65"/>
+    <path d="M0-48C4-13 11-4 43 0C11 4 4 13 0 48C-4 13-11 4-43 0C-11-4-4-13 0-48Z" fill="#1f8aa8"/>
+    <circle cx="29" cy="-29" r="5" fill="#14343f"/>
+  </g>
+  <g fill="#f6fcff" stroke="#6ba9bf" stroke-width="1.5">
+    <circle cx="1012" cy="215" r="12"/>
+    <circle cx="1427" cy="236" r="12"/>
+    <circle cx="1146" cy="550" r="12"/>
+  </g>
+  <g fill="#1f8aa8">
+    <circle cx="1012" cy="215" r="5"/>
+    <circle cx="1427" cy="236" r="5"/>
+    <circle cx="1146" cy="550" r="5"/>
+  </g>
+  <g fill="#315b6b" font-family="'Microsoft YaHei','Segoe UI',sans-serif" font-size="21">
+    <text x="944" y="186">目标</text>
+    <text x="1450" y="222">作答</text>
+    <text x="1170" y="583">反馈</text>
+  </g>
+  <path d="M80 623H1520" stroke="#94bbcd" opacity=".7"/>
+  <g fill="#476d7b" font-family="'Segoe UI','Microsoft YaHei',sans-serif" font-size="18">
+    <text x="80" y="663">阿克西斯队 · 学习证据系统</text>
+    <text x="1520" y="663" text-anchor="end">Learning, with a trace.</text>
+  </g>
+</svg>
