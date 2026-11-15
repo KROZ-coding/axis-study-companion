@@ -34,6 +34,8 @@
 
 ## 全流程演示
 
+> **演示专用分支 `demo/recording-only-do-not-merge`，禁止合入正常代码。** 正常开发请切回 `docs/competition-production-direction`；隔离范围与限制见 [分支说明](DEMO_ONLY_DO_NOT_MERGE.md)。
+
 双击 [`start_recording_demo.bat`](start_recording_demo.bat)，打开 <http://127.0.0.1:8010/prototype/>。通过顶部“演示工具”切换教师与两名学生，完成首诊、四题练习、逐步辅导、交卷、短评回复与报告下载。详细步骤及输入参考见[全流程演示操作指南](docs/全流程演示操作指南.md)。
 
 每次启动使用独立新目录，保留旧数据；默认不调用外部模型。账号会话、保存、提交、客观评分及报告使用真实业务逻辑，辅导与预置简答规则评分明确标注模拟。此版本不包含录屏功能，由操作者自行录制。
