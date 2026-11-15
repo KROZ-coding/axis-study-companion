@@ -12,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..job_queue import InvalidTransition, IdempotencyConflict, QueueError
 from ..runtime import get_runtime
 from ..services.access import can_access_job, job_view, require_job
+from ..services.companion_access import (
+    answer_policy_provider, response_access, response_event_access, response_job_state, validate_response_access,
+)
 from ..v1_deps import get_platform_user, require_platform_roles
 
 router = APIRouter(prefix="/api/v1", tags=["background-jobs"])
@@ -153,59 +156,104 @@ async def response_stream(response_id: str, request: Request, after: int = Query
                           once: bool = False, actor=Depends(get_platform_user)):
     runtime = get_runtime(request)
     try:
-        runtime.companion.get_response(response_id, actor.id, answer_policy=runtime.learning.get_answer_policy)
+        response_access(runtime, actor.id, response_id)
     except (LookupError, PermissionError):
         raise HTTPException(status_code=404, detail={"code": "response_not_found", "message": "回答不存在"}) from None
     raw = request.headers.get("last-event-id")
-    if raw:
+    if raw is not None:
         try:
-            after = max(after, int(raw))
+            header_cursor = int(raw)
+            if not 0 <= header_cursor <= 9223372036854775807:
+                raise ValueError("cursor out of range")
+            after = max(after, header_cursor)
         except ValueError:
             raise HTTPException(status_code=422, detail={"code": "invalid_cursor", "message": "事件游标无效"}) from None
+    if after > 9223372036854775807:
+        raise HTTPException(status_code=422, detail={"code": "invalid_cursor", "message": "事件游标无效"})
+
+    def frame(event_type, data, event_id):
+        return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def snapshot(response):
+        fields = ("response_id", "status", "text", "redacted", "notice", "error", "generation", "last_event_id",
+                  "assistant_message_id", "content_type", "task_id", "question_version_id", "job_id", "job")
+        return frame("snapshot", {key: response.get(key) for key in fields}, response["last_event_id"])
+
+    def visibility_state(response):
+        job = response.get("job") or {}
+        return (response.get("redacted", False), response.get("notice"),
+                response["status"] in {"failed", "cancelled"}, job.get("status"),
+                job.get("cancel_requested"), job.get("reconciliation_required"), job.get("cost_pending"))
 
     async def stream():
-        cursor, generation = after, None
+        cursor, generation, visibility = after, None, None
         while not await request.is_disconnected():
             try:
                 user = get_platform_user(request, runtime.platform)
-                response = runtime.companion.get_response(
-                    response_id, user.id, answer_policy=runtime.learning.get_answer_policy,
+                response, candidates = runtime.companion.read_response_events(
+                    response_id, user.id, after=cursor, limit=1000,
+                    answer_policy=answer_policy_provider(runtime, user.id),
                 )
+                validate_response_access(runtime, user.id, response)
+                response["job"] = response_job_state(runtime, response)
+                # This is a fresh check immediately before any output; only
+                # event IDs from the page are buffered, never projected text.
+                response = response_access(runtime, user.id, response_id)
             except (HTTPException, LookupError, PermissionError):
                 yield 'event: revoked\ndata: {"code":"access_revoked"}\n\n'
                 return
-            if generation is not None and generation != response["generation"]:
-                cursor = 0
-            generation = response["generation"]
-            events = runtime.companion.list_response_events(
-                response_id, user.id, after=cursor, limit=1000,
-                answer_policy=runtime.learning.get_answer_policy,
-            )
-            if not events:
-                committed = runtime.companion.list_response_events(
-                    response_id, user.id, limit=1000, answer_policy=runtime.learning.get_answer_policy,
-                )
-                latest = committed[-1]["event_id"] if committed else 0
-                if cursor > latest:
-                    cursor = latest
-                    snapshot = {key: response.get(key) for key in ("response_id", "status", "text", "redacted", "notice", "generation")}
-                    yield f"id: {cursor}\nevent: snapshot\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
-            for event in events:
-                get_platform_user(request, runtime.platform)
-                projected = runtime.companion.list_response_events(
-                    response_id, user.id, after=event["event_id"] - 1, limit=1,
-                    answer_policy=runtime.learning.get_answer_policy,
-                )
-                if not projected:
-                    continue
-                event = projected[0]
+            current_visibility = visibility_state(response)
+            # Every connection replaces any cached prefix before replay,
+            # including idle tail resumes after policy or generation changes.
+            if (generation is None or generation != response["generation"] or cursor > response["last_event_id"]
+                    or visibility is not None and visibility != current_visibility):
+                generation = response["generation"]
+                cursor = response["last_event_id"]
+                visibility = current_visibility
+                yield snapshot(response)
+                if response["status"] in {"completed", "failed", "cancelled"} or once:
+                    return
+                continue
+            visibility = current_visibility
+            changed = False
+            for candidate in candidates:
+                try:
+                    user = get_platform_user(request, runtime.platform)
+                    response, event = response_event_access(runtime, user.id, response_id, candidate["event_id"])
+                except (HTTPException, LookupError, PermissionError):
+                    yield 'event: revoked\ndata: {"code":"access_revoked"}\n\n'
+                    return
+                current_visibility = visibility_state(response)
+                if response["generation"] != generation or event is None or current_visibility != visibility:
+                    generation = response["generation"]
+                    cursor = response["last_event_id"]
+                    visibility = current_visibility
+                    yield snapshot(response)
+                    changed = True
+                    break
                 cursor = event["event_id"]
                 data = {"response_id": response_id, "generation": event["generation"], **event["data"]}
-                yield f"id: {cursor}\nevent: {event['event_type']}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-            if once or response["status"] in {"completed", "failed", "cancelled"}:
+                yield frame(event["event_type"], data, cursor)
+            if changed:
+                continue
+            try:
+                user = get_platform_user(request, runtime.platform)
+                response = response_access(runtime, user.id, response_id)
+            except (HTTPException, LookupError, PermissionError):
+                yield 'event: revoked\ndata: {"code":"access_revoked"}\n\n'
                 return
-            yield ": keepalive\n\n"
-            await asyncio.sleep(0.5)
+            if response["generation"] != generation or visibility_state(response) != visibility:
+                continue
+            terminal = response["status"] in {"completed", "failed", "cancelled"}
+            if cursor >= response["last_event_id"] and (once or terminal):
+                yield snapshot(response)
+                return
+            if once and not terminal:
+                yield snapshot(response)
+                return
+            if not candidates:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(0.5)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

@@ -17,7 +17,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](server/requirements.txt)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)](server/app)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?style=flat-square&logo=sqlite&logoColor=white)](docs/decisions-backend-platform.md)
-[![回归](https://img.shields.io/badge/回归-345%20项通过-2ea44f?style=flat-square)](docs/后端重构统一测试结果.md)
+[![历史回归](https://img.shields.io/badge/2026--11--12%20回归-345%20项通过-2ea44f?style=flat-square)](docs/后端重构统一测试结果.md)
 [![前端](https://img.shields.io/badge/前端-原生%20ES%20模块%20·%20零构建-5b8def?style=flat-square)](#技术构成)
 
 [看效果](#看效果) · [它做什么](#它做什么) · [技术构成](#技术构成) · [验证记录](#验证记录) · [快速开始](#快速开始) · [许可与来源](#许可与来源)
@@ -26,11 +26,11 @@
 
 ---
 
-> **当前阶段：正式后端与师生前端已在本地连通并验证；正式赛事成果仍在制作。**
+> **当前阶段：正式认证、师生工作区与学生学伴 SSE／只读恢复已接通；正式赛事成果仍在制作。**
 >
-> `/api/v1` 正式后端可用。原型会先探测一次 `/health`，再决定走真实数据还是退回虚构样例，
-> 两种模式在界面上都有明确标注。真实模型、赛事数据适配与教学效果尚未完成验收。
-> 最近一次连通验证：**2026-11-13**，见[验证记录](#验证记录)。
+> `/prototype/` 对接 `/api/v1`，探测 `/health` 后明确标注真实平台或虚构原型模式。
+> 2026-11-15 最新学伴本机假网关 smoke 已通过8阶段、88次真实回环 HTTP 请求（24.469秒），Node联合回归144/144通过（572.848毫秒），冻结版本完整Python回归417/417通过（137.333秒）。
+> 浏览器已确认会话与消息分页、发送追问后刷新、窄屏输入区、带题引导、行内命名、归档恢复、返回作答及停服后发送失败时的草稿保留；真实 Terra／价格／预算联调未执行，见[验证记录](#验证记录)。
 
 ## 看效果
 
@@ -64,6 +64,7 @@ flowchart LR
 | **账号与授权** | Cookie 登录、教师申请审核、学生建号激活与密码重置；课程资料与班级学情分别授权 |
 | **资料与题目** | 私有原件保存、来源锚点、许可与可见范围确认；题目版本冻结 |
 | **学习流程** | 幂等发布、独立首诊、编辑租约（同一任务一端一写）、草稿与正式提交分离、重复请求检查 |
+| **学生学伴** | 会话创建／命名／归档恢复、作答页“问学伴”、后台回答与持久 SSE；每次连接／重连先接收当前政策下的权威快照，断线／刷新用 GET 只读恢复同一回答。暂停时可刷新、取消，费用与对账完成后才可明确确认恢复原作业。活跃任务仍为固定 `safe_guidance` |
 | **评分与复核** | 后台客观评分、成绩与答案统一开放、异议转教师复核、追加更正；保留原答原分与修订历史 |
 | **报告与导出** | 班级／个人／目标／题库四类范围；同一冻结快照导出 HTML、PDF、XLSX、JSON 与多表 CSV ZIP |
 | **持久化与恢复** | 六库独立存储；附件、schema 与 SHA256 校验，隔离恢复后重启复验 |
@@ -86,27 +87,39 @@ flowchart LR
 <tr><td><b>并发契约</b></td><td>编辑租约与 fence token、幂等键、<code>expected_version</code> 与 <code>expected_source_revision</code> 乐观并发</td></tr>
 <tr><td><b>前端</b></td><td>原生 ES 模块与手写 WebGL，<b>无框架、无构建步骤、无 CDN</b>；资源全部本地提供</td></tr>
 <tr><td><b>认证</b></td><td>Argon2 口令散列 · HttpOnly Cookie 会话 · 一次性激活码／重置码 · 同源 Origin 校验</td></tr>
+<tr><td><b>模型入口</b></td><td>独立 ModelGateway；教师 Sol/high，学生／评分／summary 使用 Terra/high。旧 LLMClient 单独保留，真实线路与教学质量待验</td></tr>
 </table>
 
 ## 验证记录
 
-测试数、HTTP 请求数和教学效果是三件不同的事，下面分开记。
+测试数、HTTP 请求数和教学效果分别记录；历史结果不替代本轮新增学伴的最终验收。
 
-| 验证层次 | 结果 | 说明 |
+| 日期／验证层次 | 结果 | 说明 |
 | :--- | :--- | :--- |
-| 完整后端回归 | **345 项通过**，0 失败 0 errors | 107.6 秒；含元数据序列化、外部关系、恶意 XML 拒绝回归 |
-| 正式服务真实 HTTP | **27 阶段通过**，399 次请求 | 实际 uvicorn、Cookie、SQLite 与后台 worker；请求数含轮询 |
-| 资料草稿更新 | 特殊字符与权限字段保留 | 越权请求与旧版本请求均被拒绝 |
-| 持续计划与恢复 | 60.7 秒后自动发布下一轮 | 六库恢复后重启，4 个账号登录、4 个任务、成绩与历史报告读取通过 |
-| **师生前端连通** | **学生端、教师端、无后端降级全部通过** | 2026-11-13；真实登录、真实任务、真实评卷结果渲染正确 |
+| 2026-11-15 最新学伴 HTTP smoke | **8阶段通过，88次真实回环 HTTP 请求，24.469秒** | 真实应用、认证、数据库、worker、SSE与恢复；注入 `FakeGateway`，无真实上游，证据 `.scratch/companion-live-final-20261115-02/evidence.json`；关闭退出码0、`reaped: true`，临时数据库和凭据均已清理 |
+| 2026-11-15 最新Node联合回归 | **144/144通过，0失败，572.848毫秒** | 学生72、传输34、教师38；使用下列四文件联合命令，含同游标队列状态通知与暂停／取消／确认恢复控件的自动化验证 |
+| 2026-11-15 冻结版本完整Python回归 | **417/417通过，137.333秒，退出码0** | 完整回归入口 `server/tests/run_tests.py`；覆盖取消终态 `cancelled`、费用／对账保留及服务端确认恢复门禁。恢复门禁 worker＋queue 专项51/51通过，15.026秒 |
+| 本轮学伴浏览器主流程 | **所列场景已通过** | 官方浏览器已确认103会话分页、110条历史消息分页、新建发送与追问后刷新同会话；390×844输入区位于底栏上方约11px，带题可编辑草稿及固定 `safe_guidance`、可访问行内命名（替换 `prompt`）、归档恢复通过；返回作答在390×844与1366×900均保留B选中及1/1进度，桌面三栏正常；桌面中文输入、Tab聚焦发送／Enter发出后两轮安全引导终态及输入框清空通过 |
+| 本轮浏览器服务停止场景 | **新发送失败提示、草稿保留及重试入口已确认** | 停服后显示“连不上服务，请确认后端已启动”，保留中文草稿，提示发送结果未确认并提供重试原请求入口；未重启验证恢复，也不等于生成过程中断线重连的 GUI 测试 |
+| 本轮真实 Terra／价格／预算联调 | **未执行** | 尚无已确认单价、币种及总调用额度，不能据夹具推断真实线路、账单或模型质量 |
+| 2026-11-12 历史完整后端回归 | **345项通过**，0失败、0errors | 107.6秒；含元数据、外部关系、恶意XML拒绝回归 |
+| 2026-11-12 历史正式服务 HTTP | **27阶段通过，399次请求** | 资料、评分、报告、60.7秒持续计划及六库恢复后重启；合成客观题、无模型调用，请求数含轮询 |
+| 2026-11-13 历史师生前端连通 | **学生端、教师端、无后端降级通过** | 真实登录、任务及客观评卷结果；不代表本轮新学伴浏览器验收 |
 
-最近一次连通验证的实测输出：学生登录后看到“教师发布 · 2 题”与首次成绩 **3 / 5**；
-教师工作台显示“七（1）班”、2 名学生、得分比例 **60% / 100%**，展开依据显示
-“本轮 2 条评分记录，来自 1 次作答，得分 3/5”。这些数字来自临时种出的演示世界，
-**不是真实学生数据**。
+2026-11-13 历史连通实测中，学生看到“教师发布 · 2题”及首次成绩 **3 / 5**；
+教师工作台显示“七（1）班”、2名学生、得分比例 **60% / 100%**，依据来自同一轮真实保存的合成作答。
+这些数字来自临时演示世界，**不是真实学生数据**。2026-11-10 Sol/high HTTP200仅为更早的最小连接记录。
 
-HTTP 验证预置五道合成已审核客观题，未调用真实模型。完整命令、失败修正记录与未覆盖路径见
-[验证结果](docs/后端重构统一测试结果.md)。
+学伴 SSE 每次获准连接／重连的第一帧都是按当前授权和答案政策投影的权威 `snapshot`；文本、代次和事件游标在同一读取事务中取得，客户端替换旧前缀后再接收后续片段。即使事件游标不变，队列状态、取消请求、待对账及待结算标记变化仍可通过快照通知。`reconciling`／`awaiting_confirmation` 显示暂停原因和“刷新状态”“取消本次回答”；费用未结清或调用结果仍待对账时，前后端均阻止恢复；允许时按钮明确为“确认恢复（可能产生费用）”，只恢复原作业／回答，不另发消息。取消回答的终态是 `cancelled`，已发生或待对账费用保留，费用未知时队列仍可保留 `reconciling`；取消不等于免除费用。这些新增控件仅有自动化验证，未追加 GUI 验收。
+
+本轮返回作答会重新读取服务端权威任务并获取编辑租约；未修改的本地缓存不再遮蔽服务端草稿，已有自动回归和上述390×844／1366×900 GUI 复验，前轮另有1440×900桌面证据。`node --check` 与 `git diff --check` 此前已通过。当前浏览器运行时不支持减少动态、真实手机软键盘／IME组合输入与控制台监听，未做实际移动设备测试；窄屏和中文文本输入通过不等于实机或输入法组合验证。
+
+旧 GUI 夹具 `.scratch/companion-live-browser-20261115-01` 被编排中断；确认进程与监听已不存在后，仅手动清理其隔离凭据与运行目录，元数据记录 `stopped_after_orchestrator_interruption`，不能记为正常关闭。新夹具 `.scratch/companion-live-browser-final-20261115-01` 已正常停止，`evidence.json` 记录 `status: stopped`、退出码0、`reaped: true` 和临时数据已删除，`service-info.json` 确认凭据已删除；本轮补验报告为该目录 `gui-report.md`，附 `screenshots/` 八张截图。分页、命名及归档恢复等沿用前轮已确认结果，未在补验重复执行。serve 的 `http_requests: 0` 不统计浏览器请求，不能充当独立 HTTP smoke 或 GUI 通过计数。
+
+GUI 报告中的 Python411/411（127.234秒）、Node139/139（577.147毫秒）和旧冻结 smoke 91次／21.594秒是当时的历史记录，不是本轮最终计数；此前专项73/73（61.240秒）及独立 serve 生命周期正常启停也单列为旧证据。最新自动化状态以本节为准；GUI 报告保留当时计数，并已补充最终自动化结果及后续控件未做 GUI 复验的说明。
+
+历史平台验证的完整命令、失败修正记录与当时未覆盖路径见[验证结果](docs/后端重构统一测试结果.md)；
+当前模型和费用边界见[模型接入约定](docs/模型分工与接入约定.md)。
 
 ## 快速开始
 
@@ -155,46 +168,63 @@ Pop-Location
 | 入口 | 说明 |
 | :--- | :--- |
 | [服务状态](http://127.0.0.1:8000/) | 正式模式返回 JSON 与 `/api/v1` 入口提示 |
-| [可点击原型](http://127.0.0.1:8000/prototype/) | 玻璃开场、教师工作台、学生手机流程；自动探测后端 |
+| [师生工作区](http://127.0.0.1:8000/prototype/) | 玻璃开场、真实登录、教师工作台、学生任务与学伴；自动探测后端并标注模式 |
 | [健康检查](http://127.0.0.1:8000/health) | 返回 `mode: platform` 与 worker 状态 |
 
 正式写请求需要同源 `Origin`，认证走 Cookie。关闭终端前按 `Ctrl+C` 停止服务。
 </details>
 
 <details>
-<summary><b>④ 自己造一个演示世界，验证前后端确实连通</b></summary>
+<summary><b>④ 启动无上游的学伴 GUI 夹具</b></summary>
 
 ```powershell
-# 种演示世界 → 起服务 → 师生两轮浏览器验证 → 关服务 → 无后端降级验证
-.\server\.venv\Scripts\python.exe -I -B -X utf8 server/tests/verify_prototype_live.py
+.\server\.venv\Scripts\python.exe -I -B -X utf8 server/tests/verify_companion_live.py --serve --stream-seconds 8 --output-dir .scratch/companion-gui-NEW
 ```
 
-需要 Node 与 `.scratch/proto-test` 里安装好的 `puppeteer-core`。演示世界的口令只写入
-临时目录并在结束时清理，**不会进入仓库**。
+输出必须是 `.scratch/` 下不存在且被 Git 忽略的新目录。读取该目录 `service-info.json` 的实际 origin，
+访问其 `/prototype/`；`free/guided/diagnostic` 本机生成账号分别覆盖自由对话、任务固定引导和独立首诊，
+凭据位置也由元数据提供，不输出或提交口令。
+
+夹具使用真实应用／认证／worker，启动前注入确定性 `FakeGateway`，隔离 `.env` 和模型／MaxKB 配置，
+**不访问真实上游**。正常停止后清理临时六库与本地凭据；按 Ctrl+C 或元数据中的停止文件结束。
+默认 smoke 可另行执行，不带 `--serve`：
+
+```powershell
+.\server\.venv\Scripts\python.exe -I -B -X utf8 server/tests/verify_companion_live.py
+```
 </details>
 
 <details>
 <summary><b>⑤ 复现完整回归</b></summary>
 
+激活项目虚拟环境后运行；根目录没有 `package.json`，Node 测试直接使用内置运行器：
+
 ```powershell
-.\server\.venv\Scripts\python.exe -I -B server/tests/run_tests.py
-.\server\.venv\Scripts\python.exe -I -B server/tests/run_platform_flow.py
+.\server\.venv\Scripts\Activate.ps1
+python -I -B -X utf8 server/tests/run_tests.py
+node --test server/tests/frontend-regression.cjs server/tests/companion-api-regression.cjs server/tests/teacher-library-regression.cjs server/tests/teacher-planning-regression.cjs
+.\server\.venv\Scripts\python.exe -I -B -X utf8 server/tests/run_platform_flow.py
 ```
 
-真实 HTTP 脚本自行选择本机端口，用新临时数据库，结束后清理并输出脱敏 `evidence.json` 位置。
-脚本显式禁用模型与 MaxKB 上游。
+真实 HTTP 脚本自行选择本机端口，使用新临时数据库，结束后清理并输出脱敏 `evidence.json` 位置，
+显式禁用模型与 MaxKB 上游。上述Node联合命令已通过144/144（学生72、传输34、教师38；0失败，572.848毫秒）；冻结版本完整Python回归417/417通过（137.333秒，退出码0），恢复门禁worker＋queue专项51/51通过（15.026秒）。
 </details>
 
 ## 当前边界
 
 | 待完成 | 对使用的影响 |
 | :--- | :--- |
-| 真实模型、MaxKB、SSE 与账单 | 已有适配与协议测试；真实线路、出题／审题／主观评分质量及成本未验收 |
+| 真实模型、MaxKB 与供应商账单 | `ModelGateway` 支持教师Sol/high、学生／评分／summary Terra/high；真实Terra及价格／预算联调因单价、币种和总额度未确认而未执行，模型质量与实际账单未验收 |
+| 学伴 SSE 与恢复验收 | 权威首帧快照和同一回答的 GET 只读恢复已有本机假网关 smoke／回归证据；新增暂停／取消／明确付费确认恢复控件仅自动化验证。浏览器已验证上述主流程和停服后新发送失败，未测这些新控件、重启恢复或生成中断线重连；真实供应商流式、减少动态、真实软键盘／IME组合及移动实机体验仍缺证据 |
+| R29 与完整阶段 E | 活跃任务仍固定 `safe_guidance`，全局和任务门禁同时生效；逐步解题提示、课程检索及记忆增强未完成 |
 | 正式赛事数据与成果 | 三项任务结果、三名代表学生、两班比较仍需基于获准资料完成 |
-| 语音、扫描资料与开放式辅导 | ASR 当前明确返回 503；扫描资料需人工核对 |
+| 语音与扫描资料 | ASR 当前明确返回 503；扫描资料需人工核对 |
 | 真实教学效果与规则校准 | 无提分率或长期效果结论；默认掌握度参数未经实证校准 |
 
-工作台与学生端的视觉尚未与入口统一，R90 键位动效与死代码清理仍在待办。
+付费调用须有版本化、明确币种的每百万token整数价格与适用额度；缺价格／预算或币种不匹配时阻断。
+任务范围由服务端冻结，自由聊天使用个人全局日额及 `project/platform`，未知usage保留待对账；
+`site-credit` 不保证法币兑换或供应商现金收费上限。凭据经环境变量／密钥服务注入并由 `api_key_env` 引用，
+本机 `.env` 只保存非敏感配置，凭据不提交。上述 GUI 结果仅覆盖本机假网关场景及所列视口，不代表真实模型、完整阶段 E 或全部设备体验验收。
 
 安全检查的剩余告警与覆盖限制详见验证记录。**本项目不宣称已完成全面安全审计。**
 
@@ -238,7 +268,7 @@ Required Notice: Copyright (c) 2026 KROZ-coding (https://github.com/KROZ-coding/
 | [制作方向与历史故事板](docs/制作方向/README.md) | 三任务证据、代表案例、班级比较与展示组织 |
 | [模型分工与接入约定](docs/模型分工与接入约定.md) | 师生模型分工、参数与接入规则 |
 | [前端参考与设计调研](docs/前端参考与设计技能调研.md) | 界面与设计依据 |
-| [本地部署与承接说明](docs/本地部署与承接说明.md) | 代码来源与历史基线 |
+| [本地部署与承接说明](docs/本地部署与承接说明.md) | 正式启动、学伴 GUI 夹具、代码来源与旧样例边界 |
 
 <details>
 <summary><b>仓库结构</b></summary>

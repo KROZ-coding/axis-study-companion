@@ -75,6 +75,8 @@ class LearningDouble:
 
     def __init__(self):
         self.allowed = True
+        self.task_allowed = None
+        self.scope = None
         self.versions = {}
         self.grading = None
         self.applied = []
@@ -82,7 +84,17 @@ class LearningDouble:
         self.manual = []
 
     def get_answer_policy(self, user_id, *, task_id=None, question_version_id=None):
-        return {"allow_generation": self.allowed, "allow_assistant_content": self.allowed, "attempted": True}
+        allowed = self.task_allowed if task_id and self.task_allowed is not None else self.allowed
+        return {"allow_generation": allowed, "allow_assistant_content": allowed, "attempted": True}
+
+    def get_task_scope(self, task_id, actor_id):
+        if self.scope is None or task_id != self.scope["task_id"] or actor_id != self.scope["student_id"]:
+            raise LookupError("task scope unavailable")
+        return deepcopy(self.scope)
+
+    def get_task(self, task_id, actor_id):
+        self.get_task_scope(task_id, actor_id)
+        return {"id": task_id, "questions": [{"id": "fixture-question", "version": 1}]}
 
     def list_grading_outbox(self, *, limit=100):
         return []
@@ -136,6 +148,7 @@ class WorkerTests(unittest.TestCase):
         self.ledger = BudgetLedger(self.queue)
         self.ledger.assign("teaching", "default", 1_000_000)
         self.ledger.assign("project", "default", 1_000_000)
+        self.ledger.assign("project", "platform", 1_000_000)
         self.companion = CompanionStore(self.root / "companion.sqlite3")
         self.content = ContentStore(self.root / "content.sqlite3")
         self.platform = PlatformStore(self.root / "platform.sqlite3")
@@ -152,15 +165,22 @@ class WorkerTests(unittest.TestCase):
         self.classroom = self.platform.create_class(self.course["id"], "Fixture section", owner_teacher_id=self.teacher["id"])
         self.platform.create_course_membership(self.course["id"], self.student["id"])
         self.platform.create_class_membership(self.classroom["id"], self.student["id"])
+        self.ledger.assign("student_daily", self.student["id"], 1_000_000)
         self.sequence = 0
 
     def key(self, prefix="fixture"):
         self.sequence += 1
         return f"{prefix}-{self.sequence}"
 
-    def posted_job(self, *, wallet=False):
+    def posted_job(self, *, wallet=False, task=False):
         conversation = self.companion.create_conversation(self.student["id"], "Study", course_id=self.course["id"], request_id=self.key("conversation"))
-        posted = self.companion.post_message(conversation["id"], self.student["id"], "How can I understand one half?", request_id=self.key("message"))
+        if task:
+            self.learning.scope = {"task_id": "fixture-task", "student_id": self.student["id"],
+                                   "course_id": self.course["id"], "class_id": self.classroom["id"]}
+        posted = self.companion.post_message(
+            conversation["id"], self.student["id"], "How can I understand one half?", request_id=self.key("message"),
+            task_id="fixture-task" if task else None, question_version_id="fixture-question:1" if task else None,
+        )
         payload = {"purpose": "student", "resource_type": "response", "resource_id": posted["response_id"], "user_id": self.student["id"]}
         options = {}
         if wallet:
@@ -231,6 +251,189 @@ class WorkerTests(unittest.TestCase):
         return {"type": "single_choice", "stem": "What is two plus three?", "options": ["Four", "Five"],
                 "answer": 1, "explanation": "Add the two numbers.", "points": 1, "rubric": [], "source_refs": ["B1"]}
 
+    def test_legacy_already_enqueued_task_resolves_class_scope_before_paid_call(self):
+        posted = self.posted_job(task=True)
+        self.ledger.assign("student_daily", self.student["id"], 0,
+                           course_id=self.course["id"], class_id=self.classroom["id"])
+        self.run_worker()
+        job = self.queue.get_job(posted["job_id"])
+        self.assertEqual(job.status, "failed")
+        self.assertEqual((job.student_id, job.course_id, job.class_id, job.project_id),
+                         (self.student["id"], self.course["id"], self.classroom["id"], "platform"))
+        self.assertEqual(job.payload["task_id"], "fixture-task")
+        self.assertTrue(job.payload["budget_scope_frozen"])
+        self.assertEqual(self.gateway.calls, [])
+        self.assertEqual(self.queue.list_calls(job.job_id), ())
+        with self.companion.connect() as db:
+            payload = json.loads(db.execute("SELECT payload_json FROM response_outbox WHERE response_id=?",
+                                            (posted["response_id"],)).fetchone()[0])
+        self.assertEqual(payload["class_id"], self.classroom["id"])
+        self.assertEqual(payload["project_id"], "platform")
+        self.assertTrue(payload["budget_scope_frozen"])
+        self.assert_response_ended(posted["response_id"])
+
+    def test_free_chat_uses_personal_daily_and_platform_project_even_in_course_conversation(self):
+        self.ledger.assign("student_daily", self.student["id"], 0,
+                           course_id=self.course["id"], class_id=self.classroom["id"])
+        posted = self.posted_job()
+        self.run_worker()
+        job = self.queue.get_job(posted["job_id"])
+        self.assertEqual(job.status, "succeeded")
+        self.assertEqual((job.student_id, job.course_id, job.class_id, job.project_id),
+                         (self.student["id"], None, None, "platform"))
+        self.assertEqual(job.budget_spent, 12)
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual(self.ledger.query("student_daily", self.student["id"], period=self.queue.list_calls(job.job_id)[0].budget_day).spent_units, 12)
+        self.assertEqual(self.ledger.query("project", "platform").spent_units, 12)
+        self.assertEqual(self.ledger.query("student_daily", self.student["id"],
+                                         course_id=self.course["id"], class_id=self.classroom["id"]).spent_units, 0)
+
+    def test_global_active_task_blocks_scoped_generation_and_safe_guidance_is_free(self):
+        posted = self.posted_job(task=True)
+        self.learning.allowed = False
+        self.learning.task_allowed = True
+        self.settings.llm_prices_json = ""
+        self.runtime.gateway = ModelGateway(SimpleNamespace(llm_providers=()))
+        self.run_worker()
+        response = self.assert_response_ended(posted["response_id"])
+        self.assertEqual(response["status"], "completed")
+        self.assertEqual(response["guidance_key"], "await_results")
+        self.assertEqual(response["content_type"], "safe_guidance")
+        self.assertEqual(self.queue.list_calls(posted["job_id"]), ())
+        self.assertEqual(self.queue.get_job(posted["job_id"]).budget_spent, 0)
+        self.assertEqual(self.gateway.calls, [])
+
+    def test_project_budget_currency_mismatch_and_revoked_class_block_provider(self):
+        for blocked in ("project", "currency", "class"):
+            with self.subTest(blocked=blocked):
+                posted = self.posted_job(task=True)
+                self.ledger.assign("project", "platform", 0 if blocked == "project" else 1_000_000)
+                self.settings.budget_currency = "other-unit" if blocked == "currency" else "fixture-unit"
+                if blocked == "class":
+                    self.platform.delete_class_membership(self.classroom["id"], self.student["id"])
+                self.run_worker()
+                self.assertEqual(self.queue.get_job(posted["job_id"]).status, "failed")
+                self.assertEqual(self.queue.list_calls(posted["job_id"]), ())
+        self.assertEqual(self.gateway.calls, [])
+
+    def test_unknown_outcome_reconciled_success_recovers_response_without_second_send(self):
+        posted = self.posted_job()
+        async def unknown(*args, **options):
+            options["on_delta"]("partial")
+            raise GatewayError("disconnected", request_sent=True, unknown_outcome=True)
+        self.gateway.handler = unknown
+        self.run_worker()
+        job = self.queue.get_job(posted["job_id"])
+        call, = self.queue.list_calls(job.job_id)
+        self.assertEqual(job.status, "reconciling")
+        self.assertTrue(call.cost_pending)
+        response = self.companion.get_response(posted["response_id"])
+        self.assertEqual(response["status"], "streaming")
+        self.assertFalse(any(event["event_type"] == "end" for event in self.companion.list_response_events(posted["response_id"])))
+        from app.services.companion_access import response_access
+        public = response_access(self.runtime, self.student["id"], posted["response_id"])
+        self.assertEqual(public["job"], {"status": "reconciling", "cancel_requested": False,
+                                         "reconciliation_required": True, "cost_pending": True})
+        self.queue.reconcile_call(job.job_id, call.call_id, "succeeded",
+                                  result=asdict(FakeGateway.result(text="verified final answer")),
+                                  usage=USAGE, cost_units=12, cost_pending=False)
+        self.assertEqual(self.queue.get_job(job.job_id).status, "awaiting_confirmation")
+        public = response_access(self.runtime, self.student["id"], posted["response_id"])
+        self.assertEqual(public["job"], {"status": "awaiting_confirmation", "cancel_requested": False,
+                                         "reconciliation_required": False, "cost_pending": False})
+        self.queue.confirm_recovery(job.job_id, approved=True)
+        self.runtime.gateway = ModelGateway(SimpleNamespace(llm_providers=()))
+        self.settings.llm_prices_json = ""
+        self.run_worker()
+        recovered = self.assert_response_ended(posted["response_id"])
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(recovered["text"], "verified final answer")
+        self.assertGreater(recovered["generation"], response["generation"])
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual(len(self.queue.list_calls(job.job_id)), 1)
+        self.assertEqual(self.queue.get_job(job.job_id).status, "succeeded")
+
+    def test_student_resume_waits_for_settlement_without_changing_response_or_budget(self):
+        from app.models import User
+        from app.routers.v1_jobs import resume_job, ResumeRequest
+        from app.services.companion_access import response_access
+        from fastapi import HTTPException
+
+        posted = self.posted_job(wallet=True)
+        async def unknown(*args, **options):
+            options["on_delta"]("partial")
+            raise GatewayError("disconnected", request_sent=True, unknown_outcome=True)
+        self.gateway.handler = unknown
+        self.run_worker()
+        call, = self.queue.list_calls(posted["job_id"])
+        self.queue.reconcile_call(posted["job_id"], call.call_id, "failed")
+        paused = self.queue.get_job(posted["job_id"])
+        self.assertEqual(paused.status, "awaiting_confirmation")
+        self.assertTrue(paused.cost_pending)
+        self.assertFalse(paused.reconciliation_required)
+        response = response_access(self.runtime, self.student["id"], posted["response_id"])
+        events = self.companion.list_response_events(posted["response_id"])
+        calls = self.queue.list_calls(posted["job_id"])
+        wallet = self.queue.budget("fixture-wallet")
+        budget = self.ledger.query("project", "platform")
+        actor = User(id=self.student["id"], username=self.student["username"],
+                     display_name=self.student["display_name"], password_hash=self.student["password_hash"], role="student")
+        with patch("app.routers.v1_jobs.get_runtime", return_value=self.runtime):
+            with self.assertRaises(HTTPException) as denied:
+                resume_job(posted["job_id"], ResumeRequest(confirm_paid=True), None, actor)
+            self.assertEqual(denied.exception.status_code, 409)
+            self.assertEqual(denied.exception.detail["code"], "job_needs_attention")
+            self.assertFalse(self.worker.run_once(dispatch=False))
+            self.assertEqual(self.queue.get_job(posted["job_id"]), paused)
+            self.assertEqual(response_access(self.runtime, self.student["id"], posted["response_id"]), response)
+            self.assertEqual(self.companion.list_response_events(posted["response_id"]), events)
+            self.assertEqual(self.queue.list_calls(posted["job_id"]), calls)
+            self.assertEqual(self.queue.budget("fixture-wallet"), wallet)
+            self.assertEqual(self.ledger.query("project", "platform"), budget)
+            self.assertEqual(len(self.gateway.calls), 1)
+
+            self.assertTrue(self.queue.settle_call_cost(call.call_id, 12, usage=USAGE))
+            self.assertFalse(self.queue.get_job(posted["job_id"]).cost_pending)
+            resumed = resume_job(posted["job_id"], ResumeRequest(confirm_paid=True), None, actor)
+            self.assertEqual((resumed["job_id"], resumed["status"]), (posted["job_id"], "queued"))
+        self.gateway.handler = None
+        self.run_worker()
+        recovered = self.assert_response_ended(posted["response_id"])
+        self.assertEqual((recovered["status"], recovered["text"]), ("completed", "complete answer"))
+        self.assertGreater(recovered["generation"], response["generation"])
+        self.assertEqual(len(self.gateway.calls), 2)
+        self.assertEqual(len(self.queue.list_calls(posted["job_id"])), 2)
+        self.assertEqual(self.queue.call_costs(posted["job_id"])[call.call_id], 12)
+        self.assertEqual(self.queue.get_job(posted["job_id"]).budget_spent, 24)
+        self.assertEqual(self.queue.budget("fixture-wallet").reserved_units, 0)
+
+    def test_student_can_cancel_unknown_response_without_erasing_pending_cost(self):
+        from app.models import User
+        from app.routers.v1_jobs import cancel_job, resume_job, ResumeRequest
+        from app.services.companion_access import response_access
+        from fastapi import HTTPException
+
+        posted = self.posted_job()
+        async def unknown(*args, **options):
+            options["on_delta"]("partial")
+            raise GatewayError("disconnected", request_sent=True, unknown_outcome=True)
+        self.gateway.handler = unknown
+        self.run_worker()
+        actor = User(id=self.student["id"], username=self.student["username"],
+                     display_name=self.student["display_name"], password_hash=self.student["password_hash"], role="student")
+        with patch("app.routers.v1_jobs.get_runtime", return_value=self.runtime):
+            cancelled = cancel_job(posted["job_id"], None, actor)
+            self.assertTrue(cancelled["cancel_requested"])
+            with self.assertRaises(HTTPException) as denied:
+                resume_job(posted["job_id"], ResumeRequest(confirm_paid=True), None, actor)
+            self.assertEqual(denied.exception.status_code, 409)
+        public = response_access(self.runtime, self.student["id"], posted["response_id"])
+        self.assertEqual(public["status"], "cancelled")
+        self.assertEqual(public["text"], "")
+        self.assertTrue(public["job"]["cost_pending"])
+        self.assertTrue(public["job"]["reconciliation_required"])
+        self.assertEqual(len(self.gateway.calls), 1)
+
     def test_unsent_gateway_error_settles_zero_releases_wallet_and_ends_response(self):
         posted = self.posted_job(wallet=True)
 
@@ -300,7 +503,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(job.status, "reconciling")
         self.assertTrue(job.cancel_requested)
         self.assertTrue(job.reconciliation_required)
-        self.assertEqual(self.assert_response_ended(posted["response_id"])["status"], "failed")
+        self.assertEqual(self.assert_response_ended(posted["response_id"])["status"], "cancelled")
         self.queue.reconcile_call(job.job_id, call.call_id, "failed", usage=USAGE, cost_units=12, cost_pending=False)
         self.assertEqual(self.queue.get_job(job.job_id).status, "cancelled")
         self.assertEqual(self.queue.budget("fixture-wallet").reserved_units, 0)
@@ -333,7 +536,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual((call.status, call.usage, call.cost_units), ("unknown", USAGE, 12))
         self.assertEqual(reopened.get_job(posted["job_id"]).status, "reconciling")
         self.assertIsNone(call.result)
-        self.assert_response_ended(posted["response_id"])
+        self.assertEqual(self.companion.get_response(posted["response_id"])["status"], "streaming")
+        self.assertFalse(any(event["event_type"] == "end" for event in self.companion.list_response_events(posted["response_id"])))
 
     def test_operation_returns_after_heartbeat_loss_only_usage_is_recorded(self):
         posted = self.posted_job()
@@ -425,7 +629,7 @@ class WorkerTests(unittest.TestCase):
         job = self.queue.cancel(posted["job_id"])
         finalize_domain_job(self.runtime, job, "cancelled")
         finalize_domain_job(self.runtime, job, "cancelled")
-        self.assertEqual(self.assert_response_ended(posted["response_id"])["status"], "failed")
+        self.assertEqual(self.assert_response_ended(posted["response_id"])["status"], "cancelled")
         self.assertEqual(len([event for event in self.companion.list_response_events(posted["response_id"]) if event["event_type"] == "end"]), 1)
         resource, queued = self.make_content_job()
         job = self.queue.cancel(queued.job_id)

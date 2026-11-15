@@ -44,7 +44,7 @@ function toApiError(status, payload) {
   return new ApiError(status, "error", "请求未完成", status >= 500);
 }
 
-async function request(method, path, { body, expect = 200, extraHeaders = {} } = {}) {
+async function request(method, path, { body, expect = 200, extraHeaders = {}, signal } = {}) {
   // 调用方一律传 /auth/login 这样的相对路径，统一补上 /api/v1。
   // 已经带前缀的（比如导出链接）原样使用。
   const url = path.startsWith("/api/") ? path : `${API_BASE}${path}`;
@@ -52,6 +52,7 @@ async function request(method, path, { body, expect = 200, extraHeaders = {} } =
     method,
     credentials: "same-origin",
     headers: { ...originHeaders(), ...extraHeaders },
+    ...(signal ? { signal } : {}),
   };
   if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
@@ -61,6 +62,7 @@ async function request(method, path, { body, expect = 200, extraHeaders = {} } =
   try {
     response = await fetch(url, options);
   } catch (error) {
+    if (signal?.aborted || error?.name === "AbortError") throw error;
     throw new ApiError(0, "network_unavailable", "连不上服务，请确认后端已启动", true);
   }
   const text = await response.text();
@@ -199,9 +201,307 @@ async function myTasks(goalId) {
 
 const task = (taskId) => get(`/tasks/${encodeURIComponent(taskId)}`);
 const courses = () => get("/courses").then((data) => Array.isArray(data) ? data : data.items || []);
-const conversations = () => get("/companion/conversations").then((data) => Array.isArray(data) ? data : data.items || []);
-const conversationMessages = (id) => get(`/companion/conversations/${encodeURIComponent(id)}/messages`)
-  .then((data) => Array.isArray(data) ? data : data.items || []);
+const conversations = ({ archived = false, limit = 100, offset = 0, signal } = {}) => {
+  const query = new URLSearchParams({ archived: String(archived), limit: String(limit), offset: String(offset) });
+  return get(`/companion/conversations?${query}`, { signal }).then((data) => Array.isArray(data) ? data : data.items || []);
+};
+const getConversation = (id, { signal } = {}) => get(`/companion/conversations/${encodeURIComponent(id)}`, { signal });
+const conversationMessages = (id, { after, before, latest = false, limit = 100, signal } = {}) => {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (after) query.set("after", after);
+  if (before) query.set("before", before);
+  if (latest) query.set("latest", "true");
+  return get(`/companion/conversations/${encodeURIComponent(id)}/messages?${query}`, { signal })
+    .then((data) => Array.isArray(data) ? data : data.items || []);
+};
+const createConversation = (title, requestId, courseId) => post("/companion/conversations", {
+  title, request_id: requestId, ...(courseId ? { course_id: courseId } : {}),
+}, { expect: 201 });
+const renameConversation = (id, title) => call("PATCH", `/companion/conversations/${encodeURIComponent(id)}`, { title });
+const archiveConversation = (id) => post(`/companion/conversations/${encodeURIComponent(id)}/archive`, undefined);
+const restoreConversation = (id) => post(`/companion/conversations/${encodeURIComponent(id)}/restore`, undefined);
+// Serialize the caller's request ID and input immediately. Recovery only reads the
+// returned response ID; it never repeats this POST or creates a replacement key.
+const postMessage = (conversationId, text, { taskId, questionVersionId, requestId } = {}) => post(
+  `/companion/conversations/${encodeURIComponent(conversationId)}/messages`,
+  { text, request_id: requestId, ...(taskId ? { task_id: taskId } : {}),
+    ...(questionVersionId ? { question_version_id: questionVersionId } : {}) },
+  { expect: 202 },
+);
+const getResponse = (responseId, { signal } = {}) => get(`/companion/responses/${encodeURIComponent(responseId)}`, { signal });
+const cancelCompanionJob = (jobId) => post(`/jobs/${encodeURIComponent(jobId)}/cancel`, undefined);
+const resumeCompanionJob = (jobId) => post(`/jobs/${encodeURIComponent(jobId)}/resume`, { confirm_paid: true });
+const responseEvents = (responseId, after = 0, { signal } = {}) => get(
+  `/companion/responses/${encodeURIComponent(responseId)}/events?after=${encodeURIComponent(after)}&limit=1000`, { signal },
+);
+const companionAnswerPolicy = ({ taskId, questionVersionId, signal } = {}) => {
+  const query = new URLSearchParams();
+  if (taskId) query.set("task_id", taskId);
+  if (questionVersionId) query.set("question_version_id", questionVersionId);
+  return get(`/companion/answer-policy${query.size ? `?${query}` : ""}`, { signal });
+};
+
+/**
+ * Named event handlers receive (data, { id, generation }); snapshots replace the
+ * whole text and their id is the backend's atomic last_event_id, never the last
+ * page we happened to read. onClosed(meta) runs once after all final callbacks.
+ * The returned close() cancels reads/timers and prevents subsequent callbacks.
+ */
+function openResponseStream(responseId, handlers = {}, { after = 0, generation = null, text = "" } = {}) {
+  const eventId = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number >= 0 ? number : null;
+  };
+  const generationId = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
+  const controller = typeof globalThis.AbortController === "function" ? new globalThis.AbortController() : null;
+  const readOptions = controller ? { signal: controller.signal } : {};
+  let active = true, source = null, timer = null, failures = 0;
+  let cursor = eventId(after) ?? 0;
+  let lastGeneration = generationId(generation);
+  let lastText = typeof text === "string" ? text : "";
+  let lastRedacted = false, snapshotKey = "", snapshotInitialized = false, polling = false, terminalEvent = null;
+
+  const meta = () => ({ id: cursor, generation: lastGeneration });
+  const emit = (type, data) => {
+    if (active && typeof handlers[type] === "function") handlers[type](data, meta());
+  };
+  const stopSource = () => {
+    if (!source) return;
+    source.onerror = null;
+    source.close();
+    source = null;
+  };
+  const close = (reason = "closed") => {
+    if (!active) return;
+    active = false;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    stopSource();
+    controller?.abort();
+    handlers.onClosed?.({ ...meta(), response_id: responseId, reason });
+  };
+  const revoked = (data = {}) => {
+    if (!active) return;
+    lastText = "";
+    lastRedacted = true;
+    try { emit("revoked", { ...data, response_id: responseId, text: "", redacted: true }); }
+    finally { close("revoked"); }
+  };
+  const resetGeneration = (nextGeneration, id = cursor) => {
+    lastGeneration = nextGeneration;
+    lastText = "";
+    lastRedacted = false;
+    cursor = id;
+    snapshotKey = "";
+    terminalEvent = null;
+    emit("reset", { response_id: responseId, generation: nextGeneration, text: "", status: "streaming" });
+  };
+  const invalidSnapshot = () => new ApiError(0, "invalid_response_snapshot", "回答状态暂时未能同步，正在重试", true);
+
+  const applySnapshot = (response, frameId = null) => {
+    if (!active) return false;
+    if (!response || typeof response !== "object" || Array.isArray(response)
+        || response.response_id && response.response_id !== responseId) throw invalidSnapshot();
+    const nextGeneration = generationId(response.generation);
+    // A snapshot must carry the cursor read with its text. EventSource supplies
+    // it in id as well; JSON polling must never invent one from an events page.
+    const id = eventId(response.last_event_id) ?? eventId(frameId);
+    if (nextGeneration === null || id === null || typeof response.text !== "string") throw invalidSnapshot();
+    if (snapshotInitialized && lastGeneration !== null && nextGeneration < lastGeneration) return false;
+    if (snapshotInitialized && lastGeneration === nextGeneration && id < cursor) return false;
+    snapshotInitialized = true;
+    const mustReset = lastGeneration !== nextGeneration && (lastGeneration !== null || lastText !== "" || cursor > 0);
+    if (mustReset) resetGeneration(nextGeneration, id);
+    else lastGeneration = nextGeneration;
+    if (!active) return false;
+    cursor = id;
+    lastRedacted = Boolean(response.redacted);
+    lastText = lastRedacted || ["failed", "cancelled"].includes(response.status) ? "" : response.text;
+    const snapshot = { ...response, response_id: responseId, generation: lastGeneration, last_event_id: cursor, text: lastText };
+    if (Object.prototype.hasOwnProperty.call(snapshot, "content")) snapshot.content = lastText;
+    const key = JSON.stringify([cursor, lastGeneration, snapshot.status, lastText, lastRedacted,
+      snapshot.notice, snapshot.error, snapshot.message_id, snapshot.assistant_message_id, snapshot.content_type,
+      snapshot.job?.status, snapshot.job?.cancel_requested, snapshot.job?.reconciliation_required, snapshot.job?.cost_pending]);
+    if (key !== snapshotKey) {
+      snapshotKey = key;
+      emit("snapshot", snapshot);
+    }
+    if (!active) return true;
+    if (terminal(snapshot.status)) {
+      // Give consumers authoritative text before end: an end handler may close
+      // immediately, and failed/cancelled responses must not retain a prefix.
+      if (terminalEvent && terminalEvent.generation === lastGeneration) {
+        emit("end", { ...terminalEvent.data, ...snapshot });
+      }
+      close("terminal");
+    }
+    return true;
+  };
+
+  const applyEvent = (type, raw, rawId) => {
+    if (!active) return;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)
+        || raw.response_id && raw.response_id !== responseId) throw invalidSnapshot();
+    if (type === "revoked") { revoked(raw); return; }
+    if (type === "snapshot") { applySnapshot(raw, rawId); return; }
+    const id = eventId(rawId), nextGeneration = generationId(raw.generation);
+    if (id === null || id === 0 || nextGeneration === null) throw invalidSnapshot();
+    if (lastGeneration !== null && nextGeneration < lastGeneration) return;
+    if (id <= cursor) return;
+    const changed = nextGeneration !== lastGeneration;
+    if (changed) {
+      const mustReset = lastGeneration !== null || lastText !== "" || cursor > 0;
+      lastGeneration = nextGeneration;
+      if (mustReset && type !== "reset") resetGeneration(nextGeneration);
+      else if (mustReset || type === "reset") {
+        lastText = "";
+        lastRedacted = false;
+        snapshotKey = "";
+        terminalEvent = null;
+      }
+    }
+    if (!active) return;
+    cursor = id;
+    const data = { ...raw, response_id: responseId, generation: lastGeneration };
+    if (type === "reset") {
+      lastText = "";
+      lastRedacted = false;
+      snapshotKey = "";
+      terminalEvent = null;
+      emit(type, { ...data, text: "" });
+    } else if (type === "delta") {
+      // A policy-redacted prefix cannot be repaired by appending a later delta.
+      // Only a full snapshot can make the content visible again.
+      if (data.redacted || lastRedacted) {
+        lastText = "";
+        lastRedacted = true;
+        emit(type, { ...data, text: "", redacted: true });
+      } else {
+        if (typeof data.text !== "string") throw invalidSnapshot();
+        lastText += data.text;
+        emit(type, data);
+      }
+    } else if (type === "end" && terminal(data.status)) {
+      terminalEvent = { generation: lastGeneration, data };
+      if (data.redacted || ["failed", "cancelled"].includes(data.status)) {
+        lastText = "";
+        lastRedacted = Boolean(data.redacted);
+      }
+      // Confirm the terminal projection, including permission/answer policy,
+      // through GET before notifying a consumer which may close in end().
+      startPolling(true);
+    } else {
+      emit(type, data);
+    }
+  };
+
+  const readSnapshot = async () => {
+    const response = await getResponse(responseId, readOptions);
+    if (active) applySnapshot(response);
+  };
+  const schedule = (delay) => {
+    if (!active) return;
+    timer = setTimeout(() => { timer = null; poll(); }, delay);
+  };
+  const poll = async (snapshotOnly = false) => {
+    if (!active) return;
+    try {
+      if (!snapshotOnly && !terminalEvent) {
+        // Drain full pages before checking status. Bound a busy producer to ten
+        // pages per turn; its atomic snapshot safely advances to the true tail.
+        for (let page = 0; active && page < 10; page += 1) {
+          const from = cursor;
+          const result = await responseEvents(responseId, from, readOptions);
+          if (!active) return;
+          const events = Array.isArray(result) ? result : result?.items;
+          if (!Array.isArray(events)) throw invalidSnapshot();
+          for (const event of events) {
+            if (!active) return;
+            if (!event || !["start", "reset", "delta", "end", "snapshot", "revoked"].includes(event.event_type)) throw invalidSnapshot();
+            applyEvent(event.event_type, { ...(event.data || {}), response_id: event.response_id,
+              generation: event.generation }, event.event_id);
+            if (terminalEvent) break;
+          }
+          if (!active || terminalEvent || events.length < 1000 || cursor <= from) break;
+        }
+      }
+      if (!active) return;
+      await readSnapshot();
+      if (!active) return;
+      failures = 0;
+      schedule(500);
+    } catch (error) {
+      if (!active) return;
+      if ([401, 403, 404].includes(error?.status)) {
+        revoked({ code: error.code || "access_revoked", status: error.status, notice: error.message });
+        return;
+      }
+      emit("error", error);
+      if (!active) return;
+      failures = Math.min(failures + 1, 5);
+      schedule(Math.min(500 * (2 ** failures), 5000));
+    }
+  };
+  function startPolling(snapshotOnly = false) {
+    if (!active) return;
+    stopSource();
+    if (polling) return;
+    polling = true;
+    poll(snapshotOnly);
+  }
+
+  const connect = () => {
+    if (!active) return;
+    if (typeof globalThis.EventSource !== "function") { startPolling(); return; }
+    const url = `${API_BASE}/companion/responses/${encodeURIComponent(responseId)}/stream?after=${encodeURIComponent(cursor)}`;
+    try { source = new globalThis.EventSource(url, { withCredentials: true }); }
+    catch { startPolling(); return; }
+    const connectedSource = source;
+    let errors = 0;
+    for (const type of ["start", "reset", "delta", "end", "snapshot", "revoked"]) {
+      connectedSource.addEventListener(type, (event) => {
+        if (!active || source !== connectedSource) return;
+        try {
+          const data = JSON.parse(event.data);
+          applyEvent(type, data, event.lastEventId);
+        } catch (error) {
+          emit("error", error instanceof ApiError ? error : invalidSnapshot());
+          startPolling(true);
+          return;
+        }
+        errors = 0;
+      });
+    }
+    connectedSource.onerror = () => {
+      if (!active || source !== connectedSource) return;
+      // One native reconnect is allowed; a closed source or repeated failures
+      // switches permanently to bounded polling of this same response.
+      if (connectedSource.readyState === 2 || ++errors >= 2) startPolling();
+    };
+  };
+
+  // Start asynchronously so the caller can register close() before onClosed or
+  // any terminal callbacks. The initial atomic snapshot repairs tail resumes,
+  // unknown generations and stale history before deltas can be appended.
+  Promise.resolve().then(async () => {
+    if (!active) return;
+    try {
+      await readSnapshot();
+      if (active) connect();
+    } catch (error) {
+      if (!active) return;
+      if ([401, 403, 404].includes(error?.status)) {
+        revoked({ code: error.code || "access_revoked", status: error.status, notice: error.message });
+      } else {
+        emit("error", error);
+        startPolling(true);
+      }
+    }
+  });
+  return () => close();
+}
 const retryTask = (taskId, version, requestId) => post(`/tasks/${encodeURIComponent(taskId)}/retry`, {
   expected_version: version, request_id: requestId,
 });
@@ -291,7 +591,8 @@ export const api = {
   state, probe, currentUser, login, logout, call, upload,
   applyTeacherAccount, activateAccount, resetPassword,
   teacherClasses, classMembers, goals, goalEvidence,
-  myTasks, task, courses, conversations, conversationMessages, retryTask,
+  myTasks, task, courses, conversations, getConversation, conversationMessages, createConversation, renameConversation, archiveConversation,
+  restoreConversation, postMessage, getResponse, cancelCompanionJob, resumeCompanionJob, responseEvents, companionAnswerPolicy, openResponseStream, retryTask,
   acquireLease, renewLease, saveDraft, submitTask,
   startDiagnostic, submitDiagnostic, answerPolicy, helpEvent,
   reportFormats, reportSource, generateReport, exportUrl,

@@ -94,6 +94,29 @@ const state = {
   liveConversations: [],
   liveMessages: [],
   conversationError: "",
+  activeConversationId: null,
+  chatMessages: [],
+  chatDrafts: {},
+  chatContexts: {},
+  chatDraft: "",
+  chatPolicy: null,
+  chatPolicyLoading: false,
+  chatPolicyError: "",
+  chatContext: null,
+  chatResponseError: "",
+  chatOlderCursor: null,
+  chatHasOlder: false,
+  chatLoadingOlder: false,
+  chatPendingSends: {},
+  pendingChatCreate: null,
+  chatCreating: false,
+  chatRenameOpen: false,
+  chatRenameTitle: "",
+  chatRenameError: "",
+  chatRenaming: false,
+  chatArchived: false,
+  chatHasMoreConversations: false,
+  chatSending: false,
   diagnostic: null,
   diagnosticAnswers: [],
   draftDirty: false,
@@ -109,6 +132,13 @@ const state = {
 let leaseTimer = 0;
 let workspaceRequest = 0;
 let toastTimer = 0;
+let chatEpoch = 0;
+const chatStreamClosers = new Map();
+const chatReadControllers = new Set();
+let chatListSequence = 0;
+let chatPostSequence = 0;
+let chatComposing = false;
+let chatRenderPending = false;
 
 const teacherLibrary = window.createTeacherLibrary({
   api, state, render, toast,
@@ -701,7 +731,7 @@ function taskQuestionCount(task) {
 }
 
 function studentNav(id, label) {
-  const active = state.studentPage === "home" ? state.studentTab === id
+  const active = state.studentPage === "home" || state.studentPage === "chat" ? state.studentTab === id
     : id === (state.studentPage === "result" ? "mine" : "tasks");
   const count = id === "tasks" ? state.liveTasks.filter((task) => !taskFinished(task)).length : 0;
   return `<button class="student-nav-item" data-tab="${id}" aria-current="${active ? "page" : "false"}">${studentIcon(id)}<span>${label}</span>${count ? `<em>${count}</em>` : ""}</button>`;
@@ -764,13 +794,92 @@ function studentContext() {
 
 function companion() {
   const conversations = state.liveConversations;
+  if (!state.live) return `${studentHeading("学伴", "当前服务不可用，正式对话暂时无法连接。")}
+    <div class="state-banner warn" role="status">离线样例不发送消息，也不会伪装成真实回答。</div>`;
+  if (state.activeConversationId) return chatConversation();
+  if (state.chatContext?.taskId) return newTaskChat();
   return `${studentHeading("学伴", "从当前任务出发，找到下一步。")}
-    <section class="student-companion"><div class="student-companion-heading">${studentIcon("companion")}<h2>今天，想从哪里开始？</h2><p>先独立尝试，再沿着具体反馈继续学习。</p></div>
-      <div class="student-suggestion-grid"><button class="student-suggestion" data-tab="tasks">${studentIcon("tasks")}<strong>继续我的任务</strong><small>回到老师分配的练习与保存进度</small></button><button class="student-suggestion" data-tab="mine">${studentIcon("mine")}<strong>回顾作答反馈</strong><small>看清每道题的作答与评分依据</small></button></div>
-      <p class="student-compose-note">实时学伴对话尚未在此工作台开放。已有对话可以在下方阅读，任务作答与成绩反馈正常使用。</p>
+    <section class="student-companion"><div class="student-companion-heading">${studentIcon("companion")}<h2>学伴对话</h2><p>回答会依照当前学习任务的开放范围提供。</p></div>
+      <div class="student-policy-banner ${state.chatPolicy?.allow_generation ? "allowed" : "guided"}" role="status">${escapeHtml(companionPolicyLabel())}</div>
+      ${state.chatPolicyError ? `<div class="state-banner warn" role="status">${escapeHtml(state.chatPolicyError)}</div>` : ""}
+      <form class="student-new-chat" data-action="new-chat"><label for="student-new-chat-title">会话名称</label><input id="student-new-chat-title" name="title" maxlength="200" value="${escapeHtml(state.pendingChatCreate?.title || "")}" placeholder="例如：一元一次方程"><button type="submit" class="btn primary" ${state.chatCreating ? "disabled" : ""}>${state.chatCreating ? "正在创建…" : "新建对话"}</button></form>
+      <div class="student-companion-actions"><button type="button" class="btn" data-action="toggle-archived">${state.chatArchived ? "查看进行中的对话" : "查看已归档"}</button><button type="button" class="btn" data-tab="tasks">返回任务</button></div>
     </section>
     <div class="student-section-head"><h2>我的对话记录</h2><small>${conversations.length} 个会话</small></div>
-    ${state.conversationError ? `<div class="state-banner warn">${escapeHtml(state.conversationError)}</div>` : conversations.length ? `<div class="student-task-list">${conversations.map((item) => `<article class="student-task-row"><span class="student-task-state">${studentIcon("companion")}</span><div class="student-task-copy"><h3>${escapeHtml(item.title || "学习对话")}</h3><p>${item.updated_at ? studentDate(item.updated_at, true) : "已保存的对话"}</p></div><button class="btn" data-conversation="${escapeHtml(item.id)}">阅读记录</button></article>`).join("")}</div>` : '<section class="student-empty"><h2>还没有对话记录</h2><p>先从一份任务开始，学习记录会逐步积累。</p></section>'}`;
+    ${state.conversationError ? `<div class="state-banner warn" role="alert">${escapeHtml(state.conversationError)}<button type="button" class="btn" data-action="reload-conversations">重新读取</button></div>` : ""}
+    ${conversations.length ? `<div class="student-task-list">${conversations.map((item) => `<article class="student-task-row"><span class="student-task-state">${studentIcon("companion")}</span><div class="student-task-copy"><h3>${escapeHtml(item.title || "学习对话")}</h3><p>${item.updated_at ? studentDate(item.updated_at, true) : "已保存的对话"}${item.status === "archived" ? " · 已归档" : ""}</p></div><button type="button" class="btn" data-conversation="${escapeHtml(item.id)}">${item.status === "archived" ? "恢复并继续" : "继续对话"}</button></article>`).join("")}</div>` : state.conversationError ? "" : '<section class="student-empty"><h2>还没有对话记录</h2><p>新建一段对话，学习记录会自动保存。</p></section>'}
+    ${state.chatHasMoreConversations ? '<button type="button" class="btn student-load-older" data-action="more-conversations">加载更多会话</button>' : ""}`;
+}
+
+function newTaskChat() {
+  const context = state.chatContext;
+  const task = state.liveTasks.find((item) => item.id === context.taskId) || state.liveTask;
+  const question = task?.questions?.find((item) => questionQuestionVersion(item) === context.questionVersionId);
+  const text = context.prompt || state.chatDraft || "";
+  return `${studentHeading("问学伴", "检查题目与自己的尝试，再决定发送哪些内容。")}
+    <section class="student-chat-context-form">
+      <div class="student-policy-banner ${state.chatPolicy?.allow_generation ? "allowed" : "guided"}" role="status">${escapeHtml(companionPolicyLabel())}</div>
+      <div class="student-chat-context"><span>${escapeHtml(taskTitle(task || {}))} · 当前题目</span><p>${escapeHtml(question?.stem || context.stem || "任务中的一道题")}</p>
+        ${context.options ? `<p class="student-chat-options">${escapeHtml(context.options)}</p>` : ""}</div>
+      <form class="student-compose student-context-compose" data-action="send-context">
+        <label class="sr-only" for="student-context-prompt">检查并编辑要发送的内容</label>
+        <textarea id="student-context-prompt" name="text" rows="7" maxlength="20000" data-chat-input ${context.pending ? "readonly" : ""}>${escapeHtml(context.pending?.text || text)}</textarea>
+        ${context.pending ? '<p class="student-compose-note">发送结果待确认，重试会使用同一请求与内容。</p>' : ""}
+        <div class="student-context-compose-actions"><button type="button" class="btn" data-action="back-to-task">返回作答</button><button type="submit" class="btn primary" ${state.chatCreating || state.chatSending || state.chatPolicyLoading ? "disabled" : ""}>${state.chatCreating ? "正在准备对话…" : state.chatSending ? "正在发送…" : context.pending ? "用同一请求重试" : "新建对话并发送"}</button></div>
+      </form>
+      ${state.chatResponseError ? `<div class="state-banner warn" role="alert">${escapeHtml(state.chatResponseError)}<button type="button" class="btn" data-action="retry-context-send">重试发送</button></div>` : ""}
+    </section>`;
+}
+
+function companionPolicyLabel(policy = state.chatPolicy) {
+  if (state.chatPolicyLoading) return "正在核验当前学习范围…";
+  if (!policy) return "暂时无法核验学习范围，请稍后重试。";
+  if (policy.allow_generation) return "当前所有任务均已开放，可自由提问。";
+  if (policy.diagnostic) return "首诊期间仅提供独立尝试引导，不提供解题提示。";
+  if (!policy.attempted) return "先独立尝试并保存作答；当前仅提供安全引导。";
+  return "仍有任务未完成；当前仅提供安全引导，不生成题目解答。";
+}
+
+function chatConversation() {
+  const conversation = state.liveConversations.find((item) => item.id === state.activeConversationId) || state.activeConversation;
+  const task = state.chatContext?.taskId ? state.liveTasks.find((item) => item.id === state.chatContext.taskId) || state.liveTask : null;
+  const messages = state.chatMessages.filter((item) => item.role === "user").map((item) => {
+    const response = item.response;
+    const userText = item.text ?? item.content ?? "";
+    const rows = [`<article class="student-message user" data-message-id="${escapeHtml(item.id || item.localId || "")}"><strong>我</strong><p>${escapeHtml(userText)}</p></article>`];
+    if (!response && item.role === "user") rows.push('<article class="student-message assistant pending"><strong>学伴</strong><p>正在等待服务确认…</p></article>');
+    if (response) {
+      const body = response.redacted ? response.notice || "内容暂未开放。" : response.text || "";
+      const status = chatResponseStatus(response);
+      rows.push(`<article class="student-message assistant${["failed", "cancelled", "revoked"].includes(response.status) ? " failed" : ""}" data-response-id="${escapeHtml(response.response_id || "")}" data-response-status="${escapeHtml(response.status)}"><strong>学伴</strong><p data-response-text>${escapeHtml(body)}</p><small data-response-status role="status">${escapeHtml(status)}</small>${response.redacted ? '<p class="student-policy-notice">回答范围已按当前任务规则收起。</p>' : ""}${chatResponseControls(response)}</article>`);
+    }
+    return rows.join("");
+  }).join("");
+  const pending = state.chatPendingSends?.[state.activeConversationId];
+  const responding = state.chatMessages.some((item) => item.response?.response_id && ["pending", "streaming"].includes(item.response.status));
+  const paused = state.chatMessages.some((item) => item.response && chatResponsePaused(item.response));
+  return `${studentHeading(conversation?.title || "学习对话", "对话记录会保存在当前账号。")}
+    <section class="student-chat">
+      <header class="student-chat-toolbar"><div class="student-chat-toolbar-leading"><button type="button" class="btn" data-action="chat-back">${studentIcon("arrow")}全部对话</button>${state.chatContext?.taskId ? '<button type="button" class="btn" data-action="back-to-task">返回作答</button>' : ""}</div><div class="student-chat-toolbar-actions"><button type="button" class="btn" data-action="rename-conversation" aria-expanded="${state.chatRenameOpen}">重命名</button><button type="button" class="btn" data-action="new-conversation">新建</button><button type="button" class="btn" data-action="archive-conversation">归档</button></div></header>
+      ${state.chatRenameOpen ? `<form class="student-chat-rename" data-action="rename-chat"><label for="student-chat-rename-title">会话名称</label><input id="student-chat-rename-title" name="title" maxlength="200" value="${escapeHtml(state.chatRenameTitle)}" data-chat-rename-input ${state.chatRenaming ? "disabled" : ""}>${state.chatRenameError ? `<p class="student-chat-rename-error" role="alert">${escapeHtml(state.chatRenameError)}</p>` : ""}<div><button type="button" class="btn" data-action="cancel-rename" ${state.chatRenaming ? "disabled" : ""}>取消</button><button type="submit" class="btn primary" ${state.chatRenaming ? "disabled" : ""}>${state.chatRenaming ? "正在保存…" : "保存名称"}</button></div></form>` : ""}
+      <div class="student-policy-banner ${state.chatPolicy?.allow_generation ? "allowed" : "guided"}" role="status">${escapeHtml(companionPolicyLabel())}</div>
+      ${state.chatContext?.questionVersionId ? `<div class="student-chat-context"><span>当前题目</span><p>${escapeHtml(task?.questions?.find((question) => questionQuestionVersion(question) === state.chatContext.questionVersionId)?.stem || state.chatContext.stem || "任务中的一道题")}</p></div>` : ""}
+      ${state.chatResponseError ? `<div class="state-banner warn" role="alert">${escapeHtml(state.chatResponseError)}<button type="button" class="btn" data-action="${pending ? "retry-chat-send" : "reload-conversation"}">${pending ? "重试原请求" : "恢复记录"}</button></div>` : ""}
+      ${state.chatPolicyError ? `<div class="state-banner warn" role="status">${escapeHtml(state.chatPolicyError)}</div>` : ""}
+      <div class="student-chat-thread" data-chat-thread aria-live="polite" aria-relevant="additions text">
+        ${state.chatHasOlder ? '<button type="button" class="btn student-load-older" data-action="load-older-messages" data-loading="' + String(state.chatLoadingOlder) + '" ' + (state.chatLoadingOlder ? "disabled" : "") + '>加载更早的消息</button>' : ""}
+        ${messages || '<p class="student-empty-chat">这段对话还没有消息。写下你正在思考的问题。</p>'}
+      </div>
+      <form class="student-compose" data-action="send" data-conversation-form="${escapeHtml(state.activeConversationId)}">
+        <label class="sr-only" for="student-chat-input">发送给学伴</label><textarea id="student-chat-input" name="text" rows="2" maxlength="20000" placeholder="写下你的问题或想法…" data-chat-input ${pending ? "readonly" : ""}>${escapeHtml(pending?.text || state.chatDraft)}</textarea>
+        <button type="submit" class="btn primary" ${state.chatSending || responding ? "disabled" : ""}>${studentIcon("arrow")}${state.chatSending ? "发送中…" : pending ? "重试" : paused ? "回答已暂停" : responding ? "回答中…" : "发送"}</button>
+      </form>
+      ${state.chatPendingSends?.[state.activeConversationId] ? '<p class="student-compose-note">发送结果未确认。重试会沿用同一请求与内容，不会重复创建消息。</p>' : ""}
+    </section>`;
+}
+
+function questionQuestionVersion(question) {
+  return question?.question_version_id || (question?.id && question?.version ? `${question.id}:${question.version}` : "");
 }
 
 function tasks() {
@@ -978,7 +1087,8 @@ function workspaceLive() {
         <div class="student-question-footer"><div class="row"><button class="btn" data-q="${current - 1}" ${current === 0 || state.loading ? "disabled" : ""}>上一题</button><button class="btn" data-q="${current + 1}" ${current === questions.length - 1 || state.loading ? "disabled" : ""}>下一题</button></div><span class="student-draft-state">${state.draftDirty ? "有未保存的选择" : "当前进度已同步"}</span></div>
       </section>
       ${state.mode === "tutor" ? '<p class="student-compose-note">先完成自己能确定的步骤。交卷并完成评分后，可以逐题回看反馈与解析。</p>' : ""}
-      <div class="student-focus-actions"><button class="btn" data-action="save-draft" ${locked ? "disabled" : ""}>${state.loading ? "正在处理" : "保存进度"}</button><button class="btn primary" data-action="submit" ${locked ? "disabled" : ""}>确认交卷</button></div>
+        <div class="student-focus-actions"><button class="btn" data-action="save-draft" ${locked ? "disabled" : ""}>${state.loading ? "正在处理" : "保存进度"}</button><button class="btn" data-action="ask-companion" ${locked ? "disabled" : ""}>${studentIcon("companion")}问学伴</button><button class="btn primary" data-action="submit" ${locked ? "disabled" : ""}>确认交卷</button></div>
+
     </div>`;
 }
 
@@ -1052,8 +1162,18 @@ function bind() {
     if (state.role === "student") {
       if (state.loading || state.loggingOut || state.transition) return;
       state.sheet = null;
+      if (state.studentTab === "companion") closeStudentChatStream();
       state.studentTab = node.dataset.tab;
       state.studentPage = "home";
+      if (state.studentTab !== "companion") setChatRoute(null);
+      if (state.studentTab === "companion") {
+        if (state.activeConversationId) {
+          loadConversation(state.activeConversationId);
+          return;
+        }
+        loadConversationList();
+        refreshCompanionPolicy();
+      }
     } else {
       if (state.authStatus === "checking") return;
       state.authTab = node.dataset.tab;
@@ -1153,6 +1273,29 @@ function bind() {
     render();
   }));
   view.querySelectorAll("form").forEach((form) => form.addEventListener("submit", onSubmit));
+  view.querySelectorAll("[data-chat-rename-input]").forEach((input) => input.addEventListener("input", () => {
+    state.chatRenameTitle = input.value;
+    state.chatRenameError = "";
+  }));
+  view.querySelectorAll("[data-chat-input]").forEach((input) => {
+    input.addEventListener("input", () => {
+      if (input.readOnly) return;
+      state.chatDraft = input.value;
+      state.chatDrafts[state.activeConversationId || "__new"] = input.value;
+      if (!state.activeConversationId && state.chatContext) state.chatContext.prompt = input.value;
+    });
+    input.addEventListener("compositionstart", () => { chatComposing = true; });
+    input.addEventListener("compositionend", () => {
+      chatComposing = false;
+      if (chatRenderPending) renderStudentChatIfActive(chatEpoch);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !chatComposing && event.keyCode !== 229) {
+        event.preventDefault();
+        input.form?.requestSubmit();
+      }
+    });
+  });
   // 眼睛按钮：明文与方块遮蔽之间切换。只改类名与图标，不重渲染，输入不会丢。
   view.querySelectorAll('[data-action="toggle-peek"]').forEach((node) => node.addEventListener("click", () => {
     const bar = node.closest(".passbar");
@@ -1175,6 +1318,8 @@ async function finishLogout() {
   teacherComposer.reset();
   clearInterval(leaseTimer);
   leaseTimer = 0;
+  closeStudentChatStream();
+  setChatRoute(null);
   cancelAnimationFrame(revealTimer);
   drag = null;
   touchY = null;
@@ -1186,6 +1331,11 @@ async function finishLogout() {
     studentTab: "tasks", studentPage: "home", taskFilter: "all", currentQ: 0,
     liveTasks: [], liveTask: null, liveLease: null, liveGoals: [], liveStudents: [],
     liveConversations: [], liveMessages: [], activeConversation: null, conversationError: "", studentDrafts: {},
+    activeConversationId: null, chatMessages: [], chatDrafts: {}, chatContexts: {}, chatDraft: "", chatContext: null,
+    chatPolicy: null, chatPolicyLoading: false, chatPolicyError: "", chatResponseError: "",
+    chatOlderCursor: null, chatHasOlder: false, chatLoadingOlder: false, chatPendingSends: {},
+    pendingChatCreate: null, chatCreating: false, chatRenameOpen: false, chatRenameTitle: "", chatRenameError: "", chatRenaming: false,
+    chatArchived: false, chatHasMoreConversations: false, chatSending: false,
     conversations: [], activeChat: 0, openStudent: null, teacherView: "home", goalLabel: "", exportName: "",
     liveReportFormats: [], liveError: "", loading: false, courseId: null, courseName: "", classId: null, className: "",
     teacherCourses: [], teacherContextVersion: 0,
@@ -1247,6 +1397,82 @@ function onAction(event) {
     loadWorkspace();
     return;
   }
+  if (action === "new-conversation") {
+    closeStudentChatStream();
+    state.chatContext = null;
+    state.chatDraft = "";
+    state.chatRenameOpen = false;
+    state.chatRenameTitle = "";
+    state.chatRenameError = "";
+    createStudentConversation("学习对话");
+    return;
+  }
+  if (action === "back-to-task") {
+    closeStudentChatStream();
+    setChatRoute(null);
+    const taskId = state.chatContext?.taskId;
+    state.studentTab = "tasks";
+    if (taskId) { selectLiveTask(taskId); return; }
+    state.studentPage = "workspace";
+    render();
+    return;
+  }
+  if (action === "retry-context-send") { sendContextChat(); return; }
+  if (action === "chat-back") {
+    closeStudentChatStream();
+    setChatRoute(null);
+    state.activeConversationId = null;
+    state.activeConversation = null;
+    state.chatMessages = [];
+    state.chatContext = null;
+    state.chatDraft = "";
+    state.chatRenameOpen = false;
+    state.chatRenameTitle = "";
+    state.chatRenameError = "";
+    state.studentPage = "home";
+    state.studentTab = "companion";
+    state.chatPolicyLoading = true;
+    loadConversationList();
+    refreshCompanionPolicy();
+    render();
+    return;
+  }
+  if (action === "archive-conversation") { archiveStudentConversation(); return; }
+  if (action === "rename-conversation") {
+    const id = state.activeConversationId;
+    if (!id || state.chatRenaming) return;
+    const current = state.liveConversations.find((item) => item.id === id) || state.activeConversation;
+    state.chatRenameOpen = true;
+    state.chatRenameTitle = current?.title || "学习对话";
+    state.chatRenameError = "";
+    renderStudentChatIfActive(chatEpoch);
+    view.querySelector("[data-chat-rename-input]")?.focus({ preventScroll: true });
+    return;
+  }
+  if (action === "cancel-rename") {
+    if (state.chatRenaming) return;
+    state.chatRenameOpen = false;
+    state.chatRenameTitle = "";
+    state.chatRenameError = "";
+    renderStudentChatIfActive(chatEpoch);
+    return;
+  }
+
+  if (action === "toggle-archived") {
+    state.chatArchived = !state.chatArchived;
+    loadConversationList();
+    return;
+  }
+  if (action === "retry-chat-send") { sendStudentMessage(); return; }
+  if (action === "reload-conversation") { loadConversation(state.activeConversationId); return; }
+  if (["refresh-chat-response", "cancel-chat-response", "resume-chat-response"].includes(action)) {
+    actOnChatResponse(event.currentTarget.dataset.responseId, action);
+    return;
+  }
+  if (action === "more-conversations") { loadConversationList({ more: true }); return; }
+  if (action === "reload-conversations") { loadConversationList(); refreshCompanionPolicy(); return; }
+  if (action === "load-older-messages") { loadOlderChatMessages(); return; }
+  if (action === "ask-companion") { openChatFromTask(); return; }
   if (action === "banner") state.banner = event.currentTarget.dataset.banner;
   if (action === "clear-banner") state.banner = "";
   if (action === "export") {
@@ -1326,18 +1552,27 @@ function onSubmit(event) {
     return;
   }
   if (action === "send") {
-    if (state.banner === "quota") return;
-    toast("原型不会调用模型");
-    form.reset();
+    if (!state.live) return;
+    state.chatDraft = String(data.get("text") || "");
+    state.chatDrafts[state.activeConversationId || "__new"] = state.chatDraft;
+    sendStudentMessage();
+    return;
+  }
+  if (action === "send-context") {
+    if (!state.chatContext || state.chatSending || state.chatCreating) return;
+    state.chatDraft = String(data.get("text") || "");
+    state.chatContext.prompt = state.chatDraft;
+    sendContextChat();
+    return;
+  }
+  if (action === "rename-chat") {
+    renameStudentConversation(String(data.get("title") || ""));
     return;
   }
   if (action === "new-chat") {
     const title = String(data.get("title") || "").trim();
     if (!title) return;
-    state.conversations.unshift(title);
-    state.sheet = null;
-    state.studentTab = "companion";
-    render();
+    createStudentConversation(title);
   }
 }
 
@@ -1380,7 +1615,10 @@ async function enterWorkspace(role, displayName, { live, message }) {
   render();
   window.scrollTo(0, 0);
   view.querySelector("#student-main")?.focus({ preventScroll: true });
-  if (live) loadWorkspace();
+  if (live) {
+    await loadWorkspace();
+    if (generation === state.transitionId && role === "student" && chatRoute()) await loadConversation(chatRoute());
+  }
 }
 
 function failAuth(message) {
@@ -1578,7 +1816,8 @@ async function loadTeacher() {
 }
 
 async function loadStudent() {
-  const generation = state.transitionId;
+  const generation = state.transitionId, epoch = chatEpoch, context = state.chatContext;
+  const archived = state.chatArchived, sequence = ++chatListSequence;
   const [tasks, goals, courses] = await Promise.all([api.myTasks(), api.goals(), api.courses()]);
   if (generation !== state.transitionId || state.role !== "student") return;
   state.liveTasks = tasks;
@@ -1596,14 +1835,31 @@ async function loadStudent() {
   state.courseName = course?.name || "";
   state.courseId = course?.id || null;
   state.goalLabel = selected ? taskTitle(selected) : "";
+  if (epoch !== chatEpoch || sequence !== chatListSequence || archived !== state.chatArchived || context !== state.chatContext) return;
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  const current = () => generation === state.transitionId && epoch === chatEpoch && sequence === chatListSequence
+    && archived === state.chatArchived && context === state.chatContext && state.role === "student";
   try {
-    const conversations = await api.conversations();
-    if (generation !== state.transitionId) return;
+    const [conversations, policy] = await Promise.all([
+      api.conversations({ archived, limit: 100, signal: controller.signal }),
+      api.companionAnswerPolicy({ ...context, signal: controller.signal }),
+    ]);
+    if (!current()) return;
     state.liveConversations = conversations;
+    state.chatHasMoreConversations = conversations.length === 100;
+    state.chatPolicy = policy;
+    state.chatPolicyLoading = false;
     state.conversationError = "";
-  } catch {
-    if (generation === state.transitionId) state.conversationError = "对话记录暂时没有读到，可以稍后刷新。";
-  }
+    state.chatPolicyError = "";
+  } catch (error) {
+    if (current() && error?.name !== "AbortError") {
+      state.conversationError = "对话记录暂时没有读到，可以稍后刷新。";
+      state.chatPolicy = null;
+      state.chatPolicyLoading = false;
+      state.chatPolicyError = "当前学习范围暂时无法核验。";
+    }
+  } finally { chatReadControllers.delete(controller); }
 }
 
 function rememberStudentDraft() {
@@ -1677,18 +1933,678 @@ async function refreshStudentTask() {
   }
 }
 
-async function readConversation(id) {
-  const generation = state.transitionId;
+function chatRoute() {
+  const hash = window.location?.hash || "";
+  if (!hash.startsWith("#chat=")) return null;
+  try { return decodeURIComponent(hash.slice(6)) || null; } catch { return null; }
+}
+
+function setChatRoute(id) {
+  if (!window.history?.replaceState || !window.location) return;
+  window.history.replaceState(null, "", window.location.pathname + window.location.search + (id ? `#chat=${encodeURIComponent(id)}` : ""));
+}
+
+function closeChatResponse(responseId) {
+  chatStreamClosers.get(responseId)?.();
+}
+
+function closeStudentChatStream() {
+  chatEpoch += 1;
+  chatPostSequence += 1;
+  chatListSequence += 1;
+  for (const controller of chatReadControllers) controller.abort();
+  chatReadControllers.clear();
+  for (const close of chatStreamClosers.values()) close();
+  chatStreamClosers.clear();
+  chatComposing = false;
+  chatRenderPending = false;
+  state.chatSending = false;
+  state.chatCreating = false;
+  state.chatLoadingOlder = false;
+  state.chatPolicyLoading = false;
+}
+
+function resumeStudentChat() {
+  if (!state.live || state.screen !== "app" || state.role !== "student" || state.studentTab !== "companion") return;
+  const id = chatRoute() || state.activeConversationId;
+  if (id) loadConversation(id);
+  else { loadConversationList(); refreshCompanionPolicy(); }
+}
+
+function chatResponseById(responseId) {
+  return state.chatMessages.find((message) => message.response?.response_id === responseId)?.response || null;
+}
+
+function chatResponsePaused(response) {
+  return ["pending", "streaming"].includes(response.status)
+    && ["reconciling", "awaiting_confirmation"].includes(response.job?.status);
+}
+
+function chatResponseStatus(response) {
+  if (response.status === "completed") return response.content_type === "safe_guidance" ? "学习范围引导" : "";
+  if (response.status === "failed") return "本次回答未完成";
+  if (response.status === "cancelled") return "本次回答已取消";
+  if (response.status === "revoked") return "访问权限已变化";
+  if (response.job?.cancel_requested) return "正在取消本次回答…";
+  if (response.job?.status === "reconciling") return "回答已暂停，正在核对调用结果；不会自动重复发送。";
+  if (response.job?.status === "awaiting_confirmation") return response.job.cost_pending
+    ? "回答已暂停，等待费用核对后可确认恢复。" : "回答已暂停，请确认恢复或取消。";
+  return response.status === "streaming" ? "正在回答…" : "正在排队…";
+}
+
+function chatResponseControls(response) {
+  if (!chatResponsePaused(response) || !response.job_id) return "";
+  const id = escapeHtml(response.response_id), disabled = response.acting ? "disabled" : "";
+  const canResume = response.job.status === "awaiting_confirmation" && !response.job.cost_pending
+    && !response.job.reconciliation_required && !response.job.cancel_requested;
+  return `<div class="student-chat-toolbar-actions">${response.acting ? '<span role="status">正在处理…</span>' : ""}<button type="button" class="btn" data-action="refresh-chat-response" data-response-id="${id}" ${disabled}>刷新状态</button>${!response.job.cancel_requested ? `<button type="button" class="btn" data-action="cancel-chat-response" data-response-id="${id}" ${disabled}>取消本次回答</button>` : ""}${canResume ? `<button type="button" class="btn" data-action="resume-chat-response" data-response-id="${id}" ${disabled}>确认恢复（可能产生费用）</button>` : ""}</div>`;
+}
+
+async function actOnChatResponse(responseId, action) {
+  const response = chatResponseById(responseId);
+  if (!response || response.acting || !response.job_id || !chatResponsePaused(response)) return;
+  if (action === "resume-chat-response" && (response.job.status !== "awaiting_confirmation"
+      || response.job.cost_pending || response.job.reconciliation_required || response.job.cancel_requested)) return;
+  const epoch = chatEpoch, conversationId = state.activeConversationId;
+  const current = () => epoch === chatEpoch && conversationId === state.activeConversationId && state.role === "student";
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  updateChatResponse(responseId, { acting: true });
+  state.chatResponseError = "";
+  renderStudentChatIfActive(epoch);
   try {
-    const messages = await api.conversationMessages(id);
-    if (generation !== state.transitionId) return;
-    state.liveMessages = messages;
-    state.activeConversation = state.liveConversations.find((item) => item.id === id);
-    state.sheet = "conversation";
-    render();
+    if (action === "cancel-chat-response") await api.cancelCompanionJob(response.job_id);
+    if (action === "resume-chat-response") await api.resumeCompanionJob(response.job_id);
+    if (!current()) return;
+    const snapshot = await api.getResponse(responseId, { signal: controller.signal });
+    if (!current()) return;
+    updateChatResponse(responseId, { ...snapshot, acting: false });
+    if (!chatResponsePaused(snapshot) && ["pending", "streaming"].includes(snapshot.status)) {
+      connectChatResponse(responseId, snapshot.last_event_id || 0);
+    }
   } catch (error) {
-    if (generation === state.transitionId) toast(error?.message || "对话记录读取失败");
+    if (current() && error?.name !== "AbortError") {
+      if ([401, 403, 404].includes(error?.status)) updateChatResponse(responseId, { text: "", redacted: true, status: "revoked" });
+      state.chatResponseError = error?.message || "状态暂时未能更新，请刷新确认。";
+    }
+  } finally {
+    chatReadControllers.delete(controller);
+    if (current()) {
+      updateChatResponse(responseId, { acting: false });
+      renderStudentChatIfActive(epoch);
+    }
   }
+}
+
+function updateChatResponse(responseId, patch) {
+  const message = state.chatMessages.find((item) => item.response?.response_id === responseId);
+  if (!message) return;
+  message.response = { ...message.response, ...patch };
+  if (message.response.redacted) message.response.text = "";
+  const root = Array.from(view.querySelectorAll("[data-response-id]")).find((node) => node.dataset.responseId === responseId);
+  if (!root) return;
+  const thread = view.querySelector("[data-chat-thread]");
+  const nearBottom = thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight < 64;
+  const body = root.querySelector("[data-response-text]");
+  const status = root.querySelector("[data-response-status]");
+  if (body) body.textContent = message.response.redacted ? message.response.notice || "内容暂未开放。" : message.response.text || "";
+  if (status) status.textContent = chatResponseStatus(message.response);
+  root.dataset.responseStatus = message.response.status;
+  root.classList.toggle("failed", ["failed", "cancelled", "revoked"].includes(message.response.status));
+  if (nearBottom) thread.scrollTop = thread.scrollHeight;
+}
+
+function connectChatResponse(responseId, after = 0) {
+  if (!responseId || !state.activeConversationId || !state.live || typeof api.openResponseStream !== "function"
+      || chatStreamClosers.has(responseId)) return;
+  const epoch = chatEpoch, conversationId = state.activeConversationId;
+  let transportClose = null, closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    if (chatStreamClosers.get(responseId) === close) chatStreamClosers.delete(responseId);
+    transportClose?.();
+  };
+  const current = () => !closed && epoch === chatEpoch && conversationId === state.activeConversationId
+    && state.studentTab === "companion" && state.role === "student";
+  chatStreamClosers.set(responseId, close);
+  try {
+    transportClose = api.openResponseStream(responseId, {
+      start(data, meta) {
+        if (current()) updateChatResponse(responseId, { ...data, status: "streaming", last_event_id: meta.id });
+      },
+      reset(data, meta) {
+        if (current()) updateChatResponse(responseId, { ...data, text: "", redacted: false, notice: null, status: "streaming", last_event_id: meta.id });
+      },
+      delta(data, meta) {
+        if (!current()) return;
+        const response = chatResponseById(responseId);
+        if (!response) return;
+        updateChatResponse(responseId, { ...data, text: data.redacted ? "" : (response.text || "") + (data.text || ""), status: "streaming", last_event_id: meta.id });
+      },
+      snapshot(data, meta) {
+        if (!current()) return;
+        updateChatResponse(responseId, { ...data, text: data.redacted ? "" : data.text || "", last_event_id: data.last_event_id ?? meta.id });
+        if (chatResponsePaused(data)) close();
+        renderStudentChatIfActive(epoch);
+      },
+      end(data, meta) {
+        if (!current()) return;
+        updateChatResponse(responseId, { ...data, last_event_id: data.last_event_id ?? meta.id });
+        close();
+        renderStudentChatIfActive(epoch);
+        syncConversationHistory(conversationId, epoch);
+      },
+      revoked() {
+        if (!current()) return;
+        state.chatResponseError = "会话或任务访问权限已变化，已停止接收回答。";
+        updateChatResponse(responseId, { text: "", redacted: true, status: "revoked", notice: state.chatResponseError });
+        close();
+        renderStudentChatIfActive(epoch);
+      },
+      error(error) {
+        if (!current()) return;
+        state.chatResponseError = error?.message || "正在恢复回答连接…";
+        renderStudentChatIfActive(epoch);
+      },
+      onClosed() { close(); },
+    }, { after, generation: chatResponseById(responseId)?.generation, text: chatResponseById(responseId)?.text || "" });
+    if (closed) transportClose?.();
+  } catch (error) {
+    close();
+    if (epoch === chatEpoch) {
+      state.chatResponseError = error?.message || "暂时无法连接回答。";
+      renderStudentChatIfActive(epoch);
+    }
+  }
+}
+
+function renderStudentChatIfActive(epoch) {
+  if (epoch !== chatEpoch || state.role !== "student" || state.studentTab !== "companion"
+      || !["chat", "home"].includes(state.studentPage) || !view.isConnected) return;
+  if (chatComposing) { chatRenderPending = true; return; }
+  chatRenderPending = false;
+  const previousInput = view.querySelector("[data-chat-input]");
+  const focused = previousInput === document.activeElement;
+  const start = focused ? previousInput.selectionStart : null;
+  const end = focused ? previousInput.selectionEnd : null;
+  const inputScroll = previousInput?.scrollTop || 0;
+  const previousRenameInput = view.querySelector("[data-chat-rename-input]");
+  const renameFocused = previousRenameInput === document.activeElement;
+  const renameStart = renameFocused ? previousRenameInput.selectionStart : null;
+  const renameEnd = renameFocused ? previousRenameInput.selectionEnd : null;
+  const thread = view.querySelector("[data-chat-thread]");
+  const scroll = thread?.scrollTop || 0;
+  const nearBottom = thread && thread.scrollHeight - scroll - thread.clientHeight < 64;
+  render();
+  const input = view.querySelector("[data-chat-input]");
+  if (focused && input) { input.focus({ preventScroll: true }); if (start != null) input.setSelectionRange(start, end); input.scrollTop = inputScroll; }
+  if (renameFocused) {
+    const renameInput = view.querySelector("[data-chat-rename-input]");
+    if (renameInput) {
+      renameInput.focus({ preventScroll: true });
+      if (renameStart != null) renameInput.setSelectionRange(renameStart, renameEnd);
+    }
+  }
+  const nextThread = view.querySelector("[data-chat-thread]");
+  if (nextThread) nextThread.scrollTop = nearBottom ? nextThread.scrollHeight : scroll;
+}
+
+function mergeChatMessages(messages) {
+  const rows = [...state.chatMessages];
+  for (const message of messages) {
+    const index = rows.findIndex((item) => item.id === message.id
+      || message.client_request_id && (item.localId || item.client_request_id) === message.client_request_id);
+    const previous = index >= 0 ? rows[index] : null;
+    const incoming = { ...previous, ...message };
+    if (previous?.response && message.response && !message.response.redacted) {
+      const old = previous.response, next = message.response;
+      if ((old.generation || 0) > (next.generation || 0)
+          || old.generation === next.generation && (old.last_event_id || 0) > (next.last_event_id || 0)) incoming.response = old;
+    }
+    delete incoming.localId;
+    if (index >= 0) rows[index] = incoming;
+    else rows.push(incoming);
+    const pending = state.chatPendingSends?.[state.activeConversationId];
+    if (pending && message.client_request_id === pending.requestId) {
+      delete state.chatPendingSends[state.activeConversationId];
+      if (state.chatDraft.trim() === pending.text) state.chatDraft = "";
+      if (state.chatDrafts[state.activeConversationId]?.trim() === pending.text) state.chatDrafts[state.activeConversationId] = "";
+    }
+  }
+  const pending = state.chatPendingSends?.[state.activeConversationId];
+  if (pending && !rows.some((item) => item.client_request_id === pending.requestId || item.localId === pending.requestId)) {
+    rows.push({ localId: pending.requestId, role: "user", text: pending.text, created_at: pending.createdAt,
+      response: { status: "pending", text: "", response_id: "" } });
+  }
+  state.chatMessages = rows.sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
+}
+
+async function syncConversationHistory(id, epoch = chatEpoch) {
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  try {
+    const messages = await api.conversationMessages(id, { latest: true, limit: 100, signal: controller.signal });
+    if (epoch !== chatEpoch || id !== state.activeConversationId) return;
+    mergeChatMessages(messages);
+    for (const message of state.chatMessages) {
+      const response = message.response;
+      if (response && ["pending", "streaming"].includes(response.status)) connectChatResponse(response.response_id, response.last_event_id || 0);
+    }
+    renderStudentChatIfActive(epoch);
+  } catch (error) {
+    if (epoch === chatEpoch && error?.name !== "AbortError") {
+      state.chatResponseError = error?.message || "对话记录暂时没有读到。";
+      renderStudentChatIfActive(epoch);
+    }
+  } finally { chatReadControllers.delete(controller); }
+}
+
+async function loadConversation(id, { archived = false } = {}) {
+  if (!state.live || !id) return;
+  closeStudentChatStream();
+  const epoch = chatEpoch, transition = state.transitionId;
+  const current = () => epoch === chatEpoch && transition === state.transitionId && id === state.activeConversationId;
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  state.activeConversationId = id;
+  setChatRoute(id);
+  state.chatRenameOpen = false;
+  state.chatRenameTitle = "";
+  state.chatRenameError = "";
+  state.chatRenaming = false;
+  state.activeConversation = state.liveConversations.find((item) => item.id === id) || { id, status: archived ? "archived" : "active" };
+  state.chatMessages = [];
+  state.chatContexts ||= {};
+  state.chatContext = state.chatContexts[id] || null;
+  state.studentPage = "chat";
+  state.studentTab = "companion";
+  state.chatDraft = state.chatDrafts[id] || "";
+  state.chatOlderCursor = null;
+  state.chatHasOlder = false;
+  state.chatResponseError = "";
+  state.chatPolicy = null;
+  state.chatPolicyError = "";
+  state.chatPolicyLoading = true;
+  mergeChatMessages([]);
+  render();
+  try {
+    if (archived) {
+      const restored = await api.restoreConversation(id);
+      if (!current()) return;
+      state.activeConversation = restored;
+    }
+    const [messages, conversation] = await Promise.all([
+      api.conversationMessages(id, { latest: true, limit: 100, signal: controller.signal }),
+      api.getConversation(id, { signal: controller.signal }),
+    ]);
+    if (!current()) return;
+    mergeChatMessages(messages);
+    state.liveMessages = messages;
+    state.activeConversation = conversation;
+    state.chatHasOlder = messages.length >= 100;
+    state.chatOlderCursor = messages[0]?.id || null;
+    if (!state.chatContext) {
+      const latest = [...messages].reverse().find((item) => item.role === "user" && item.response?.task_id);
+      if (latest) {
+        state.chatContext = { taskId: latest.response.task_id, questionVersionId: latest.response.question_version_id, courseId: conversation.course_id };
+        state.chatContexts[id] = state.chatContext;
+      }
+    }
+    renderStudentChatIfActive(epoch);
+    for (const message of state.chatMessages) {
+      const response = message.response;
+      if (response && ["pending", "streaming"].includes(response.status)) connectChatResponse(response.response_id, response.last_event_id || 0);
+    }
+    const thread = view.querySelector("[data-chat-thread]");
+    if (thread) thread.scrollTop = thread.scrollHeight;
+    await refreshCompanionPolicy();
+  } catch (error) {
+    if (current() && error?.name !== "AbortError") {
+      state.chatPolicyLoading = false;
+      state.chatResponseError = error?.message || "对话暂时没有读到。";
+      renderStudentChatIfActive(epoch);
+    }
+  } finally { chatReadControllers.delete(controller); }
+}
+
+async function refreshCompanionPolicy() {
+  if (!state.live) return;
+  const epoch = chatEpoch, context = state.chatContext;
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  state.chatPolicyLoading = true;
+  try {
+    const policy = await api.companionAnswerPolicy({ ...context, signal: controller.signal });
+    if (epoch !== chatEpoch || context !== state.chatContext || state.role !== "student") return;
+    state.chatPolicy = policy;
+    state.chatPolicyError = "";
+  } catch (error) {
+    if (epoch !== chatEpoch || context !== state.chatContext || error?.name === "AbortError") return;
+    state.chatPolicy = null;
+    state.chatPolicyError = error?.message || "当前学习范围暂时无法核验。";
+  } finally {
+    chatReadControllers.delete(controller);
+    if (epoch === chatEpoch && context === state.chatContext) {
+      state.chatPolicyLoading = false;
+      if (state.studentPage === "chat") renderStudentChatIfActive(epoch);
+      else if (state.studentTab === "companion") render();
+    }
+  }
+}
+
+async function createStudentConversation(title = "学习对话") {
+  if (!state.live || state.chatCreating) return;
+  const pending = state.pendingChatCreate || { title, requestId: `chat-${crypto.randomUUID()}`, courseId: null };
+  state.pendingChatCreate = pending;
+  state.chatCreating = true;
+  const epoch = chatEpoch;
+  render();
+  try {
+    const conversation = await api.createConversation(pending.title, pending.requestId, pending.courseId);
+    if (epoch !== chatEpoch || state.role !== "student") return;
+    state.pendingChatCreate = null;
+    state.chatCreating = false;
+    state.liveConversations = [conversation, ...state.liveConversations.filter((item) => item.id !== conversation.id)];
+    state.chatContext = null;
+    await loadConversation(conversation.id);
+  } catch (error) {
+    if (epoch !== chatEpoch) return;
+    state.chatCreating = false;
+    state.conversationError = error?.message || "新建对话结果未确认，重试会保留原名称与请求。";
+    render();
+  }
+}
+
+async function archiveStudentConversation() {
+  const id = state.activeConversationId;
+  if (!id || !state.live) return;
+  closeStudentChatStream();
+  const epoch = chatEpoch;
+  try {
+    await api.archiveConversation(id);
+    if (epoch !== chatEpoch || id !== state.activeConversationId) return;
+    setChatRoute(null);
+    state.activeConversationId = null;
+    state.activeConversation = null;
+    state.chatMessages = [];
+    state.chatContext = null;
+    state.chatRenameOpen = false;
+    state.chatRenameTitle = "";
+    state.chatRenameError = "";
+    state.studentPage = "home";
+    state.studentTab = "companion";
+    await loadConversationList();
+  } catch (error) {
+    if (epoch !== chatEpoch) return;
+    toast(error?.message || "归档失败，对话仍保留。");
+    await loadConversation(id);
+  }
+}
+
+async function renameStudentConversation(title) {
+  const id = state.activeConversationId;
+  const value = String(title || "").trim();
+  if (!id || !state.live || state.chatRenaming) return;
+  if (!value) {
+    state.chatRenameError = "请输入会话名称。";
+    renderStudentChatIfActive(chatEpoch);
+    return;
+  }
+  const epoch = chatEpoch;
+  const current = () => epoch === chatEpoch && id === state.activeConversationId && state.role === "student";
+  state.chatRenameTitle = value;
+  state.chatRenameError = "";
+  state.chatRenaming = true;
+  renderStudentChatIfActive(epoch);
+  try {
+    const updated = await api.renameConversation(id, value);
+    if (!current()) return;
+    state.liveConversations = state.liveConversations.map((item) => item.id === updated.id ? updated : item);
+    state.activeConversation = updated;
+    state.chatRenameOpen = false;
+    state.chatRenameTitle = "";
+  } catch (error) {
+    if (!current()) return;
+    state.chatRenameError = error?.message || "重命名失败，请重试。";
+  } finally {
+    if (current()) {
+      state.chatRenaming = false;
+      renderStudentChatIfActive(epoch);
+    }
+  }
+}
+
+async function loadConversationList({ more = false } = {}) {
+  if (!state.live) return;
+  const epoch = chatEpoch, sequence = ++chatListSequence, archived = state.chatArchived;
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  try {
+    const conversations = await api.conversations({ archived, limit: 100, offset: more ? state.liveConversations.length : 0, signal: controller.signal });
+    if (epoch !== chatEpoch || sequence !== chatListSequence || state.role !== "student" || archived !== state.chatArchived) return;
+    state.liveConversations = more ? [...state.liveConversations, ...conversations.filter((item) => !state.liveConversations.some((row) => row.id === item.id))] : conversations;
+    state.chatHasMoreConversations = conversations.length === 100;
+    state.conversationError = "";
+  } catch (error) {
+    if (epoch !== chatEpoch || sequence !== chatListSequence || error?.name === "AbortError") return;
+    state.conversationError = error?.message || "对话列表暂时没有读到。";
+  } finally {
+    chatReadControllers.delete(controller);
+    if (epoch === chatEpoch && sequence === chatListSequence) render();
+  }
+}
+
+async function loadOlderChatMessages() {
+  if (state.chatLoadingOlder || !state.chatOlderCursor || !state.activeConversationId) return;
+  const id = state.activeConversationId, epoch = chatEpoch, cursor = state.chatOlderCursor;
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  const thread = view.querySelector("[data-chat-thread]");
+  const oldHeight = thread?.scrollHeight || 0, oldScroll = thread?.scrollTop || 0;
+  state.chatLoadingOlder = true;
+  renderStudentChatIfActive(epoch);
+  try {
+    const messages = await api.conversationMessages(id, { before: cursor, limit: 100, signal: controller.signal });
+    if (epoch !== chatEpoch || id !== state.activeConversationId) return;
+    mergeChatMessages(messages);
+    state.chatOlderCursor = messages[0]?.id || null;
+    state.chatHasOlder = messages.length >= 100;
+  } catch (error) {
+    if (epoch === chatEpoch && error?.name !== "AbortError") state.chatResponseError = error?.message || "更早的消息暂时没有读到。";
+  } finally {
+    chatReadControllers.delete(controller);
+    if (epoch === chatEpoch) {
+      state.chatLoadingOlder = false;
+      renderStudentChatIfActive(epoch);
+      const nextThread = view.querySelector("[data-chat-thread]");
+      if (nextThread) nextThread.scrollTop = oldScroll + nextThread.scrollHeight - oldHeight;
+    }
+  }
+}
+
+function questionPromptContext(task, question, answer) {
+  const options = (question.options || []).map((option, index) => `${String.fromCharCode(65 + index)}. ${option}`).join("\n");
+  const choice = (index) => Number.isInteger(index) && question.options?.[index] !== undefined
+    ? `${String.fromCharCode(65 + index)}. ${question.options[index]}` : String(index);
+  const value = Array.isArray(answer) ? answer.map(choice).join("；") : typeof answer === "boolean" ? answer ? "正确" : "错误"
+    : typeof answer === "number" ? choice(answer) : answer == null ? "" : String(answer);
+  return { taskId: task.id, questionVersionId: questionQuestionVersion(question), questionId: question.id || question.question_id,
+    courseId: task.course_id, stem: question.stem || "", options, attempt: value };
+}
+
+async function openChatFromTask() {
+  const task = state.liveTask, question = task?.questions?.[state.currentQ];
+  if (!task || !question) return;
+  closeStudentChatStream();
+  setChatRoute(null);
+  const attempt = questionPromptContext(task, question, state.answers[state.currentQ]);
+  const saved = state.chatContexts.__new;
+  state.chatContext = saved?.taskId === attempt.taskId && saved.questionVersionId === attempt.questionVersionId && saved.pending ? saved : attempt;
+  const context = state.chatContext;
+  context.prompt ||= `我在做这道题：\n${attempt.stem}${attempt.options ? `\n${attempt.options}` : ""}\n\n我的尝试：${attempt.attempt || "（我还没有写下尝试）"}\n\n我想请你帮我检查思路，不要直接告诉我答案。`;
+  state.chatContexts.__new = context;
+  state.chatDraft = context.pending?.text || context.prompt;
+  state.chatDrafts.__new = state.chatDraft;
+  state.studentTab = "companion";
+  state.studentPage = "home";
+  state.activeConversationId = null;
+  state.chatMessages = [];
+  state.chatResponseError = "";
+  state.chatPolicy = null;
+  state.chatPolicyLoading = true;
+  render();
+  refreshCompanionPolicy();
+}
+
+function newChatRequest(text, conversationId = null) {
+  return Object.freeze({
+    requestId: `message-${crypto.randomUUID()}`, conversationId, text,
+    taskId: state.chatContext?.taskId || null, questionVersionId: state.chatContext?.questionVersionId || null,
+    questionId: state.chatContext?.questionId || null, createdAt: Date.now() / 1000,
+    help: { requestId: `help-${crypto.randomUUID()}`, recorded: false },
+  });
+}
+
+async function prepareChatMessage(pending, current) {
+  if (pending.taskId && state.liveTask?.id === pending.taskId && state.draftDirty) {
+    const saved = await saveLiveDraft();
+    if (!current()) return false;
+    if (!saved) throw new Error("作答尚未保存，消息未发送。请返回作答页保存进度后重试。");
+  }
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  try {
+    const policy = await api.companionAnswerPolicy({ taskId: pending.taskId, questionVersionId: pending.questionVersionId, signal: controller.signal });
+    if (!current()) return false;
+    state.chatPolicy = policy;
+    state.chatPolicyLoading = false;
+    state.chatPolicyError = "";
+    if (policy.help_recordable && !pending.help.recorded) await recordChatHelp(pending);
+    return current();
+  } finally { chatReadControllers.delete(controller); }
+}
+
+async function sendContextChat() {
+  if (!state.live || state.chatCreating || state.chatSending || !state.chatContext?.taskId) return;
+  const context = state.chatContext;
+  const text = context.pending?.text || state.chatDraft.trim();
+  if (!text) return;
+  context.pending ||= newChatRequest(text);
+  const pending = context.pending, epoch = chatEpoch, sequence = ++chatPostSequence;
+  const current = () => context === state.chatContext && epoch === chatEpoch && sequence === chatPostSequence;
+  state.chatSending = true;
+  state.chatPolicyLoading = true;
+  state.chatResponseError = "";
+  render();
+  try {
+    if (!await prepareChatMessage(pending, current)) return;
+    state.chatCreating = true;
+    render();
+    let conversation = context.conversation;
+    if (!conversation) {
+      context.title ||= `关于${(context.stem || "这道题").slice(0, 36)}`;
+      context.createRequestId ||= `chat-${crypto.randomUUID()}`;
+      conversation = await api.createConversation(context.title, context.createRequestId, context.courseId || null);
+      if (!current()) return;
+      context.conversationId = conversation.id;
+      context.conversation = conversation;
+      state.liveConversations = [conversation, ...state.liveConversations.filter((item) => item.id !== conversation.id)];
+    }
+    if (!current()) return;
+    state.chatCreating = false;
+    render();
+    const receipt = await api.postMessage(conversation.id, pending.text, {
+      taskId: pending.taskId, questionVersionId: pending.questionVersionId, requestId: pending.requestId,
+    });
+    if (!current()) return;
+    state.activeConversationId = conversation.id;
+    setChatRoute(conversation.id);
+    state.activeConversation = conversation;
+    state.chatContexts[conversation.id] = context;
+    delete state.chatContexts.__new;
+    state.studentPage = "chat";
+    state.studentTab = "companion";
+    state.chatDrafts[conversation.id] = "";
+    state.chatMessages = [{ id: receipt.message_id, client_request_id: pending.requestId, role: "user", text: pending.text,
+      created_at: pending.createdAt, response: { response_id: receipt.response_id, status: receipt.status || "pending", text: "", last_event_id: 0 } }];
+    state.chatDraft = "";
+    context.pending = null;
+    connectChatResponse(receipt.response_id, 0);
+  } catch (error) {
+    if (!current()) return;
+    state.chatResponseError = error?.message || "发送结果未确认。重试会沿用同一请求。";
+  } finally {
+    if (current()) {
+      state.chatCreating = false;
+      state.chatSending = false;
+      state.chatPolicyLoading = false;
+      render();
+    }
+  }
+}
+
+async function recordChatHelp(pending) {
+  if (!pending.taskId || pending.help.recorded) return;
+  const questionId = pending.questionId || pending.questionVersionId?.replace(/[:@][^:@]+$/, "");
+  if (!questionId) throw new Error("题目范围尚未核验，求助记录未保存，请从作答页重新打开学伴。");
+  try {
+    await api.helpEvent(pending.taskId, {
+      question_id: questionId,
+      payload: { help_type: "hint", source: "companion", request_semantics: "requested" },
+    }, pending.help.requestId);
+    pending.help.recorded = true;
+  } catch (error) {
+    throw new Error(`求助记录未保存，消息尚未发送：${error?.message || "请稍后重试"}`);
+  }
+}
+
+async function sendStudentMessage() {
+  const id = state.activeConversationId;
+  if (!id || !state.live || state.chatSending) return;
+  state.chatPendingSends ||= {};
+  let pending = state.chatPendingSends[id];
+  if (!pending) {
+    if (state.chatMessages.some((item) => item.response?.response_id && ["pending", "streaming"].includes(item.response.status))) return;
+    const text = state.chatDraft.trim();
+    if (!text) return;
+    pending = newChatRequest(text, id);
+    state.chatPendingSends[id] = pending;
+  }
+  if (pending.conversationId !== id) return;
+  const sequence = ++chatPostSequence, epoch = chatEpoch;
+  const current = () => sequence === chatPostSequence && epoch === chatEpoch && id === state.activeConversationId;
+  state.chatSending = true;
+  state.chatPolicyLoading = true;
+  state.chatResponseError = "";
+  mergeChatMessages([]);
+  renderStudentChatIfActive(epoch);
+  try {
+    if (!await prepareChatMessage(pending, current)) return;
+    const receipt = await api.postMessage(id, pending.text, {
+      taskId: pending.taskId, questionVersionId: pending.questionVersionId, requestId: pending.requestId,
+    });
+    if (!current()) return;
+    mergeChatMessages([{ id: receipt.message_id, client_request_id: pending.requestId, role: "user", text: pending.text,
+      created_at: pending.createdAt, response: { response_id: receipt.response_id, status: receipt.status || "pending", text: "", last_event_id: 0 } }]);
+    delete state.chatPendingSends[id];
+    state.chatDraft = "";
+    state.chatDrafts[id] = "";
+    connectChatResponse(receipt.response_id, 0);
+  } catch (error) {
+    if (!current()) return;
+    state.chatResponseError = error?.message || "发送结果未确认。重试会复用同一请求。";
+  } finally {
+    if (current()) {
+      state.chatSending = false;
+      state.chatPolicyLoading = false;
+      renderStudentChatIfActive(epoch);
+    }
+  }
+}
+
+async function readConversation(id) {
+  await loadConversation(id, { archived: state.chatArchived });
 }
 
 function submitPaper() {
@@ -1797,7 +2713,8 @@ async function openLiveTask() {
     updateStudentTask(full);
     const local = state.studentDrafts[taskId];
     const draft = full.draft_answers || {};
-    state.answers = local?.answers || (full.questions || []).map((question) => draft[question.id] ?? "");
+    const serverAnswers = (full.questions || []).map((question) => draft[question.id] ?? "");
+    state.answers = local?.dirty ? local.answers : serverAnswers;
     state.draftDirty = Boolean(local?.dirty);
     state.banner = "";
     state.currentQ = 0;
@@ -1916,7 +2833,7 @@ async function retryLiveTask() {
 
 /** 保存草稿：带版本与租约，后端据此拒绝过期写入。 */
 async function saveLiveDraft() {
-  if (state.loading || !state.live || !state.liveTask || !state.liveLease) return;
+  if (state.loading || !state.live || !state.liveTask || !state.liveLease) return false;
   const task = state.liveTask;
   const generation = state.transitionId;
   state.loading = true;
@@ -1930,7 +2847,7 @@ async function saveLiveDraft() {
       else if (questionBlankCount(question) > 1 && Array.isArray(value) && value.some((item) => !answerMissing(item))) incomplete = true;
     });
     const saved = await api.saveDraft(task.id, task.version, state.liveLease, payload, `draft-${Date.now()}`);
-    if (generation !== state.transitionId || state.liveTask?.id !== task.id) return;
+    if (generation !== state.transitionId || state.liveTask?.id !== task.id) return false;
     updateStudentTask({ ...task, version: saved.version, status: saved.status || "in_progress", draft_answers: payload });
     if (incomplete) state.studentDrafts[task.id] = { answers: [...state.answers], dirty: true };
     else delete state.studentDrafts[task.id];
@@ -1938,10 +2855,12 @@ async function saveLiveDraft() {
     state.savedAt = Date.now();
     state.banner = "";
     toast(incomplete ? "完整作答已保存，未填完的题目仍留在本页" : "进度已保存");
+    return true;
   } catch (error) {
-    if (generation !== state.transitionId) return;
+    if (generation !== state.transitionId) return false;
     state.banner = "save-fail";
     toast(error?.message || "没有保存成功，当前作答仍在页面");
+    return false;
   } finally {
     if (generation === state.transitionId) { state.loading = false; render(); }
   }
@@ -2140,6 +3059,17 @@ document.addEventListener("touchmove", (event) => {
   touchY = next;
 }, { passive: true });
 document.addEventListener("touchend", () => { touchY = null; });
+
+window.addEventListener("pagehide", closeStudentChatStream);
+window.addEventListener("pageshow", (event) => { if (event.persisted) resumeStudentChat(); });
+window.addEventListener("hashchange", () => {
+  if (!state.live || state.screen !== "app" || state.role !== "student") return;
+  const id = chatRoute();
+  if (id) loadConversation(id);
+  else if (state.studentTab === "companion" && state.activeConversationId) {
+    onAction({ currentTarget: { dataset: { action: "chat-back" } } });
+  }
+});
 
 window.addEventListener("resize", () => {
   fitCanvas();
