@@ -119,6 +119,8 @@ const state = {
   chatSending: false,
   diagnostic: null,
   diagnosticAnswers: [],
+  diagnosticUnknown: [],
+  diagnosticFeedback: null,
   draftDirty: false,
   savedAt: null,
   studentDrafts: {},
@@ -139,6 +141,26 @@ let chatListSequence = 0;
 let chatPostSequence = 0;
 let chatComposing = false;
 let chatRenderPending = false;
+
+window.recordingDemo = window.createRecordingDemo?.({
+  api,
+  getContext: () => ({
+    page: state.studentPage, task: state.liveTask,
+    question: state.liveTask?.questions?.[state.currentQ],
+    locked: state.loading || state.banner === "takeover",
+    saveDraft: async () => state.draftDirty ? saveLiveDraft() : true,
+  }),
+  onChange: () => render(),
+  onError: toast,
+  beforeSwitch: async () => {
+    if (state.loading || state.transition || state.loggingOut) { toast("请等当前操作完成"); return false; }
+    return state.draftDirty ? saveLiveDraft() : true;
+  },
+  onReset: () => window.recordingReports?.reset?.(),
+});
+window.recordingReports = window.createRecordingReports?.({
+  api, getContext: () => ({ status: window.recordingDemo?.status, user: api.state.user }), onChange: render,
+});
 
 const teacherLibrary = window.createTeacherLibrary({
   api, state, render, toast,
@@ -179,6 +201,8 @@ function render() {
   else if (state.role === "teacher") renderTeacher();
   else renderStudent();
   bind();
+  window.recordingDemo?.bind();
+  window.recordingReports?.bind();
   if (state.screen === "entry") {
     fitCanvas();
     refreshAnchors();
@@ -665,10 +689,10 @@ function teacherStudentLive() {
       </section>
     </div>
     <h2 class="section">短评</h2>
-    <form class="panel" data-action="comment">
+    ${window.recordingDemo?.enabled() ? window.recordingDemo.renderDiscussion(student.task?.id, "teacher") : `<form class="panel" data-action="comment">
       <label class="field">写给${escapeHtml(student.name)}<textarea name="comment" required placeholder="只指导，不改答案。"></textarea></label>
       <button class="btn primary" type="submit">发送短评</button>
-    </form>`;
+    </form>`}`;
 }
 
 function teacherMaterials() {
@@ -676,6 +700,7 @@ function teacherMaterials() {
 }
 
 function teacherReports() {
+  if (window.recordingDemo?.enabled() && window.recordingReports) return window.recordingReports.render();
   return `
     <h1 class="page">阶段成果</h1>
     <p class="muted">四种成果都可以从同一份快照导出。原型只展示入口，不生成文件。</p>
@@ -796,6 +821,7 @@ function companion() {
   const conversations = state.liveConversations;
   if (!state.live) return `${studentHeading("学伴", "当前服务不可用，正式对话暂时无法连接。")}
     <div class="state-banner warn" role="status">离线样例不发送消息，也不会伪装成真实回答。</div>`;
+  if (window.recordingDemo?.simulationChatEnabled()) return `${studentHeading("学伴", "聊一聊学习方法，或从正式作答页获取逐步提示。")}${window.recordingDemo.renderChat()}<button type="button" class="btn" data-tab="tasks">返回任务</button>`;
   if (state.activeConversationId) return chatConversation();
   if (state.chatContext?.taskId) return newTaskChat();
   return `${studentHeading("学伴", "从当前任务出发，找到下一步。")}
@@ -937,7 +963,7 @@ function mine() {
   return `${studentHeading("我的学习", "先看具体的作答与反馈，让每一步进步都有来处。")}
     ${state.liveError ? `<div class="state-banner bad">${escapeHtml(state.liveError)}</div>` : ""}
     <div class="student-section-head"><h2>作答记录</h2><small>${records.length} 次真实提交</small></div>
-    ${records.length ? `<div class="student-record-list">${records.map(({ task, attempt }) => `<article><div><span class="tag${attempt.status === "graded" ? " ok" : " warn"}">${attempt.kind === "first" ? "首次作答" : "重做"}</span><h3>${escapeHtml(taskTitle(task))}</h3><p>${studentDate(attempt.submitted_at, true)} · ${attempt.independent_evidence ? "独立作答记录" : "复习作答记录"}</p></div><div><strong>${attempt.total_score !== undefined ? `${attempt.total_score} / ${attempt.max_score}` : "等待评分"}</strong><p>${attempt.status === "graded" ? "已完成评分" : "完整评分后开放反馈"}</p></div><button class="btn" data-action="open-task" data-task-id="${escapeHtml(task.id)}" data-attempt-id="${escapeHtml(attempt.id)}">查看反馈</button></article>`).join("")}</div>` : '<section class="student-empty">' + studentIcon("mine") + '<h2>第一份学习记录，等你写下</h2><p>完成任务并交卷后，首次成绩、重做与具体反馈会保存在这里。</p><button class="btn primary" data-tab="tasks">去看我的任务</button></section>'}
+    ${records.length ? `<div class="student-record-list">${records.map(({ task, attempt }) => `<article><div><span class="tag${attempt.status === "graded" ? " ok" : " warn"}">${attempt.kind === "first" ? "首次作答" : "重做"}</span><h3>${escapeHtml(taskTitle(task))}</h3><p>${studentDate(attempt.submitted_at, true)} · ${attempt.independent_evidence ? "独立作答记录" : "不作为独立掌握证据的作答记录"}</p></div><div><strong>${attempt.total_score !== undefined ? `${attempt.total_score} / ${attempt.max_score}` : "等待评分"}</strong><p>${attempt.status === "graded" ? "已完成评分" : "完整评分后开放反馈"}</p></div><button class="btn" data-action="open-task" data-task-id="${escapeHtml(task.id)}" data-attempt-id="${escapeHtml(attempt.id)}">查看反馈</button></article>`).join("")}</div>` : '<section class="student-empty">' + studentIcon("mine") + '<h2>第一份学习记录，等你写下</h2><p>完成任务并交卷后，首次成绩、重做与具体反馈会保存在这里。</p><button class="btn primary" data-tab="tasks">去看我的任务</button></section>'}
     <section class="student-context-block"><h2>比一个百分比，多看一步</h2><p class="student-context-note">是否独立完成、在哪里需要提示、哪些步骤还不熟悉，都要结合具体作答判断。记录不足时，不生成掌握度。</p></section>`;
 }
 
@@ -1080,6 +1106,7 @@ function workspaceLive() {
   return `<div class="student-workspace">
       <header class="student-workspace-head"><button class="btn" data-tab="tasks">返回任务</button><span class="tag">${state.mode === "focus" ? "专注作答" : "独立尝试"}</span><button class="linkish" data-action="toggle-mode">${state.mode === "focus" ? "显示学习提示" : "进入专注模式"}</button></header>
       ${studentHeading(taskTitle(task), "按自己的节奏作答，保存后可以下次继续。")}
+      ${window.recordingDemo?.enabled() && state.diagnosticFeedback?.taskId === task.id ? `<section class="recording-feedback recording-diagnostic-feedback"><div class="recording-panel-head"><h3>短诊已完成</h3><span class="recording-label">独立尝试记录</span></div><p>${escapeHtml(state.diagnosticFeedback.text)}</p><p class="recording-note">短诊不计入本轮成绩。下面开始正式作答，需要时可以展开演示辅导。</p></section>` : ""}
       <section class="student-question-card" aria-label="第 ${current + 1} 题"><div class="student-question-meta"><span>第 ${current + 1} 题 / 共 ${questions.length} 题</span><span>${question.points ?? "—"} 分</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>
         ${state.banner === "takeover" ? '<div class="state-banner bad" role="alert">另一台设备正在作答，当前为只读。已输入的选择仍保留在这里。</div>' : ""}
         ${state.banner === "save-fail" ? '<div class="state-banner bad" role="alert">没有保存成功，当前答案仍在页面上，请重新保存。</div>' : ""}
@@ -1087,7 +1114,8 @@ function workspaceLive() {
         <div class="student-question-footer"><div class="row"><button class="btn" data-q="${current - 1}" ${current === 0 || state.loading ? "disabled" : ""}>上一题</button><button class="btn" data-q="${current + 1}" ${current === questions.length - 1 || state.loading ? "disabled" : ""}>下一题</button></div><span class="student-draft-state">${state.draftDirty ? "有未保存的选择" : "当前进度已同步"}</span></div>
       </section>
       ${state.mode === "tutor" ? '<p class="student-compose-note">先完成自己能确定的步骤。交卷并完成评分后，可以逐题回看反馈与解析。</p>' : ""}
-        <div class="student-focus-actions"><button class="btn" data-action="save-draft" ${locked ? "disabled" : ""}>${state.loading ? "正在处理" : "保存进度"}</button><button class="btn" data-action="ask-companion" ${locked ? "disabled" : ""}>${studentIcon("companion")}问学伴</button><button class="btn primary" data-action="submit" ${locked ? "disabled" : ""}>确认交卷</button></div>
+      ${window.recordingDemo?.renderHint(task, question, locked) || ""}
+        <div class="student-focus-actions"><button class="btn" data-action="save-draft" ${locked ? "disabled" : ""}>${state.loading ? "正在处理" : "保存进度"}</button><button class="btn" data-action="ask-companion" ${locked ? "disabled" : ""}>${studentIcon("companion")}${window.recordingDemo?.enabled() ? "演示辅导" : "问学伴"}</button><button class="btn primary" data-action="submit" ${locked ? "disabled" : ""}>确认交卷</button></div>
 
     </div>`;
 }
@@ -1098,7 +1126,7 @@ function diagnosticPage() {
   const current = Math.min(state.currentQ, Math.max(0, questions.length - 1));
   const question = questions[current];
   return `${studentHeading("先做一次独立短诊", "不计入任务成绩，也不会自动替你选择答案。完成后开放正式卷。")}
-    ${question ? `<div class="q-nav" aria-label="短诊题目">${questions.map((item, index) => `<button class="chip" data-q="${index}" aria-pressed="${current === index}">${index + 1}${!answerMissing(state.diagnosticAnswers[index], item) ? " · 已答" : ""}</button>`).join("")}</div><section class="student-question-card"><div class="student-question-meta"><span>第 ${current + 1} / ${questions.length} 题</span><span>独立短诊</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>${questionChoices(question, state.diagnosticAnswers[current], state.loading, true)}</section><div class="student-focus-actions"><button class="btn" data-tab="tasks">返回任务</button><button class="btn primary" data-action="submit-diagnostic" ${state.loading ? "disabled" : ""}>${state.loading ? "正在提交" : "提交短诊"}</button></div>` : '<div class="state-banner warn">暂时没有短诊题目，请返回任务后重试。</div><button class="btn" data-tab="tasks">返回任务</button>'}`;
+    ${question ? `<div class="q-nav" aria-label="短诊题目">${questions.map((item, index) => `<button class="chip" data-q="${index}" aria-pressed="${current === index}">${index + 1}${(state.diagnosticUnknown || []).includes(item.id) ? " · 暂时不会" : !answerMissing(state.diagnosticAnswers[index], item) ? " · 已答" : ""}</button>`).join("")}</div><section class="student-question-card"><div class="student-question-meta"><span>第 ${current + 1} / ${questions.length} 题</span><span>独立短诊</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>${questionChoices(question, state.diagnosticAnswers[current], state.loading, true)}${window.recordingDemo?.enabled() ? `<div class="recording-unknown"><button type="button" class="btn" data-action="diagnostic-unknown" aria-pressed="${(state.diagnosticUnknown || []).includes(question.id)}" ${state.loading ? "disabled" : ""}>${(state.diagnosticUnknown || []).includes(question.id) ? "已标记暂时不会" : "暂时不会"}</button><span class="recording-note">如实记录当前起点；短诊期间不提供解题提示。</span></div>` : ""}</section><div class="student-focus-actions"><button class="btn" data-tab="tasks">返回任务</button><button class="btn primary" data-action="submit-diagnostic" ${state.loading ? "disabled" : ""}>${state.loading ? "正在提交" : "提交短诊"}</button></div>` : '<div class="state-banner warn">暂时没有短诊题目，请返回任务后重试。</div><button class="btn" data-tab="tasks">返回任务</button>'}`;
 }
 
 /** 连上后端时的结果页：分数与逐题对错都来自真实评卷。 */
@@ -1108,15 +1136,15 @@ function resultPageLive() {
   const attempt = state.selectedAttemptId ? attempts.find((item) => item.id === state.selectedAttemptId) : attempts[attempts.length - 1];
   const heading = `<div class="student-workspace-head"><button class="btn" data-tab="tasks">返回任务</button><span class="tag">${taskStatus(task || {})}</span></div>${studentHeading(task ? taskTitle(task) : "本轮结果", "把每次作答和具体反馈放在一起看。")}`;
   if (!task || !attempt) return `${heading}<div class="state-banner warn">${state.selectedAttemptId ? "这次作答记录暂时不可用，请返回我的学习后重试。" : "还在评卷，成绩稍后出现在这里。"}</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
-  const summary = `<section class="student-result-summary"><div class="student-score">${attempt.total_score ?? "—"}<small> / ${attempt.max_score ?? "—"}</small></div><div><h2>${attempt.kind === "first" ? "首次成绩" : "重做成绩"}</h2><p>${attempt.independent_evidence ? "独立作答与提示记录分开保留。" : "这次是复习记录，首次成绩保持不变。"}</p><small>${studentDate(attempt.submitted_at, true)}</small></div></section>`;
+  const summary = `<section class="student-result-summary"><div class="student-score">${attempt.total_score ?? "—"}<small> / ${attempt.max_score ?? "—"}</small></div><div><h2>${attempt.kind === "first" ? "首次成绩" : "重做成绩"}</h2><p>${attempt.kind === "first" ? "首次成绩已保留" : "本次为重做记录，首次成绩保持不变"}；${attempt.independent_evidence ? "本次记录作为独立掌握证据。" : "本次记录不作为独立掌握证据。"}</p><small>${studentDate(attempt.submitted_at, true)}</small></div></section>`;
   if (!task.answer_released) return `${heading}${summary}<div class="state-banner warn">整轮评分完成前，不显示对错和解析。</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
   const byId = Object.fromEntries((attempt.items || []).map((item) => [item.question_id, item]));
-  return `${heading}${summary}<div class="student-section-head"><h2>逐题反馈</h2><small>${task.questions?.length || 0} 道题</small></div><div class="student-result-list">${(task.questions || []).map((question, index) => {
+  return `${heading}${summary}${window.recordingDemo?.renderFeedback(task, attempt) || ""}<div class="student-section-head"><h2>逐题反馈</h2><small>${task.questions?.length || 0} 道题</small></div><div class="student-result-list">${(task.questions || []).map((question, index) => {
     const item = byId[question.id] || {};
     const yours = attempt.answers?.[question.id];
     const answerText = (value) => questionAnswerText(question, value);
     return `<section class="panel"><div class="student-result-heading"><h3>第 ${index + 1} 题</h3><span class="tag${item.score === undefined ? " warn" : item.score >= question.points ? " ok" : ""}">${item.score === undefined ? "待评分" : `${item.score} / ${question.points} 分`}</span></div><p class="formula">${escapeHtml(question.stem)}</p><p class="muted">你的作答：${escapeHtml(answerText(yours))}</p>${question.answer !== undefined ? `<p>参考答案：${escapeHtml(answerText(question.answer))}</p>` : ""}${item.result?.why ? `<p class="muted">判定：${escapeHtml(item.result.why)}</p>` : ""}${question.explanation ? `<p>${escapeHtml(question.explanation)}</p>` : ""}</section>`;
-  }).join("")}</div>${task.status === "results_ready" && task.allow_retries ? '<button class="btn" data-action="retry">再做一次，保留首次成绩</button>' : ""}`;
+  }).join("")}</div>${task.status === "results_ready" && task.allow_retries ? '<button class="btn" data-action="retry">再做一次，保留首次成绩</button>' : ""}${window.recordingDemo?.enabled() ? window.recordingDemo.renderDiscussion(task.id, "student") : ""}`;
 }
 
 function sheet() {
@@ -1232,6 +1260,7 @@ function bind() {
     const value = questionChoiceValue(question, state.diagnosticAnswers[state.currentQ], node.dataset.diagnosticChoose);
     if (value === undefined) return;
     state.diagnosticAnswers[state.currentQ] = value;
+    state.diagnosticUnknown = (state.diagnosticUnknown || []).filter((id) => id !== question.id);
     render();
   }));
   view.querySelectorAll("[data-answer-input]").forEach((node) => node.addEventListener("input", () => {
@@ -1242,6 +1271,11 @@ function bind() {
     const value = questionInputValue(questions[state.currentQ], answers[state.currentQ], node.value, node.dataset.answerBlank);
     if (value === undefined) return;
     answers[state.currentQ] = value;
+    if (diagnostic) {
+      state.diagnosticUnknown = (state.diagnosticUnknown || []).filter((id) => id !== questions[state.currentQ]?.id);
+      const unknownButton = view.querySelector('[data-action="diagnostic-unknown"]');
+      if (unknownButton) { unknownButton.setAttribute("aria-pressed", "false"); unknownButton.textContent = "暂时不会"; }
+    }
     if (!diagnostic) {
       rememberStudentDraft();
       view.querySelectorAll(".student-draft-state").forEach((status) => { status.textContent = "有未保存的作答"; });
@@ -1316,6 +1350,8 @@ async function finishLogout() {
   workspaceRequest += 1;
   teacherLibrary.reset();
   teacherComposer.reset();
+  window.recordingDemo?.reset();
+  window.recordingReports?.reset();
   clearInterval(leaseTimer);
   leaseTimer = 0;
   closeStudentChatStream();
@@ -1339,7 +1375,7 @@ async function finishLogout() {
     conversations: [], activeChat: 0, openStudent: null, teacherView: "home", goalLabel: "", exportName: "",
     liveReportFormats: [], liveError: "", loading: false, courseId: null, courseName: "", classId: null, className: "",
     teacherCourses: [], teacherContextVersion: 0,
-    diagnostic: null, diagnosticAnswers: [], answers: [], submitted: false, seenSolution: false,
+    diagnostic: null, diagnosticAnswers: [], diagnosticUnknown: [], diagnosticFeedback: null, answers: [], submitted: false, seenSolution: false,
     draftDirty: false, savedAt: null, selectedAttemptId: null, banner: "", mode: "tutor",
     liveReport: null, railEvents: [], railLabel: "入口 · 正式服务已连接", step: 0,
     anchorYaw: 0.40, anchorPitch: 0.17, anchorSpin: 0,
@@ -1472,7 +1508,20 @@ function onAction(event) {
   if (action === "more-conversations") { loadConversationList({ more: true }); return; }
   if (action === "reload-conversations") { loadConversationList(); refreshCompanionPolicy(); return; }
   if (action === "load-older-messages") { loadOlderChatMessages(); return; }
-  if (action === "ask-companion") { openChatFromTask(); return; }
+  if (action === "ask-companion") {
+    if (window.recordingDemo?.enabled() && state.studentPage === "workspace") {
+      window.recordingDemo.openHint(state.liveTask, state.liveTask?.questions?.[state.currentQ]);
+      return;
+    }
+    openChatFromTask(); return;
+  }
+  if (action === "diagnostic-unknown" && window.recordingDemo?.enabled() && !state.loading) {
+    const question = state.diagnostic?.questions?.[state.currentQ];
+    if (!question) return;
+    if ((state.diagnosticUnknown || []).includes(question.id)) state.diagnosticUnknown = (state.diagnosticUnknown || []).filter((id) => id !== question.id);
+    else { state.diagnosticUnknown.push(question.id); state.diagnosticAnswers[state.currentQ] = ""; }
+    render(); return;
+  }
   if (action === "banner") state.banner = event.currentTarget.dataset.banner;
   if (action === "clear-banner") state.banner = "";
   if (action === "export") {
@@ -1537,6 +1586,7 @@ function onSubmit(event) {
   const data = new FormData(form);
   if (action === "auth") return submitAuth(data);
   if (action === "comment") {
+    if (state.live) { toast("当前入口未接入短评保存，请使用题目讨论入口"); return; }
     toast("短评已发送，没有改动学生答案");
     form.reset();
     return;
@@ -2762,7 +2812,10 @@ async function runDiagnostic() {
     render();
     const diagnostic = await api.startDiagnostic(taskId, state.liveTask.version, `diagnostic-${Date.now()}`);
     if (generation !== state.transitionId) return;
-    if (state.diagnostic?.id !== diagnostic.id) state.diagnosticAnswers = diagnostic.questions.map(() => "");
+    if (state.diagnostic?.id !== diagnostic.id) {
+      state.diagnosticAnswers = diagnostic.questions.map(() => "");
+      state.diagnosticUnknown = [];
+    }
     state.diagnostic = diagnostic;
     state.currentQ = 0;
     state.studentPage = "diagnostic";
@@ -2776,7 +2829,7 @@ async function runDiagnostic() {
 async function submitLiveDiagnostic() {
   if (!state.diagnostic || state.loading) return;
   const questions = state.diagnostic.questions || [];
-  const missing = questions.findIndex((question, index) => answerMissing(state.diagnosticAnswers[index], question));
+  const missing = questions.findIndex((question, index) => !(state.diagnosticUnknown || []).includes(question.id) && answerMissing(state.diagnosticAnswers[index], question));
   if (missing >= 0) {
     state.currentQ = missing;
     toast(`第 ${missing + 1} 题还没作答`);
@@ -2788,8 +2841,18 @@ async function submitLiveDiagnostic() {
   try {
     state.loading = true;
     render();
-    const answers = Object.fromEntries(questions.map((question, index) => [question.id, state.diagnosticAnswers[index]]));
-    await api.submitDiagnostic(state.diagnostic.id, answers, `diagnostic-submit-${Date.now()}`);
+    const answers = Object.fromEntries(questions.map((question, index) => [question.id, state.diagnosticAnswers[index]]).filter(([id]) => !(state.diagnosticUnknown || []).includes(id)));
+    const completed = window.recordingDemo?.enabled()
+      ? await api.call("POST", `/diagnostics/${encodeURIComponent(state.diagnostic.id)}/submit`, {
+        request_id: `diagnostic-submit-${state.diagnostic.id}`, answers, unknown_question_ids: [...state.diagnosticUnknown],
+      })
+      : await api.submitDiagnostic(state.diagnostic.id, answers, `diagnostic-submit-${Date.now()}`);
+    if (window.recordingDemo?.enabled() && generation === state.transitionId) {
+      const feedback = completed?.feedback;
+      state.diagnosticFeedback = { taskId, text: feedback
+        ? `已独立作答 ${feedback.answered} 题，标记暂时不会 ${feedback.unknown} 题；已核验 ${feedback.checked} 题，其中 ${feedback.correct} 题正确。${feedback.message || ""}`
+        : "短诊已提交，起点记录已保存。先完成自己能确定的步骤，遇到困难再请求提示。" };
+    }
     if (generation !== state.transitionId) return;
     const full = await api.task(taskId);
     if (generation !== state.transitionId) return;
@@ -2798,6 +2861,10 @@ async function submitLiveDiagnostic() {
     state.studentPage = "home";
     state.studentTab = "tasks";
     toast("短诊完成，可以开始正式作答");
+    if (window.recordingDemo?.enabled()) {
+      state.loading = false;
+      await openLiveTask();
+    }
   } catch (error) {
     if (generation === state.transitionId) toast(error?.message || "短诊没有提交成功，作答已保留");
   } finally {
@@ -3137,3 +3204,4 @@ mountScene();
 fitCanvas();
 render();
 refreshAnchors();
+window.recordingDemo?.refreshStatus({ silent: true });

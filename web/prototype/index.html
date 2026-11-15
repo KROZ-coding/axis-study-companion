@@ -9,6 +9,8 @@
   <link rel="stylesheet" href="/prototype/student.css">
   <link rel="stylesheet" href="/prototype/teacher-planning.css">
   <link rel="stylesheet" href="/prototype/teacher-library.css">
+  <link rel="stylesheet" href="/prototype/recording-demo.css">
+  <link rel="stylesheet" href="/prototype/recording-reports.css">
 </head>
 <body>
   <a class="skip" href="#view">跳到主要内容</a>
@@ -23,6 +25,10 @@
     import { api } from "/prototype/api.js";
     import { createTeacherPlanning } from "/prototype/teacher-planning.js";
     import { createTeacherLibrary } from "/prototype/teacher-library.js";
+    import { createRecordingDemo } from "/prototype/recording-demo.js";
+    import { createRecordingReports } from "/prototype/recording-reports.js";
+    window.createRecordingDemo = createRecordingDemo;
+    window.createRecordingReports = createRecordingReports;
     window.createScene = createScene;
     window.api = api;
     window.createTeacherPlanning = createTeacherPlanning;
