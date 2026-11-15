@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>伴星导学 AXIS · 学习证据系统</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/prototype/styles.css">
+  <link rel="stylesheet" href="/prototype/student.css">
+  <link rel="stylesheet" href="/prototype/teacher-planning.css">
+  <link rel="stylesheet" href="/prototype/teacher-library.css">
+  <link rel="stylesheet" href="/prototype/recording-demo.css">
+  <link rel="stylesheet" href="/prototype/recording-reports.css">
+</head>
+<body>
+  <a class="skip" href="#view">跳到主要内容</a>
+  <div id="stage" class="stage">
+    <canvas id="glass" aria-hidden="true"></canvas>
+    <div id="view"></div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module">
+    // 玻璃场景先就位，再把正式服务连接状态交给入口。
+    import { createScene } from "/prototype/scene.js";
+    import { api } from "/prototype/api.js";
+    import { createTeacherPlanning } from "/prototype/teacher-planning.js";
+    import { createTeacherLibrary } from "/prototype/teacher-library.js";
+    import { createRecordingDemo } from "/prototype/recording-demo.js";
+    import { createRecordingReports } from "/prototype/recording-reports.js";
+    window.createRecordingDemo = createRecordingDemo;
+    window.createRecordingReports = createRecordingReports;
+    window.createScene = createScene;
+    window.api = api;
+    window.createTeacherPlanning = createTeacherPlanning;
+    window.createTeacherLibrary = createTeacherLibrary;
+    // 正式服务不可用时暂停认证，不创建本地虚构会话。
+    await api.probe();
+    await import("/prototype/app.js");
+  </script>
+</body>
+</html>
