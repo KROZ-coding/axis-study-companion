@@ -149,4 +149,6 @@ Invoke-RestMethod "$base/followups/$($followup.id)/report.json" -Headers $teache
 
 本轮未改造前端，没有新任务页浏览器验收或桌面/手机截图。正式登录、通知、课表、赛事数据导入、外部模型和独立教学效果评测不在本次实现范围。
 
-后续产品模型选择已于 2026-11-10 确认：教师回复、出题和审题使用 Poke API 的 `gpt-5.6-sol`（`high`），学生侧 AI 功能使用 `gpt-5.6-terra`（`high`）。配置与未接入边界见[模型分工与接入约定](模型分工与接入约定.md)。
+历史模型选择（2026-11-10）：当时教师回复、出题和审题使用 Poke API 的 `gpt-5.6-sol`（`high`），学生侧 AI 功能使用 `gpt-5.6-terra`（`high`）。此处保留当时决策，不作为当前学生模型配置。
+
+2026-11-15 变更：按用户明确要求，学生学伴 `student`、`hint` 用途改为 `gpt-5.6-sol/high`，教师仍使用 Sol/high；评分 `grading`、摘要 `summary` 保留 Terra/high，必须显式配置各自通道，不再回落到 `student`。本轮通过隔离测试，未执行真实供应商联调；配置与验证边界见[模型分工与接入约定](模型分工与接入约定.md)。

@@ -51,13 +51,13 @@ class FakeGateway:
 
     def describe(self, purpose):
         self.descriptions.append(purpose)
-        model = "gpt-5.6-sol" if purpose in {"teacher", "suggest", "generate", "review"} else "gpt-5.6-terra"
+        model = "gpt-5.6-sol" if purpose in {"teacher", "suggest", "generate", "review", "student", "hint"} else "gpt-5.6-terra"
         return {"provider": SimpleNamespace(name="fixture"), "model": model,
                 "reasoning_effort": "high", "max_tokens": 64, "timeout_seconds": 1}
 
     @staticmethod
     def result(purpose="student", *, text="complete answer", data=None, usage=USAGE):
-        model = "gpt-5.6-sol" if purpose in {"teacher", "suggest", "generate", "review"} else "gpt-5.6-terra"
+        model = "gpt-5.6-sol" if purpose in {"teacher", "suggest", "generate", "review", "student", "hint"} else "gpt-5.6-terra"
         return GatewayResult(text, data, usage, "fixture-request", model, "high", "fixture", True, usage is None)
 
     async def complete(self, purpose, messages, **options):
@@ -283,6 +283,7 @@ class WorkerTests(unittest.TestCase):
                          (self.student["id"], None, None, "platform"))
         self.assertEqual(job.budget_spent, 12)
         self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual(self.queue.list_calls(job.job_id)[0].model_name, "gpt-5.6-sol")
         self.assertEqual(self.ledger.query("student_daily", self.student["id"], period=self.queue.list_calls(job.job_id)[0].budget_day).spent_units, 12)
         self.assertEqual(self.ledger.query("project", "platform").spent_units, 12)
         self.assertEqual(self.ledger.query("student_daily", self.student["id"],
@@ -453,7 +454,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(self.gateway.calls), 1)
 
     def test_no_model_or_price_never_sends_and_domain_response_ends(self):
-        for disabled in ("model", "price"):
+        for disabled in ("model", "price", "terra_price_only"):
             with self.subTest(disabled=disabled):
                 posted = self.posted_job()
                 if disabled == "model":
@@ -461,7 +462,9 @@ class WorkerTests(unittest.TestCase):
                     self.settings.llm_prices_json = price_config()
                 else:
                     self.runtime.gateway = self.gateway
-                    self.settings.llm_prices_json = ""
+                    self.settings.llm_prices_json = json.dumps([
+                        price for price in json.loads(price_config()) if price["model"] == "gpt-5.6-terra"
+                    ]) if disabled == "terra_price_only" else ""
                 self.run_worker()
                 self.assertEqual(self.queue.get_job(posted["job_id"]).status, "failed")
                 self.assertEqual(self.queue.list_calls(posted["job_id"]), ())

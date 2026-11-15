@@ -1,6 +1,6 @@
 # 正式后端重构接入说明
 
-更新日期：2026-11-15。基于现有 audit-companion/FastAPI 项目承接；本说明记录当前已写入代码的接入契约及验收边界。Node联合回归已通过144/144，最新本机假网关 smoke 为8阶段／88次HTTP／24.469秒。冻结版本完整Python回归417/417通过，137.333秒，退出码0。本机假网关浏览器已确认分页、发送追问后刷新、窄屏输入区、带题引导、命名、归档恢复、返回作答及停服后新发送失败时的草稿保留；新增暂停／取消／确认恢复控件仅自动化验证。原产品需求仍以总方案和覆盖清单为准。
+更新日期：2026-11-15。基于现有 audit-companion/FastAPI 项目承接；本说明记录当前已写入代码的接入契约及验收边界。以下144／88／417等结果保留为学生切换 Sol 之前 `aede83a` 的证据，本轮路由测试另见[模型接入约定](模型分工与接入约定.md#验证状态)。该版Node联合回归已通过144/144，本机假网关 smoke 为8阶段／88次HTTP／24.469秒，完整Python回归417/417通过，137.333秒，退出码0。本机假网关浏览器已确认分页、发送追问后刷新、窄屏输入区、带题引导、命名、归档恢复、返回作答及停服后新发送失败时的草稿保留；新增暂停／取消／确认恢复控件仅自动化验证。原产品需求仍以总方案和覆盖清单为准。
 
 ## 启动
 
@@ -56,13 +56,13 @@ HTTP、SSE、作业读取与 worker 共享当前访问检查。上游发送前�
 
 ## 模型与预算
 
-教师交互／出题／审题固定 `gpt-5.6-sol/high`；学生、评分和结果总结固定 `gpt-5.6-terra/high`。独立 `ModelGateway` 已支持 `teacher/student/grading/summary` 分组及非流式／SSE；旧 `LLMClient` 单独保留，不作正式网关隐式回退。`grading`、`summary` 未单列时可使用 `student` 通道，仍固定 Terra/high，不能因失败静默换型号或密钥。
+2026-11-15按用户要求，教师交互／出题／审题和学生学伴（`student`、`hint` 用途）固定 `gpt-5.6-sol/high`；评分和结果总结固定 `gpt-5.6-terra/high`。独立 `ModelGateway` 使用 `teacher/student/grading/summary` 四个显式通道，依次为 Sol/Sol/Terra/Terra，全部 high，并支持非流式／SSE；`grading`、`summary` 缺失时拒绝对应调用，不再回落 `student`。旧 `LLMClient` 单独保留，不作正式网关隐式回退，不能因失败静默换型号或密钥。
 
 任务绑定消息由服务端从真实归属解析并冻结 `student_id/course_id/class_id/task_id` 到 outbox 和作业，预占与结算据此使用班级学生日额。无任务自由聊天使用明确配置的个人全局日额与 `project/platform` 总额，不任意挑选班级。额度通过 `PUT /api/v1/budgets/limits` 设置：管理员配置项目和个人全局额度，班级负责人配置所属学生的班级日额；`fund` 钱包不是正式额度来源。
 
 价格按 provider/model 保存版本化 `version`、`currency` 和 `input_units_per_million`／`output_units_per_million`，单价为每百万 token 的整数计费单位。`currency` 必须与 `BUDGET_CURRENCY` 一致；缺价格、缺适用预算或币种不一致时阻断付费调用。usage 缺失保留 `cost_pending` 等待对账，不以0结算，也不盲目重发未知请求。名义 `site-credit` 不保证法币兑换或供应商现金收费上限。
 
-非敏感配置参考 `server/.env.example`；`api_key_env` 只引用环境变量名，凭据由进程环境变量或密钥服务注入，本机 `.env` 仅放非敏感项。凭据、Cookie、数据库和运行产物不得提交。真实 Terra／价格／预算联调本轮**未执行**，因为单价、币种和总调用额度尚未确认。2026-11-10 Sol/high HTTP 200 仅为历史最小连接记录，真实线路、实际账单和教学质量仍待实测。
+非敏感配置参考 `server/.env.example`，base URL 为 `https://www.poke2api.com/v1`；`api_key_env` 只引用环境变量名，凭据由进程环境变量或密钥服务注入，本机 `.env` 仅放非敏感项。凭据、Cookie、数据库和运行产物不得提交或回显；提供过凭据不等于已注入运行环境。当前学生 Sol／价格／预算真实联调本轮**未执行**，评分和摘要 Terra 仍未验收；本机 `.env` 未启用模型配置，当前进程环境未注入对应凭据，单价、币种和总调用额度尚未确认，未运行真实付费调用。2026-11-10 Sol/high HTTP 200 仅为历史最小连接记录，真实线路、实际账单和教学质量仍待实测。
 
 ## 保留的验收边界
 
@@ -72,7 +72,7 @@ HTTP、SSE、作业读取与 worker 共享当前访问检查。上游发送前�
 .\server\.venv\Scripts\python.exe -I -B -X utf8 server/tests/verify_companion_live.py --serve --stream-seconds 8 --output-dir .scratch/companion-gui-NEW
 ```
 
-`service-info.json` 提供实际 origin、场景和本地凭据位置；`free/guided/diagnostic` 账号分别覆盖自由对话、任务固定引导和独立首诊，口令每次本机生成，不输出或提交。夹具使用真实应用／认证／worker，注入 `FakeGateway` 且无真实上游。最新 smoke（不加 `--serve`）于2026-11-15通过**8阶段、88次真实回环 HTTP 请求，24.469秒**，脱敏证据 `.scratch/companion-live-final-20261115-02/evidence.json`；关闭退出码0、`reaped: true`，临时数据库和凭据均已清理。旧冻结 smoke 的91次／21.594秒及独立 `--serve` 生命周期正常启停清理仅保留为前次证据。
+`service-info.json` 提供实际 origin、场景和本地凭据位置；`free/guided/diagnostic` 账号分别覆盖自由对话、任务固定引导和独立首诊，口令每次本机生成，不输出或提交。夹具使用真实应用／认证／worker，注入 `FakeGateway` 且无真实上游。`aede83a` smoke（不加 `--serve`）于2026-11-15通过**8阶段、88次真实回环 HTTP 请求，24.469秒**，脱敏证据 `.scratch/companion-live-final-20261115-02/evidence.json`；关闭退出码0、`reaped: true`，临时数据库和凭据均已清理。旧冻结 smoke 的91次／21.594秒及独立 `--serve` 生命周期正常启停清理仅保留为前次证据。
 
 Node联合命令144/144通过，0失败，572.848毫秒（学生72、传输34、教师38），含同游标队列状态通知和暂停／取消／确认恢复控件自动化验证。冻结版本完整Python回归 `run_tests.py` 417/417通过，137.333秒，退出码0；恢复门禁worker＋queue专项51/51通过，15.026秒，覆盖直接resume路由在费用／对账未完成时拒绝恢复、拒绝后队列／回答／事件／调用／钱包／项目预算不变，以及结算后恢复同一作业、两次合法调用分别记账。旧Python411/411（127.234秒）、Node139/139（577.147毫秒）和专项73/73（61.240秒）仅作历史记录。`node --check` 与 `git diff --check` 此前已通过。
 
@@ -80,7 +80,7 @@ Node联合命令144/144通过，0失败，572.848毫秒（学生72、传输34、
 
 停服后的新发送显示“连不上服务，请确认后端已启动”，保留中文草稿并提供发送结果未确认说明及重试原请求入口；未重启验证恢复，也未做生成过程中断线重连的 GUI 测试。当前浏览器运行时不支持减少动态、真实手机软键盘／IME组合输入及控制台监听，未做移动实机测试；中文文本输入成功不等于真实输入法组合验证。
 
-旧 GUI 夹具 `.scratch/companion-live-browser-20261115-01` 因编排中断结束；确认进程与监听不存在后手动清理其隔离凭据和运行目录，元数据为 `stopped_after_orchestrator_interruption`，没有正常关闭退出码证据。新夹具 `.scratch/companion-live-browser-final-20261115-01` 已正常停止：`evidence.json` 记录 `status: stopped`、退出码0、`reaped: true` 和临时数据已删除，`service-info.json` 确认凭据已删除；补验报告为该目录 `gui-report.md`，附 `screenshots/` 八张截图；报告保留当时411／139／91的自动化计数，并已补充最终结果及后续控件未做 GUI 复验的说明，最新结果以上文为准。serve 的 `http_requests: 0` 不统计浏览器请求，不能当作独立 HTTP smoke 或 GUI 通过计数。
+旧 GUI 夹具 `.scratch/companion-live-browser-20261115-01` 因编排中断结束；确认进程与监听不存在后手动清理其隔离凭据和运行目录，元数据为 `stopped_after_orchestrator_interruption`，没有正常关闭退出码证据。新夹具 `.scratch/companion-live-browser-final-20261115-01` 已正常停止：`evidence.json` 记录 `status: stopped`、退出码0、`reaped: true` 和临时数据已删除，`service-info.json` 确认凭据已删除；补验报告为该目录 `gui-report.md`，附 `screenshots/` 八张截图；报告保留当时411／139／91的自动化计数，并已补充最终结果及后续控件未做 GUI 复验的说明，该冻结版结果以上文为准。serve 的 `http_requests: 0` 不统计浏览器请求，不能当作独立 HTTP smoke 或 GUI 通过计数。
 
 激活虚拟环境后可复现回归；仓库根目录没有 `package.json`，直接使用 Node 内置测试运行器：
 
