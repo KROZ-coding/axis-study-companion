@@ -76,6 +76,8 @@ function harness(names, options = {}) {
     screen: "app", role: "student", who: "Test student", live: true,
     transition: "", transitionId: 4, loggingOut: false, loading: false,
     reduce: false, reveal: 1, shifted: true,
+    teacherView: "home", teacherCourses: [], teacherContextVersion: 0, reviewSelection: null,
+    drawer: false, openStudent: null,
     studentPage: "workspace", studentTab: "tasks", taskFilter: "all",
     authStatus: "ready", authTab: "login", authRole: "student", authAccount: "",
     answers: [], currentQ: 0, banner: "", submitted: false,
@@ -108,15 +110,16 @@ function harness(names, options = {}) {
     setTimeout: (callback) => { calls.push(["timeout", callback]); return ++serial; },
     ...options.window,
   };
+  const harnessApi = { state: { user: null }, ...(options.api || {}) };
   const context = vm.createContext({
-    state, api: options.api || {}, scene: options.scene || null,
+    state, api: harnessApi, scene: options.scene || null,
     view, window, reduceQuery,
     stage: { classList: { add: record("stage.add") } },
     document: { querySelector: () => null },
     sample: { className: "sample" },
     AUTH_ROLE_LABEL: { student: "学生", teacher: "教师", admin: "管理员" },
     EYE_OPEN: "", EYE_CLOSED: "",
-    leaseTimer: 1, workspaceRequest: 0, revealTimer: 2,
+    leaseTimer: 1, workspaceRequest: 0, revealTimer: 2, notificationOpenSequence: 0,
     chatEpoch: 0, chatListSequence: 0, chatPostSequence: 0,
     chatStreamClosers: new Map(), chatReadControllers: new Set(), chatComposing: false, chatRenderPending: false,
     AbortController,
@@ -128,6 +131,10 @@ function harness(names, options = {}) {
     teacherComposer: { bind: record("teacherComposer.bind"), reset: record("teacherComposer.reset") },
     adminWorkspace: { bind: record("adminWorkspace.bind"), reset: record("adminWorkspace.reset"), load: record("adminWorkspace.load"), render: () => '<section data-admin-workspace>管理页面</section>' },
     teacherManagement: { bind: record("teacherManagement.bind"), reset: record("teacherManagement.reset"), leave: () => { calls.push(["teacherManagement.leave"]); return true; }, load: record("teacherManagement.load"), render: () => '<section data-teacher-management>班级管理</section>' },
+    teacherReview: { bind: record("teacherReview.bind"), reset: record("teacherReview.reset"), leave: () => { calls.push(["teacherReview.leave"]); return true; }, load: record("teacherReview.load"), openSelection: async (...args) => { calls.push(["teacherReview.openSelection", ...args]); return true; }, render: () => '<section data-teacher-review>教师复核</section>' },
+    teacherReportWorkspace: { bind: record("teacherReportWorkspace.bind"), reset: record("teacherReportWorkspace.reset"), leave: () => { calls.push(["teacherReportWorkspace.leave"]); return true; }, load: record("teacherReportWorkspace.load"), openSelection: async (...args) => { calls.push(["teacherReportWorkspace.openSelection", ...args]); return true; }, render: () => '<section data-teacher-reports>阶段报告</section>' },
+    studentFeedback: { bind: record("studentFeedback.bind"), reset: record("studentFeedback.reset"), leave: () => { calls.push(["studentFeedback.leave"]); return true; }, load: record("studentFeedback.load"), openSelection: async (...args) => { calls.push(["studentFeedback.openSelection", ...args]); return true; }, render: () => '<section data-student-feedback>教师反馈</section>' },
+    learningNotifications: { bind: record("learningNotifications.bind"), reset: record("learningNotifications.reset"), load: record("learningNotifications.load"), render: () => '<section data-learning-notifications>通知</section>' },
     resetEvents: record("resetEvents"), mountScene: record("mountScene"),
     fitCanvas: record("fitCanvas"), refreshAnchors: record("refreshAnchors"),
     loadWorkspace: record("loadWorkspace"),
@@ -141,7 +148,7 @@ function harness(names, options = {}) {
     performance: { now: () => 0 },
     ...options.globals,
   });
-  vm.runInContext([...new Set([...answerFunctions, "chatRoute", "setChatRoute", "closeStudentChatStream", ...names])].map(functionSource).join("\n"), context, { filename: appPath });
+  vm.runInContext([...new Set([...answerFunctions, "chatRoute", "setChatRoute", "closeStudentChatStream", "resetLearningWorkspaces", "leaveTeacherPage", "openTeacherReview", "openTeacherReports", "openStudentFeedback", "openLearningNotification", ...names])].map(functionSource).join("\n"), context, { filename: appPath });
   return { context, state, calls, intervals, frames, nodes, mediaListeners, reduceQuery };
 }
 
@@ -2274,6 +2281,136 @@ test("changing to reduced motion opens entry without starting a stopped workspac
       assert.equal(s.events.some(([name]) => name === "reset" || name === "resume" || name === "start"), false);
     }
   }
+});
+
+test("review and report navigation respects unresolved commands and shares only supported scope IDs", async () => {
+  const h = harness([], { state: { role: "teacher", teacherView: "review", reviewSelection: { goalId: "goal", studentId: "student", taskId: "task", attemptId: "attempt" } } });
+  h.context.teacherReview.leave = () => false;
+  assert.equal(await h.context.openTeacherReports(), false); assert.equal(h.state.teacherView, "review");
+  h.context.teacherReview.leave = () => true;
+  assert.equal(await h.context.openTeacherReports(), true);
+  assert.deepEqual(plain(h.calls.find(([name]) => name === "teacherReportWorkspace.openSelection")[1]), { goalId: "goal", studentId: "student" });
+  h.state.loggingOut = true;
+  assert.equal(await h.context.openTeacherReview(), false);
+});
+
+test("teacher notifications authorize the exact task and preserve receipt state across class switching", async () => {
+  const full = task("target", { class_id: "class-2", student_id: "student", attempts: [{ id: "attempt" }] });
+  const h = harness(["selectTeacherClass"], {
+    state: { role: "teacher", classId: "class-1", courseId: "course-1" },
+    api: { state: { user: { id: "teacher" } }, task: async () => full,
+      teacherClasses: async () => [{ course: { id: "course-1", name: "课程" }, classes: [{ id: "class-2", name: "另一班" }] }] },
+  });
+  assert.equal(await h.context.openLearningNotification({ payload: { task_id: "target", attempt_id: "attempt", thread_id: "thread", message_id: "message-501" } }), true);
+  assert.equal(h.state.classId, "class-2");
+  assert.equal(h.calls.some(([name]) => name === "learningNotifications.reset"), false);
+  assert.deepEqual(plain(h.calls.find(([name]) => name === "teacherReview.openSelection")[1]), { goalId: full.goal_id, taskId: "target", attemptId: "attempt", studentId: "student", threadId: "thread", messageId: "message-501" });
+});
+
+test("failed teacher notification checks preserve the current workspace and unsent input", async () => {
+  for (const teacherView of ["review", "reports", "management"]) {
+    for (const failure of ["task", "missing-attempt", "classes", "revoked", "wrong-task"]) {
+      const gate = deferred();
+      const full = task(failure === "wrong-task" ? "other" : "target", { class_id: "class-1", attempts: [{ id: "attempt" }] });
+      const h = harness([], {
+        state: { role: "teacher", teacherView, classId: "class-1", courseId: "course-1", reviewSelection: { taskId: "original" } },
+        api: { state: { user: { id: "teacher" } }, task: () => gate.promise,
+          teacherClasses: async () => {
+            if (failure === "classes") throw new Error("班级读取失败");
+            return failure === "revoked" ? [] : [{ course: { id: "course-1" }, classes: [{ id: "class-1" }] }];
+          } },
+      });
+      let input = "尚未提交的评分理由与短评", content = "当前工作区";
+      const module = teacherView === "review" ? h.context.teacherReview : teacherView === "reports" ? h.context.teacherReportWorkspace : h.context.teacherManagement;
+      module.leave = () => { input = ""; content = ""; return true; };
+      const pending = h.context.openLearningNotification({ payload: { task_id: "target", attempt_id: failure === "missing-attempt" ? "missing" : "attempt" } });
+      assert.equal(input, "尚未提交的评分理由与短评", `${teacherView}/${failure}: input during lookup`);
+      assert.equal(content, "当前工作区");
+      if (failure === "task") gate.reject(new Error("任务读取失败"));
+      else gate.resolve(full);
+      assert.equal(await pending, false);
+      assert.equal(input, "尚未提交的评分理由与短评", `${teacherView}/${failure}: input after failure`);
+      assert.equal(content, "当前工作区");
+      assert.equal(h.state.teacherView, teacherView);
+      assert.deepEqual(plain(h.state.reviewSelection), { taskId: "original" });
+      assert.equal(h.calls.some(([name]) => name === "teacherReview.openSelection"), false);
+    }
+  }
+});
+
+test("teacher notification checks finish before leaving a report and respect its pending command", async () => {
+  for (const canLeave of [false, true]) {
+    const gate = deferred();
+    const full = task("target", { class_id: "class-1", student_id: "student", attempts: [{ id: "attempt" }] });
+    const h = harness([], { state: { role: "teacher", teacherView: "reports", classId: "class-1" },
+      api: { state: { user: { id: "teacher" } }, task: async () => full, teacherClasses: () => gate.promise } });
+    let leaves = 0;
+    h.context.teacherReportWorkspace.leave = () => { leaves += 1; return canLeave; };
+    const pending = h.context.openLearningNotification({ payload: { task_id: "target", attempt_id: "attempt" } });
+    await settle();
+    assert.equal(leaves, 0);
+    gate.resolve([{ course: { id: "course-1" }, classes: [{ id: "class-1" }] }]);
+    assert.equal(await pending, canLeave);
+    assert.equal(leaves, 1);
+    assert.equal(h.state.teacherView, canLeave ? "review" : "reports");
+    assert.equal(h.calls.some(([name]) => name === "teacherReview.openSelection"), canLeave);
+  }
+});
+
+test("late teacher notification reads never override newer navigation or guessed attempts", async () => {
+  const gate = deferred(); const full = task("target", { class_id: "class-1", attempts: [{ id: "real" }] });
+  const h = harness([], { state: { role: "teacher", classId: "class-1" }, api: { state: { user: { id: "teacher" } }, task: () => gate.promise } });
+  const pending = h.context.openLearningNotification({ payload: { task_id: "target" } });
+  await h.context.openTeacherReports({}); gate.resolve(full);
+  assert.equal(await pending, false); assert.equal(h.state.teacherView, "reports");
+  assert.equal(h.calls.some(([name]) => name === "teacherReview.openSelection"), false);
+  h.context.api.task = async () => full;
+  assert.equal(await h.context.openLearningNotification({ payload: { task_id: "target", attempt_id: "missing" } }), false);
+});
+
+test("notification class switching cannot reopen review after navigation during its refresh", async () => {
+  const gate = deferred(); const full = task("target", { class_id: "class-2" });
+  const h = harness(["selectTeacherClass"], { state: { role: "teacher", classId: "class-1" },
+    api: { state: { user: { id: "teacher" } }, task: async () => full, teacherClasses: async () => [{ course: { id: "course-1" }, classes: [{ id: "class-2" }] }] },
+    globals: { loadWorkspace: () => gate.promise } });
+  const pending = h.context.openLearningNotification({ payload: { task_id: "target" } }); await settle();
+  await h.context.openTeacherReports({}); gate.resolve();
+  assert.equal(await pending, false); assert.equal(h.state.teacherView, "reports");
+  assert.equal(h.calls.some(([name]) => name === "teacherReview.openSelection"), false);
+});
+
+test("student notification marks its resource opened only while the same navigation remains current", async () => {
+  const gate = deferred(); const h = harness([], { api: { state: { user: { id: "student" } } } });
+  h.context.studentFeedback.openSelection = () => gate.promise;
+  const pending = h.context.openLearningNotification({ payload: { task_id: "task", attempt_id: "attempt" } });
+  h.context.notificationOpenSequence += 1; h.state.studentTab = "tasks";
+  gate.resolve(true); assert.equal(await pending, false);
+  assert.equal(await h.context.openLearningNotification({ redacted: true, payload: { task_id: "secret" } }), false);
+});
+
+test("closing submission opens preserved history without a diagnostic, lease or retry", async () => {
+  const closed = task("closed", { submission_closed: true, diagnostic_required: true, status: "in_progress", attempts: [{ id: "prior", status: "graded" }] });
+  const h = harness([...taskFunctions, "retryLiveTask"], { state: { liveTask: closed },
+    api: { task: async () => closed, acquireLease: () => assert.fail("closed task acquired lease"), retryTask: () => assert.fail("closed task retried") },
+    globals: { runDiagnostic: () => assert.fail("closed task opened diagnostic") } });
+  await h.context.selectLiveTask("closed", "prior");
+  assert.equal(h.state.studentPage, "result"); assert.equal(h.state.selectedAttemptId, "prior");
+  assert.equal(await h.context.openLiveTask(), false);
+  await h.context.retryLiveTask(); assert.equal(h.state.liveLease, null);
+  const display = harness(["escapeHtml", "studentContext", "tasksLive", "studentTaskButton", "taskTitle", "taskQuestionCount", "taskFinished"], {
+    state: { liveTask: { ...closed, allow_retries: true }, liveTasks: [{ ...closed, allow_retries: true }], studentPage: "tabs" },
+    globals: { studentHeading: () => "", studentDate: () => "", studentIcon: () => "", taskStatus: () => "已关闭提交" },
+  });
+  assert.match(display.context.studentContext(), /已关闭提交，不可重做/);
+  assert.doesNotMatch(display.context.studentContext(), /教师允许/);
+  assert.match(display.context.tasksLive(), /已关闭提交，保留历史记录/);
+  assert.doesNotMatch(display.context.tasksLive(), /可在评分后重做/);
+});
+
+test("teacher authorization refresh clears module records and shared selection when the class disappears", async () => {
+  const h = harness(["loadTeacher"], { state: { role: "teacher", classId: "old", courseId: "old", reviewSelection: { goalId: "private" } }, api: { teacherClasses: async () => [] } });
+  await h.context.loadTeacher(); assert.equal(h.state.reviewSelection, null); assert.equal(h.state.classId, null);
+  for (const module of ["teacherReview", "teacherReportWorkspace", "studentFeedback", "learningNotifications"]) assert.ok(h.calls.some(([name]) => name === `${module}.reset`));
 });
 
 test("mountScene reuses an existing renderer and does not retry a known WebGL fallback", () => {

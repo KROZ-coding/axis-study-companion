@@ -87,6 +87,7 @@ const state = {
   liveStudents: [],
   teacherCourses: [],
   teacherContextVersion: 0,
+  reviewSelection: null,
   liveGoals: [],
   liveTasks: [],
   liveTask: null,
@@ -167,10 +168,123 @@ const teacherManagement = window.createTeacherManagement({
       if (classId !== undefined) state.classId = classId;
       state.openStudent = null; state.liveStudents = []; state.liveGoals = [];
       teacherLibrary.reset(); teacherComposer.reset();
+      resetLearningWorkspaces();
     }
     await loadWorkspace();
   },
 });
+const teacherReview = window.createTeacherReview({
+  api, state, render, toast,
+  onChanged: () => learningNotifications.load(),
+  onSelectionChange: (selection) => {
+    if (state.role !== "teacher" || state.loggingOut) return;
+    state.reviewSelection = { goalId: selection.goalId, taskId: selection.taskId, attemptId: selection.attemptId, studentId: selection.studentId };
+  },
+  onReports: (selection) => openTeacherReports(selection),
+});
+const teacherReportWorkspace = window.createTeacherReports({ api, state, render, toast });
+const studentFeedback = window.createStudentFeedback({
+  api, state, render, toast,
+  onChanged: () => learningNotifications.load(),
+});
+const learningNotifications = window.createLearningNotifications({
+  api, state, render, toast,
+  onOpen: (notification) => openLearningNotification(notification),
+});
+let notificationOpenSequence = 0;
+
+function resetLearningWorkspaces({ preserveNotifications = false } = {}) {
+  if (!preserveNotifications) notificationOpenSequence += 1;
+  state.reviewSelection = null;
+  teacherReview.reset();
+  teacherReportWorkspace.reset();
+  studentFeedback.reset();
+  if (!preserveNotifications) learningNotifications.reset();
+}
+
+function leaveTeacherPage(nextView) {
+  if (state.teacherView === nextView) return true;
+  if (state.teacherView === "management") return teacherManagement.leave();
+  if (state.teacherView === "review") return teacherReview.leave();
+  if (state.teacherView === "reports") return teacherReportWorkspace.leave();
+  return true;
+}
+
+async function openTeacherReview(selection = {}, { notificationSequence } = {}) {
+  if (state.role !== "teacher" || state.loggingOut || state.transition || state.loading || state.drawer) return false;
+  if (!leaveTeacherPage("review")) return false;
+  if (notificationSequence === undefined) notificationOpenSequence += 1;
+  else if (notificationSequence !== notificationOpenSequence) return false;
+  state.teacherView = "review";
+  render();
+  return teacherReview.openSelection(selection);
+}
+
+async function openTeacherReports(selection = state.reviewSelection || {}) {
+  if (state.role !== "teacher" || state.loggingOut || state.transition || state.loading || state.drawer) return false;
+  if (!leaveTeacherPage("reports")) return false;
+  notificationOpenSequence += 1;
+  state.teacherView = "reports";
+  render();
+  return teacherReportWorkspace.openSelection({ goalId: selection.goalId, studentId: selection.studentId });
+}
+
+async function openStudentFeedback(selection = {}, { notificationSequence } = {}) {
+  if (state.role !== "student" || state.loggingOut || state.transition || state.loading) return false;
+  if (state.studentTab === "feedback" && !studentFeedback.leave()) return false;
+  if (notificationSequence === undefined) notificationOpenSequence += 1;
+  else if (notificationSequence !== notificationOpenSequence) return false;
+  closeStudentChatStream();
+  setChatRoute(null);
+  state.sheet = null;
+  state.studentTab = "feedback";
+  state.studentPage = "home";
+  render();
+  return studentFeedback.openSelection(selection);
+}
+
+async function openLearningNotification(notification) {
+  if (!state.live || state.loggingOut || state.transition || state.loading || state.drawer) return false;
+  const payload = notification?.payload || notification || {};
+  const taskId = payload.task_id;
+  if (!taskId || notification?.redacted || payload.redacted) {
+    toast("这条通知没有可打开的学习记录，请刷新通知");
+    return false;
+  }
+  const sequence = ++notificationOpenSequence;
+  const generation = state.transitionId;
+  const role = state.role;
+  const actorId = api.state.user?.id;
+  const current = () => sequence === notificationOpenSequence && generation === state.transitionId
+    && role === state.role && actorId === api.state.user?.id && !state.loggingOut;
+  try {
+    if (role === "student") {
+      const opened = await openStudentFeedback({ taskId, attemptId: payload.attempt_id, threadId: payload.thread_id, questionVersionId: payload.question_version_id }, { notificationSequence: sequence });
+      return current() && opened === true;
+    }
+    if (role !== "teacher") return false;
+    const full = await api.task(taskId);
+    if (!current()) return false;
+    if (payload.attempt_id && !full.attempts?.some((attempt) => attempt.id === payload.attempt_id)) {
+      toast("通知对应的提交记录暂时不可用");
+      return false;
+    }
+    const entries = await api.teacherClasses();
+    if (!current()) return false;
+    const entry = entries.find((item) => item.course.id === full.course_id && item.classes.some((classroom) => classroom.id === full.class_id));
+    if (!entry || full.id !== taskId) { toast("当前账号已无权查看通知对应的班级或任务"); return false; }
+    state.teacherCourses = entries;
+    if (state.classId !== full.class_id) {
+      const changed = await selectTeacherClass(full.class_id, { notificationSequence: sequence });
+      if (!changed || !current()) return false;
+    }
+    const opened = await openTeacherReview({ goalId: full.goal_id, taskId: full.id, attemptId: payload.attempt_id, studentId: full.student_id, threadId: payload.thread_id, messageId: payload.message_id }, { notificationSequence: sequence });
+    return current() && opened === true;
+  } catch (error) {
+    if (current()) toast(error?.message || "通知对应的记录暂时无法打开");
+    return false;
+  }
+}
 
 function toast(text) {
   toastEl.textContent = text;
@@ -506,6 +620,7 @@ function renderTeacher() {
   const page = {
     home: teacherHome,
     student: teacherStudent,
+    review: () => teacherReview.render(),
     materials: teacherMaterials,
     reports: teacherReports,
     management: () => teacherManagement.render(),
@@ -514,12 +629,12 @@ function renderTeacher() {
     <div class="app teacher-app" ${state.drawer ? "inert" : ""}>
       <aside class="side">
         <div class="brand">伴星导学</div>
-        ${nav("home", "班级学情")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("reports", "阶段成果")}${nav("management", "课程与班级")}
+        ${nav("home", "班级学情")}${nav("review", "批改与反馈")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("reports", "阶段成果")}${nav("management", "课程与班级")}
         <div class="spacer"></div>
         <p class="who muted">${escapeHtml(state.who)} · ${escapeHtml(state.className || "教师工作区")}</p>
         <button class="nav-btn" data-action="logout">退出</button>
       </aside>
-      <main class="main" id="teacher-main" tabindex="-1">${state.teacherView === "management" ? "" : teacherContext()}${page()}</main>
+      <main class="main" id="teacher-main" tabindex="-1">${state.teacherView === "management" ? "" : teacherContext()}${state.live ? learningNotifications.render() : ""}${page()}</main>
     </div>
     ${state.drawer ? drawer() : ""}`;
 }
@@ -534,17 +649,27 @@ function teacherContext() {
   return `<div class="teacher-context"><label class="field">课程与班级<select data-teacher-class aria-label="课程与班级" ${state.loading ? "disabled" : ""}>${entries.map(({ course, classes }) => classes.length ? `<optgroup label="${escapeHtml(course.name)}">${classes.map((classroom) => `<option value="${escapeHtml(classroom.id)}" ${state.classId === classroom.id ? "selected" : ""}>${escapeHtml(course.name)} / ${escapeHtml(classroom.name)}</option>`).join("")}</optgroup>` : "").join("")}</select></label><p class="muted">题库按课程共享，发布范围由所选班级和学生确定。</p></div>`;
 }
 
-async function selectTeacherClass(classId) {
+async function selectTeacherClass(classId, { notificationSequence } = {}) {
   const entry = state.teacherCourses.find((item) => item.classes.some((classroom) => classroom.id === classId));
-  if (!entry || state.loading || state.drawer) return;
+  if (!entry || state.role !== "teacher" || state.loading || state.drawer || state.loggingOut || state.transition) return false;
+  if (!leaveTeacherPage(null)) { render(); return false; }
   const classroom = entry.classes.find((item) => item.id === classId);
+  const generation = state.transitionId;
   state.teacherContextVersion += 1;
+  const context = state.teacherContextVersion;
   state.courseId = entry.course.id; state.courseName = entry.course.name;
   state.classId = classroom.id; state.className = classroom.name;
   state.openStudent = null; state.liveStudents = []; state.liveGoals = [];
   teacherLibrary.reset(); teacherComposer.reset(); teacherManagement.reset();
+  // A notification owns its read receipt across a class switch in the same session.
+  // Ordinary class navigation invalidates any earlier notification opening.
+  const preserveNotifications = notificationSequence !== undefined && notificationSequence === notificationOpenSequence;
+  resetLearningWorkspaces({ preserveNotifications });
   await loadWorkspace();
+  if (generation !== state.transitionId || context !== state.teacherContextVersion || state.loggingOut || state.role !== "teacher"
+      || (notificationSequence !== undefined && notificationSequence !== notificationOpenSequence)) return false;
   if (state.teacherView === "materials") teacherLibrary.load();
+  return state.classId === classId && !state.liveError;
 }
 
 /** 连上后端时的教师首页：全部来自正式接口。 */
@@ -698,11 +823,8 @@ function teacherStudentLive() {
         <button class="btn" data-action="open-drawer" data-goal-student="${escapeHtml(student.id)}">按此依据出目标</button>
       </section>
     </div>
-    <h2 class="section">短评</h2>
-    <form class="panel" data-action="comment">
-      <label class="field">写给${escapeHtml(student.name)}<textarea name="comment" required placeholder="只指导，不改答案。"></textarea></label>
-      <button class="btn primary" type="submit">发送短评</button>
-    </form>`;
+    <h2 class="section">历史作答与短评</h2>
+    <section class="panel"><p>选择具体任务和提交记录后，可以逐题批改、查看更正记录并发送短评。</p><button class="btn primary" data-action="open-review" data-student-id="${escapeHtml(student.id)}"${goal ? ` data-goal-id="${escapeHtml(goal.id)}"` : ""}>查看作答与反馈</button></section>`;
 }
 
 function teacherMaterials() {
@@ -710,13 +832,7 @@ function teacherMaterials() {
 }
 
 function teacherReports() {
-  return `
-    <h1 class="page">阶段成果</h1>
-    <p class="muted">四种成果都可以从同一份快照导出。原型只展示入口，不生成文件。</p>
-    <div class="grid three">
-      ${["班级阶段学情", "学生个人学习", "学习目标执行", "题库质量与使用"].map((name) => `<section class="panel"><h3>${name}</h3><p class="muted">网页阅读已可点开结构。PDF、表格和数据文件使用同一截止时间。</p><button class="btn" data-action="export" data-name="${name}">预览导出</button></section>`).join("")}
-    </div>
-    <div class="state-banner">11 月 8 日下载的 PDF 仍是旧修订。页面默认展示 11 月 10 日的更正版。</div>`;
+  return teacherReportWorkspace.render();
 }
 
 function drawer() {
@@ -727,6 +843,7 @@ function studentIcon(name) {
   const paths = {
     tasks: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2M9 10h6M9 14h6M9 18h3"/>',
     companion: '<path d="M20 11.5a8 8 0 0 1-8 8H5l-3 2v-7a8 8 0 1 1 18-3Z"/><path d="M8 11h.01M12 11h.01M16 11h.01"/>',
+    feedback: '<path d="M4 4h16v12H9l-5 4V4Z"/><path d="M8 8h8M8 12h5"/>',
     mine: '<path d="M4 5.5C7 4 9 4 12 6c3-2 5-2 8-.5V20c-3-1.5-5-1.5-8 .5-3-2-5-2-8-.5ZM12 6v14"/>',
     logout: '<path d="M9 4H5v16h4M14 8l4 4-4 4M9 12h11"/>',
     arrow: '<path d="M5 12h14m-6-6 6 6-6 6"/>',
@@ -750,10 +867,11 @@ function taskTitle(task) {
 }
 
 function taskFinished(task) {
-  return ["submitted", "grading", "results_ready", "awaiting_manual", "closed"].includes(task?.status);
+  return Boolean(task?.submission_closed) || ["submitted", "grading", "results_ready", "awaiting_manual", "closed"].includes(task?.status);
 }
 
 function taskStatus(task) {
+  if (task.submission_closed) return "已关闭提交";
   if (task.diagnostic_required) return "待完成短诊";
   if (task.scheduled_at && task.scheduled_at * 1000 > Date.now()) return "尚未开放";
   return ({ results_ready: "已完成", awaiting_manual: "等待教师评分", closed: "已结束", submitted: "正在评卷", grading: "正在评卷" })[task.status]
@@ -774,9 +892,9 @@ function studentNav(id, label) {
 function renderStudent() {
   const page = state.studentPage;
   const section = page === "workspace" ? "任务作答" : page === "diagnostic" ? "独立短诊"
-    : page === "result" ? "任务反馈" : ({ tasks: "我的任务", companion: "学伴", mine: "我的学习" })[state.studentTab];
+    : page === "result" ? "任务反馈" : ({ tasks: "我的任务", companion: "学伴", mine: "我的学习", feedback: "教师反馈" })[state.studentTab];
   const name = state.who || "同学";
-  const navItems = studentNav("tasks", "我的任务") + studentNav("companion", "学伴") + studentNav("mine", "我的学习");
+  const navItems = studentNav("tasks", "我的任务") + studentNav("companion", "学伴") + studentNav("mine", "我的学习") + studentNav("feedback", "教师反馈");
   view.innerHTML = `
     <div class="student-app" data-student-shell>
       <aside class="student-sidebar">
@@ -789,6 +907,7 @@ function renderStudent() {
         <header class="student-topbar"><div class="student-breadcrumb">学习空间 <span>/</span> ${section}</div><div class="student-session"><i></i>${state.loading ? "正在同步" : "正式学习记录"}<time>${new Date().toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })}</time></div></header>
         <div class="student-columns">
           <main class="student-main" id="student-main" tabindex="-1" aria-label="${section}">
+            ${state.live ? learningNotifications.render() : ""}
             ${page === "workspace" ? workspace() : page === "diagnostic" ? diagnosticPage() : page === "result" ? resultPage() : studentTab()}
           </main>
           <aside class="student-context" aria-label="学习信息">${studentContext()}</aside>
@@ -806,6 +925,7 @@ function studentHeading(title, text, refresh = false) {
 function studentTab() {
   if (state.studentTab === "tasks") return tasks();
   if (state.studentTab === "mine") return mine();
+  if (state.studentTab === "feedback") return studentFeedback.render();
   return companion();
 }
 
@@ -821,7 +941,7 @@ function studentContext() {
         : `<div class="student-stat-pair"><div><strong>${state.liveTasks.length}</strong><small>已分配任务</small></div><div><strong>${completed}</strong><small>已完成任务</small></div></div>`}
     </section>
     <section class="student-context-block"><p class="student-context-label">${task ? "当前学习目标" : "学习提示"}</p><h2>${escapeHtml(task ? taskTitle(task) : "从一个任务开始")}</h2>${goal?.description ? `<p class="student-context-note">${escapeHtml(goal.description)}</p>` : ""}
-      ${task ? `<dl><div><dt>题目数量</dt><dd>${taskQuestionCount(task)} 题</dd></div><div><dt>截止时间</dt><dd>${studentDate(task.deadline_at, true)}</dd></div><div><dt>当前状态</dt><dd>${taskStatus(task)}</dd></div><div><dt>重做</dt><dd>${task.allow_retries ? "教师允许" : "本轮未开放"}</dd></div></dl>` : '<p class="student-context-note">老师分配任务后，会显示在这里。尚无记录时不推算掌握程度。</p>'}
+      ${task ? `<dl><div><dt>题目数量</dt><dd>${taskQuestionCount(task)} 题</dd></div><div><dt>截止时间</dt><dd>${studentDate(task.deadline_at, true)}</dd></div><div><dt>当前状态</dt><dd>${taskStatus(task)}</dd></div><div><dt>重做</dt><dd>${task.submission_closed ? "已关闭提交，不可重做" : task.allow_retries ? "教师允许" : "本轮未开放"}</dd></div></dl>` : '<p class="student-context-note">老师分配任务后，会显示在这里。尚无记录时不推算掌握程度。</p>'}
     </section>
     <section class="student-context-block"><p class="student-context-label">学习记录的约定</p><ul class="student-evidence-list"><li>${studentIcon("check")}<span>首次成绩单独保留</span></li><li>${studentIcon("check")}<span>评分完成后开放解析</span></li><li>${studentIcon("check")}<span>提示与独立作答分开记录</span></li></ul><p class="student-context-note">每个判断都来自你的实际记录，记录不足时保持待评估。</p></section>`;
 }
@@ -937,8 +1057,8 @@ function tasks() {
 
 /** 连上后端时的任务页。 */
 function studentTaskButton(task, primary = false) {
-  const upcoming = task.scheduled_at && task.scheduled_at * 1000 > Date.now();
-  const label = upcoming ? "等待开放" : task.diagnostic_required ? "开始短诊" : taskFinished(task) ? "查看结果"
+  const upcoming = !task.submission_closed && task.scheduled_at && task.scheduled_at * 1000 > Date.now();
+  const label = task.submission_closed ? "查看记录" : upcoming ? "等待开放" : task.diagnostic_required ? "开始短诊" : taskFinished(task) ? "查看结果"
     : state.liveLease && state.liveTask?.id === task.id || Object.keys(task.draft_answers || {}).length ? "继续作答" : "开始作答";
   return `<button class="btn${primary ? " primary" : ""}" data-action="open-task" data-task-id="${escapeHtml(task.id)}" ${state.loading || upcoming ? "disabled" : ""}>${label}${primary ? studentIcon("arrow") : ""}</button>`;
 }
@@ -962,7 +1082,7 @@ function tasksLive() {
       </div>
     </section>
     <div class="student-section-head"><h2>我的任务</h2><div class="row" role="group" aria-label="任务筛选">${[["all", "全部"], ["todo", "待完成"], ["done", "已交卷"]].map(([id, label]) => `<button class="chip" data-task-filter="${id}" aria-pressed="${state.taskFilter === id}">${label}</button>`).join("")}</div></div>
-    <div class="student-task-list">${tasks.length ? tasks.map((item) => `<article class="student-task-row" data-selected="${task.id === item.id}"><span class="student-task-state">${studentIcon(taskFinished(item) ? "check" : "tasks")}</span><div class="student-task-copy"><h3>${escapeHtml(taskTitle(item))}</h3><p>${taskQuestionCount(item)} 道题 · ${studentDate(item.deadline_at, true)}</p></div><div class="student-task-side"><strong>${taskStatus(item)}</strong><small>${item.allow_retries ? "可在评分后重做" : "首次作答单独记录"}</small></div>${studentTaskButton(item)}</article>`).join("") : '<section class="student-empty"><h2>这个分类暂时没有任务</h2><p>可以切换到“全部”查看其他任务。</p></section>'}</div>`;
+    <div class="student-task-list">${tasks.length ? tasks.map((item) => `<article class="student-task-row" data-selected="${task.id === item.id}"><span class="student-task-state">${studentIcon(taskFinished(item) ? "check" : "tasks")}</span><div class="student-task-copy"><h3>${escapeHtml(taskTitle(item))}</h3><p>${taskQuestionCount(item)} 道题 · ${studentDate(item.deadline_at, true)}</p></div><div class="student-task-side"><strong>${taskStatus(item)}</strong><small>${item.submission_closed ? "已关闭提交，保留历史记录" : item.allow_retries ? "可在评分后重做" : "首次作答单独记录"}</small></div>${studentTaskButton(item)}</article>`).join("") : '<section class="student-empty"><h2>这个分类暂时没有任务</h2><p>可以切换到“全部”查看其他任务。</p></section>'}</div>`;
 }
 
 function mine() {
@@ -1108,12 +1228,13 @@ function workspaceLive() {
   const questions = task?.questions || [];
   if (!questions.length) return `${studentHeading("任务作答", "正式卷还没有开放。")}
     <div class="state-banner warn">${escapeHtml(task?.notice || "没有可作答的题目，请返回任务列表。")}</div><button class="btn" data-tab="tasks">返回任务</button>`;
-  const locked = state.banner === "takeover" || state.loading;
+  const locked = state.banner === "takeover" || state.loading || state.loggingOut || Boolean(task.submission_closed);
   const current = Math.min(state.currentQ, questions.length - 1);
   const question = questions[current];
   return `<div class="student-workspace">
       <header class="student-workspace-head"><button class="btn" data-tab="tasks">返回任务</button><span class="tag">${state.mode === "focus" ? "专注作答" : "独立尝试"}</span><button class="linkish" data-action="toggle-mode">${state.mode === "focus" ? "显示学习提示" : "进入专注模式"}</button></header>
       ${studentHeading(taskTitle(task), "按自己的节奏作答，保存后可以下次继续。")}
+      ${task.submission_closed ? '<div class="state-banner warn">老师已关闭提交，当前作答只读。已保存的记录仍可查看。</div>' : ""}
       <section class="student-question-card" aria-label="第 ${current + 1} 题"><div class="student-question-meta"><span>第 ${current + 1} 题 / 共 ${questions.length} 题</span><span>${question.points ?? "—"} 分</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>
         ${state.banner === "takeover" ? '<div class="state-banner bad" role="alert">另一台设备正在作答，当前为只读。已输入的选择仍保留在这里。</div>' : ""}
         ${state.banner === "save-fail" ? '<div class="state-banner bad" role="alert">没有保存成功，当前答案仍在页面上，请重新保存。</div>' : ""}
@@ -1141,16 +1262,17 @@ function resultPageLive() {
   const attempts = task?.attempts || [];
   const attempt = state.selectedAttemptId ? attempts.find((item) => item.id === state.selectedAttemptId) : attempts[attempts.length - 1];
   const heading = `<div class="student-workspace-head"><button class="btn" data-tab="tasks">返回任务</button><span class="tag">${taskStatus(task || {})}</span></div>${studentHeading(task ? taskTitle(task) : "本轮结果", "把每次作答和具体反馈放在一起看。")}`;
-  if (!task || !attempt) return `${heading}<div class="state-banner warn">${state.selectedAttemptId ? "这次作答记录暂时不可用，请返回我的学习后重试。" : "还在评卷，成绩稍后出现在这里。"}</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
+  if (!task || !attempt) return `${heading}<div class="state-banner warn">${state.selectedAttemptId ? "这次作答记录暂时不可用，请返回我的学习后重试。" : task?.submission_closed ? "老师已关闭提交，这份任务没有已交卷记录。已保存的草稿继续保留。" : "还在评卷，成绩稍后出现在这里。"}</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
+  const feedbackLink = `<div class="student-focus-actions"><button class="btn" data-action="open-feedback" data-task-id="${escapeHtml(task.id)}" data-attempt-id="${escapeHtml(attempt.id)}">教师短评与评分异议</button></div>`;
   const summary = `<section class="student-result-summary"><div class="student-score">${attempt.total_score ?? "—"}<small> / ${attempt.max_score ?? "—"}</small></div><div><h2>${attempt.kind === "first" ? "首次成绩" : "重做成绩"}</h2><p>${attempt.independent_evidence ? "独立作答与提示记录分开保留。" : "这次是复习记录，首次成绩保持不变。"}</p><small>${studentDate(attempt.submitted_at, true)}</small></div></section>`;
-  if (!task.answer_released) return `${heading}${summary}<div class="state-banner warn">整轮评分完成前，不显示对错和解析。</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
+  if (!task.answer_released) return `${heading}${summary}<div class="state-banner warn">整轮评分完成前，不显示对错和解析。</div>${feedbackLink}<button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
   const byId = Object.fromEntries((attempt.items || []).map((item) => [item.question_id, item]));
   return `${heading}${summary}<div class="student-section-head"><h2>逐题反馈</h2><small>${task.questions?.length || 0} 道题</small></div><div class="student-result-list">${(task.questions || []).map((question, index) => {
     const item = byId[question.id] || {};
     const yours = attempt.answers?.[question.id];
     const answerText = (value) => questionAnswerText(question, value);
     return `<section class="panel"><div class="student-result-heading"><h3>第 ${index + 1} 题</h3><span class="tag${item.score === undefined ? " warn" : item.score >= question.points ? " ok" : ""}">${item.score === undefined ? "待评分" : `${item.score} / ${question.points} 分`}</span></div><p class="formula">${escapeHtml(question.stem)}</p><p class="muted">你的作答：${escapeHtml(answerText(yours))}</p>${question.answer !== undefined ? `<p>参考答案：${escapeHtml(answerText(question.answer))}</p>` : ""}${item.result?.why ? `<p class="muted">判定：${escapeHtml(item.result.why)}</p>` : ""}${question.explanation ? `<p>${escapeHtml(question.explanation)}</p>` : ""}</section>`;
-  }).join("")}</div>${task.status === "results_ready" && task.allow_retries ? '<button class="btn" data-action="retry">再做一次，保留首次成绩</button>' : ""}`;
+  }).join("")}</div>${feedbackLink}${task.status === "results_ready" && task.allow_retries && !task.submission_closed ? '<button class="btn" data-action="retry">再做一次，保留首次成绩</button>' : ""}`;
 }
 
 function sheet() {
@@ -1195,6 +1317,8 @@ function bind() {
   view.querySelectorAll("[data-tab]").forEach((node) => node.addEventListener("click", () => {
     if (state.role === "student") {
       if (state.loading || state.loggingOut || state.transition) return;
+      if (state.studentTab === "feedback" && !studentFeedback.leave()) return;
+      notificationOpenSequence += 1;
       state.sheet = null;
       if (state.studentTab === "companion") closeStudentChatStream();
       state.studentTab = node.dataset.tab;
@@ -1208,6 +1332,7 @@ function bind() {
         loadConversationList();
         refreshCompanionPolicy();
       }
+      if (state.studentTab === "feedback") studentFeedback.load();
     } else {
       if (state.authStatus === "checking") return;
       state.authTab = node.dataset.tab;
@@ -1229,14 +1354,19 @@ function bind() {
   }));
   view.querySelectorAll("[data-view]").forEach((node) => node.addEventListener("click", () => {
     if (state.role !== "teacher" || state.loggingOut || state.transition || state.loading) return;
-    if (state.teacherView === "management" && node.dataset.view !== "management" && !teacherManagement.leave()) return;
+    if (!leaveTeacherPage(node.dataset.view)) return;
+    notificationOpenSequence += 1;
     state.teacherView = node.dataset.view;
     render();
     if (state.teacherView === "materials") teacherLibrary.load();
     if (state.teacherView === "management") teacherManagement.load();
+    if (state.teacherView === "review") teacherReview.load();
+    if (state.teacherView === "reports") teacherReportWorkspace.load();
   }));
   view.querySelectorAll("[data-teacher-class]").forEach((node) => node.addEventListener("change", () => selectTeacherClass(node.value)));
   view.querySelectorAll("[data-open-student]").forEach((node) => node.addEventListener("click", () => {
+    if (state.role !== "teacher" || state.loggingOut || state.transition || state.loading || !leaveTeacherPage("student")) return;
+    notificationOpenSequence += 1;
     state.openStudent = node.dataset.openStudent;
     state.teacherView = "student";
     render();
@@ -1310,7 +1440,7 @@ function bind() {
     render();
   }));
   view.querySelectorAll("form").forEach((form) => {
-    if (!form.closest?.("[data-admin-workspace], [data-teacher-management]")) form.addEventListener("submit", onSubmit);
+    if (!form.closest?.("[data-admin-workspace], [data-teacher-management], [data-teacher-review], [data-teacher-reports], [data-student-feedback], [data-learning-notifications]")) form.addEventListener("submit", onSubmit);
   });
   view.querySelectorAll("[data-chat-rename-input]").forEach((input) => input.addEventListener("input", () => {
     state.chatRenameTitle = input.value;
@@ -1350,6 +1480,10 @@ function bind() {
   teacherComposer.bind(view);
   adminWorkspace.bind(view);
   teacherManagement.bind(view);
+  teacherReview.bind(view);
+  teacherReportWorkspace.bind(view);
+  studentFeedback.bind(view);
+  learningNotifications.bind(view);
 }
 
 async function finishLogout() {
@@ -1359,6 +1493,7 @@ async function finishLogout() {
   teacherComposer.reset();
   adminWorkspace.reset();
   teacherManagement.reset();
+  resetLearningWorkspaces();
   clearInterval(leaseTimer);
   leaseTimer = 0;
   closeStudentChatStream();
@@ -1381,7 +1516,7 @@ async function finishLogout() {
     chatArchived: false, chatHasMoreConversations: false, chatSending: false,
     conversations: [], activeChat: 0, openStudent: null, teacherView: "home", goalLabel: "", exportName: "",
     liveReportFormats: [], liveError: "", loading: false, courseId: null, courseName: "", classId: null, className: "",
-    teacherCourses: [], teacherContextVersion: 0,
+    teacherCourses: [], teacherContextVersion: 0, reviewSelection: null,
     diagnostic: null, diagnosticAnswers: [], answers: [], submitted: false, seenSolution: false,
     draftDirty: false, savedAt: null, selectedAttemptId: null, banner: "", mode: "tutor",
     liveReport: null, railEvents: [], railLabel: "入口 · 正式服务已连接", step: 0,
@@ -1431,7 +1566,16 @@ function onAction(event) {
     }
     return;
   }
+  if (action === "open-review") {
+    openTeacherReview({ studentId: event.currentTarget.dataset.studentId, goalId: event.currentTarget.dataset.goalId });
+    return;
+  }
+  if (action === "open-feedback") {
+    openStudentFeedback({ taskId: event.currentTarget.dataset.taskId, attemptId: event.currentTarget.dataset.attemptId });
+    return;
+  }
   if (action === "open-drawer") {
+    if (state.role !== "teacher" || state.loggingOut || state.transition || state.loading || !leaveTeacherPage(null)) return;
     teacherComposer.open({ studentId: event.currentTarget.dataset.goalStudent || null });
     return;
   }
@@ -1580,8 +1724,7 @@ function onSubmit(event) {
   const data = new FormData(form);
   if (action === "auth") return submitAuth(data);
   if (action === "comment") {
-    toast("短评已发送，没有改动学生答案");
-    form.reset();
+    toast("请进入批改与反馈，选定一次提交后发送短评");
     return;
   }
   if (action === "answer") {
@@ -1623,6 +1766,7 @@ async function enterWorkspace(role, displayName, { live, message }) {
   const generation = ++state.transitionId;
   adminWorkspace.reset();
   teacherManagement.reset();
+  resetLearningWorkspaces();
   cancelAnimationFrame(revealTimer);
   drag = null;
   touchY = null;
@@ -1757,30 +1901,48 @@ async function loadWorkspace() {
     return;
   }
   const request = ++workspaceRequest;
+  const generation = state.transitionId;
+  const role = state.role;
+  const actorId = api.state.user?.id;
+  const current = () => request === workspaceRequest && generation === state.transitionId
+    && role === state.role && actorId === api.state.user?.id;
   state.loading = true;
   state.liveError = "";
   render();
   try {
-    if (state.role === "teacher") {
-      await loadTeacher();
-      if (request === workspaceRequest && state.role === "teacher" && state.teacherView === "management") await teacherManagement.load();
-    } else {
-      await loadStudent();
-    }
+    if (role === "teacher") await loadTeacher();
+    else await loadStudent();
+    if (!current() || state.loggingOut) return;
+    state.loading = false;
+    if (role === "teacher") {
+      if (state.teacherView === "management") await teacherManagement.load();
+      if (state.teacherView === "review") await teacherReview.load();
+      if (state.teacherView === "reports") await teacherReportWorkspace.load();
+    } else if (state.studentTab === "feedback") await studentFeedback.load();
+    if (current() && !state.loggingOut) await learningNotifications.load();
   } catch (error) {
-    if (request === workspaceRequest) state.liveError = error && error.message ? error.message : "读取学习记录时出错了";
+    if (current() && !state.loggingOut) state.liveError = error?.message || "读取学习记录时出错了";
   } finally {
-    if (request === workspaceRequest) {
+    if (current()) {
       state.loading = false;
-      render();
+      if (!state.loggingOut) render();
     }
   }
 }
 
 async function loadTeacher() {
   const generation = state.transitionId;
-  const context = state.teacherContextVersion;
-  const current = () => generation === state.transitionId && context === state.teacherContextVersion && state.role === "teacher";
+  let context = state.teacherContextVersion;
+  const actorId = api.state.user?.id;
+  const previousClass = state.classId, previousCourse = state.courseId;
+  const current = () => generation === state.transitionId && context === state.teacherContextVersion && state.role === "teacher"
+    && actorId === api.state.user?.id && !state.loggingOut;
+  const clearChangedContext = () => {
+    if (previousClass === state.classId && previousCourse === state.courseId) return;
+    state.teacherContextVersion += 1; context = state.teacherContextVersion;
+    teacherLibrary.reset(); teacherComposer.reset(); teacherManagement.reset();
+    resetLearningWorkspaces();
+  };
   const courses = await api.teacherClasses();
   if (!current()) return;
   state.teacherCourses = courses;
@@ -1788,6 +1950,7 @@ async function loadTeacher() {
     || courses.find((entry) => entry.classes.length) || courses[0];
   if (!withClasses) {
     Object.assign(state, { courseId: null, courseName: "", classId: null, className: "", liveStudents: [], liveGoals: [], openStudent: null });
+    clearChangedContext();
     return;
   }
   state.courseId = withClasses.course.id;
@@ -1799,10 +1962,12 @@ async function loadTeacher() {
     state.liveStudents = [];
     state.liveGoals = [];
     state.openStudent = null;
+    clearChangedContext();
     return;
   }
   state.classId = classroom.id;
   state.className = classroom.name;
+  clearChangedContext();
 
   const [members, goalList] = await Promise.all([
     api.classMembers(state.classId),
@@ -1927,7 +2092,9 @@ function updateStudentTask(task) {
 }
 
 async function selectLiveTask(taskId, attemptId = null) {
-  if (state.loading || !taskId) return;
+  if (state.loading || state.loggingOut || !taskId) return;
+  if (state.studentTab === "feedback" && !studentFeedback.leave()) return;
+  notificationOpenSequence += 1;
   const generation = state.transitionId;
   try {
     state.loading = true;
@@ -1951,7 +2118,7 @@ async function selectLiveTask(taskId, attemptId = null) {
     state.selectedAttemptId = attemptId;
     state.currentQ = 0;
     state.loading = false;
-    if (attemptId) state.studentPage = "result";
+    if (attemptId || full.submission_closed) state.studentPage = "result";
     else if (full.diagnostic_required) await runDiagnostic();
     else if (taskFinished(full)) state.studentPage = "result";
     else if (full.scheduled_at && full.scheduled_at * 1000 > Date.now()) toast("尚未到任务开放时间");
@@ -2658,7 +2825,7 @@ async function readConversation(id) {
 }
 
 function submitPaper() {
-  if (state.loading) return;
+  if (state.loading || state.loggingOut || state.liveTask?.submission_closed) return;
   const count = state.liveTask?.questions?.length ?? state.answers.length;
   const missing = Array.from({ length: count }, (_, index) => state.answers[index])
     .findIndex((value, index) => answerMissing(value, state.liveTask?.questions?.[index]));
@@ -2738,7 +2905,7 @@ async function pollTask(taskId, generation, tries = 40) {
 
 /** 学生进工作区时先拿编辑租约——后端规定同一任务同时只允许一端作答。 */
 async function openLiveTask() {
-  if (!state.live || !state.liveTask) return;
+  if (!state.live || !state.liveTask || state.liveTask.submission_closed || state.loggingOut) return false;
   const taskId = state.liveTask.id;
   const generation = state.transitionId;
   try {
@@ -2759,8 +2926,14 @@ async function openLiveTask() {
       ? state.liveLease : await api.acquireLease(taskId, deviceId);
     const full = await api.task(taskId);
     if (generation !== state.transitionId || state.liveTask?.id !== taskId) return;
-    state.liveLease = lease;
     updateStudentTask(full);
+    if (full.submission_closed) {
+      state.liveLease = null;
+      clearInterval(leaseTimer);
+      state.studentPage = "result";
+      return false;
+    }
+    state.liveLease = lease;
     const local = state.studentDrafts[taskId];
     const draft = full.draft_answers || {};
     const serverAnswers = (full.questions || []).map((question) => draft[question.id] ?? "");
@@ -2783,7 +2956,7 @@ async function openLiveTask() {
 function startLeaseRenewal(taskId, generation) {
   clearInterval(leaseTimer);
   leaseTimer = setInterval(async () => {
-    if (generation !== state.transitionId || !state.liveLease || state.liveTask?.id !== taskId) {
+    if (generation !== state.transitionId || !state.liveLease || state.liveTask?.id !== taskId || state.liveTask.submission_closed) {
       clearInterval(leaseTimer);
       return;
     }
@@ -2804,7 +2977,7 @@ function startLeaseRenewal(taskId, generation) {
 
 /** 首诊独立作答，不自动代答，也不计入正式成绩。 */
 async function runDiagnostic() {
-  if (!state.live || !state.liveTask) return;
+  if (!state.live || !state.liveTask || state.liveTask.submission_closed || state.loggingOut) return;
   const taskId = state.liveTask.id;
   const generation = state.transitionId;
   try {
@@ -2824,7 +2997,7 @@ async function runDiagnostic() {
 }
 
 async function submitLiveDiagnostic() {
-  if (!state.diagnostic || state.loading) return;
+  if (!state.diagnostic || state.loading || state.loggingOut || state.liveTask?.submission_closed) return;
   const questions = state.diagnostic.questions || [];
   const missing = questions.findIndex((question, index) => answerMissing(state.diagnosticAnswers[index], question));
   if (missing >= 0) {
@@ -2856,7 +3029,7 @@ async function submitLiveDiagnostic() {
 }
 
 async function retryLiveTask() {
-  if (state.loading || !state.liveTask) return;
+  if (state.loading || !state.liveTask || state.loggingOut || state.liveTask.submission_closed) return;
   const taskId = state.liveTask.id;
   const generation = state.transitionId;
   state.loading = true;
@@ -2883,7 +3056,7 @@ async function retryLiveTask() {
 
 /** 保存草稿：带版本与租约，后端据此拒绝过期写入。 */
 async function saveLiveDraft() {
-  if (state.loading || !state.live || !state.liveTask || !state.liveLease) return false;
+  if (state.loading || !state.live || !state.liveTask || !state.liveLease || state.loggingOut || state.liveTask.submission_closed) return false;
   const task = state.liveTask;
   const generation = state.transitionId;
   state.loading = true;

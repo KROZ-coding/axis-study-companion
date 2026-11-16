@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import Field
 
 from ..learning_store import (GoalNotFound, IdempotencyConflict, InvalidTransition,
                               LeaseLost, TaskNotFound, VersionConflict)
@@ -10,10 +11,19 @@ from ..runtime import get_runtime
 from ..services.question_library import list_question_library
 from ..schemas.v1_learning import (AppealCreate, DeadlineExtension, DiagnosticSubmission, DraftSave,
                                    EvidenceEvent, GoalCreate, GoalPlan, GoalUpdate, LeaseAcquire,
-                                   LeaseRenew, ManualGrade, PlanConfigure, QuestionStatus, TeacherJudgment, RoundPublish, Submit, Versioned)
+                                   LeaseRenew, ManualGrade, Mutation, PlanConfigure, QuestionStatus, TeacherJudgment, RoundPublish, Submit, Versioned)
 from ..v1_deps import get_platform_user, require_platform_roles
 
 router = APIRouter(prefix="/api/v1", tags=["learning"])
+
+
+class TaskClose(Versioned):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class AppealResolve(Mutation):
+    expected_revision: int = Field(ge=1, strict=True)
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 def _invoke(action):
@@ -67,9 +77,9 @@ def teacher_judgment(task_id: str, payload: TeacherJudgment, request: Request,
 
 @router.get("/goals")
 def list_goals(request: Request, class_id: str | None = None, limit: int = Query(50, ge=1, le=100),
-               actor=Depends(get_platform_user)):
+               offset: int = Query(0, ge=0), actor=Depends(get_platform_user)):
     runtime = get_runtime(request)
-    return {"items": _invoke(lambda: runtime.learning.list_goals(actor.id, class_id=class_id, limit=limit))}
+    return {"items": _invoke(lambda: runtime.learning.list_goals(actor.id, class_id=class_id, limit=limit, offset=offset))}
 
 
 @router.post("/goals", status_code=201)
@@ -138,9 +148,9 @@ def change_goal_plan(goal_id: str, payload: GoalPlan, request: Request,
 
 @router.get("/tasks")
 def list_tasks(request: Request, class_id: str | None = None, goal_id: str | None = None,
-               limit: int = Query(50, ge=1, le=100), actor=Depends(get_platform_user)):
+               limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), actor=Depends(get_platform_user)):
     return {"items": _invoke(lambda: get_runtime(request).learning.list_tasks(
-        actor.id, class_id=class_id, goal_id=goal_id, limit=limit,
+        actor.id, class_id=class_id, goal_id=goal_id, limit=limit, offset=offset,
     ))}
 
 
@@ -216,6 +226,17 @@ def extend_deadline(task_id: str, payload: DeadlineExtension, request: Request,
     ))
 
 
+@router.post("/tasks/{task_id}/close")
+def close_task(task_id: str, payload: TaskClose, request: Request,
+               actor=Depends(require_platform_roles("teacher"))):
+    return _invoke(lambda: get_runtime(request).learning.close_task(task_id, actor.id, **payload.model_dump()))
+
+
+@router.get("/attempts/{attempt_id}/teacher-review")
+def teacher_review(attempt_id: str, request: Request, actor=Depends(require_platform_roles("teacher"))):
+    return _invoke(lambda: get_runtime(request).learning.get_teacher_review(attempt_id, actor.id))
+
+
 @router.post("/attempts/{attempt_id}/items/{question_id}/manual-grade")
 def manual_grade(attempt_id: str, question_id: str, payload: ManualGrade, request: Request,
                  actor=Depends(require_platform_roles("teacher"))):
@@ -274,8 +295,19 @@ def create_appeal(attempt_id: str, payload: AppealCreate, request: Request,
 
 
 @router.get("/tasks/{task_id}/appeals")
-def list_appeals(task_id: str, request: Request, actor=Depends(get_platform_user)):
+def list_appeals(task_id: str, request: Request, actor=Depends(require_platform_roles("teacher", "student"))):
     return {"items": _invoke(lambda: get_runtime(request).learning.list_appeals(actor.id, task_id=task_id))}
+
+
+@router.get("/appeals/{appeal_id}")
+def get_appeal(appeal_id: str, request: Request, actor=Depends(require_platform_roles("teacher", "student"))):
+    return _invoke(lambda: get_runtime(request).learning.get_appeal(appeal_id, actor.id))
+
+
+@router.post("/appeals/{appeal_id}/resolve")
+def resolve_appeal(appeal_id: str, payload: AppealResolve, request: Request,
+                   actor=Depends(require_platform_roles("teacher"))):
+    return _invoke(lambda: get_runtime(request).learning.resolve_appeal(appeal_id, actor.id, **payload.model_dump()))
 
 
 @router.get("/tasks/{task_id}/answer-policy")

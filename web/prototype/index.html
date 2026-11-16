@@ -10,6 +10,9 @@
   <link rel="stylesheet" href="/prototype/teacher-planning.css">
   <link rel="stylesheet" href="/prototype/teacher-library.css">
   <link rel="stylesheet" href="/prototype/management.css">
+  <link rel="stylesheet" href="/prototype/teacher-review.css">
+  <link rel="stylesheet" href="/prototype/teacher-reports.css">
+  <link rel="stylesheet" href="/prototype/learning-feedback.css">
 </head>
 <body>
   <a class="skip" href="#view">跳到主要内容</a>
@@ -26,12 +29,20 @@
     import { createTeacherLibrary } from "/prototype/teacher-library.js";
     import { createAdminWorkspace } from "/prototype/admin-workspace.js";
     import { createTeacherManagement } from "/prototype/teacher-management.js";
+    import { createTeacherReview } from "/prototype/teacher-review.js";
+    import { createTeacherReports } from "/prototype/teacher-reports.js";
+    import { createStudentFeedback } from "/prototype/student-feedback.js";
+    import { createLearningNotifications } from "/prototype/learning-notifications.js";
     window.createScene = createScene;
     window.api = api;
     window.createTeacherPlanning = createTeacherPlanning;
     window.createTeacherLibrary = createTeacherLibrary;
     window.createAdminWorkspace = createAdminWorkspace;
     window.createTeacherManagement = createTeacherManagement;
+    window.createTeacherReview = createTeacherReview;
+    window.createTeacherReports = createTeacherReports;
+    window.createStudentFeedback = createStudentFeedback;
+    window.createLearningNotifications = createLearningNotifications;
     // 正式服务不可用时暂停认证，不创建本地虚构会话。
     await api.probe();
     await import("/prototype/app.js");

@@ -38,6 +38,7 @@ Thumbs.db
 /uploads/
 /outputs/
 /artifacts/
+/测试/report-*
 *.db
 *.sqlite
 *.sqlite3

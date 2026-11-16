@@ -93,29 +93,46 @@ class LearningOperations:
             row = self._goal_row(db, goal_id, actor_id)
             return {"goal_id": goal_id, **{key: row[key] for key in ("owner_id", "course_id", "class_id", "version")}}
 
-    def list_goals(self, actor_id, *, class_id=None, limit=50):
-        result = []
+    @staticmethod
+    def _page_bounds(limit, offset):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+
+    def list_goals(self, actor_id, *, class_id=None, limit=50, offset=0):
+        self._page_bounds(limit, offset)
+        result, skipped = [], 0
         with self._using_connection() as db:
             rows = db.execute("SELECT id FROM learning_goals WHERE (? IS NULL OR class_id=?) ORDER BY created_at DESC,id", (class_id, class_id))
             for row in rows:
                 try:
-                    result.append(dict(self._goal_row(db, row["id"], actor_id)))
+                    goal = self._goal_row(db, row["id"], actor_id)
                 except (LookupError, PermissionError):
                     continue
+                # Offset counts authorized rows, never inaccessible candidates.
+                if skipped < offset:
+                    skipped += 1
+                    continue
+                result.append(dict(goal))
                 if len(result) >= limit:
                     break
         return result
 
-    def list_tasks(self, actor_id, *, class_id=None, goal_id=None, limit=50):
-        result = []
+    def list_tasks(self, actor_id, *, class_id=None, goal_id=None, limit=50, offset=0):
+        self._page_bounds(limit, offset)
+        result, skipped = [], 0
         with self._using_connection() as db:
             rows = db.execute("SELECT t.id FROM learning_tasks t JOIN learning_goals g ON g.id=t.goal_id WHERE (? IS NULL OR g.class_id=?) AND (? IS NULL OR t.goal_id=?) ORDER BY t.created_at DESC,t.id", (class_id, class_id, goal_id, goal_id))
             for row in rows:
                 try:
                     task = self._task_row(db, row["id"], actor_id)
-                    result.append(self._task_view(db, task, teacher=actor_id != task["student_id"]))
                 except (LookupError, PermissionError):
                     continue
+                if skipped < offset:
+                    skipped += 1
+                    continue
+                result.append(self._task_view(db, task, teacher=actor_id != task["student_id"]))
                 if len(result) >= limit:
                     break
         return result
@@ -140,6 +157,8 @@ class LearningOperations:
                     attempt.pop("total_score", None)
                     attempt.pop("total_score_units", None)
         policy = cls._policy(db, task["id"])
+        result["submission_closed"] = bool(policy.get("submission_closed") or task["status"] == "closed")
+        result["submission_closed_at"] = policy.get("submission_closed_at")
         result["diagnostic_required"] = bool(policy.get("diagnostic_required") and not policy.get("diagnostic_completed"))
         result["scheduled_at"] = policy.get("scheduled_at")
         if not teacher and ((policy.get("scheduled_at") and time.time() < policy["scheduled_at"])
@@ -154,8 +173,14 @@ class LearningOperations:
         row = db.execute("SELECT policy_json FROM task_policies WHERE task_id=?", (task_id,)).fetchone()
         return json.loads(row[0]) if row else {}
 
+    def _submission_open(self, db, task):
+        from .learning_store import InvalidTransition
+        if task["status"] == "closed" or self._policy(db, task["id"]).get("submission_closed"):
+            raise InvalidTransition("任务已停止提交，已保存的草稿和历史结果保留")
+
     def _open_task(self, db, task, now=None):
         from .learning_store import InvalidTransition
+        self._submission_open(db, task)
         policy = self._policy(db, task["id"])
         now = time.time() if now is None else now
         if policy.get("scheduled_at") and now < policy["scheduled_at"]:
@@ -251,9 +276,15 @@ class LearningOperations:
             self._open_task(db, self._task_row(db, task_id, actor_id), options.get("now"))
             return super().acquire_draft_lease(task_id, actor_id, device_id, **options)
 
+    def renew_draft_lease(self, task_id, actor_id, lease_token, fence_token, **options):
+        with self._using_connection(write=True) as db:
+            self._submission_open(db, self._task_row(db, task_id, actor_id))
+            return super().renew_draft_lease(task_id, actor_id, lease_token, fence_token, **options)
+
     def save_draft(self, task_id, actor_id, answers, **options):
         with self._using_connection(write=True) as db:
             task = self._task_row(db, task_id, actor_id)
+            self._submission_open(db, task)
             replay = db.execute("SELECT 1 FROM idempotency WHERE actor_id=? AND task_id=? AND request_id=?", (actor_id, task_id, options.get("request_id"))).fetchone()
             if replay is None:
                 self._open_task(db, task, options.get("now"))
@@ -262,6 +293,7 @@ class LearningOperations:
     def submit_attempt(self, task_id, actor_id, **options):
         with self._using_connection(write=True) as db:
             task = self._task_row(db, task_id, actor_id)
+            self._submission_open(db, task)
             if task["status"] in {"not_started", "in_progress"}:
                 self._open_task(db, task, options.get("now"))
             return super().submit_attempt(task_id, actor_id, **options)
@@ -270,6 +302,7 @@ class LearningOperations:
         from .learning_store import InvalidTransition
         with self._using_connection(write=True) as db:
             task = self._task_row(db, task_id, actor_id)
+            self._submission_open(db, task)
             policy = self._policy(db, task_id)
             if task["deadline_at"] and time.time() > task["deadline_at"] and not policy.get("allow_retry_after_deadline", True):
                 raise InvalidTransition("发布规则不允许截止后重做")
@@ -350,7 +383,26 @@ class LearningOperations:
             if type(value["score_units"]) is not int or value["score_units"] < 0:
                 raise ValueError("分值必须为非负整数单位")
             value["score"] = value["score_units"] / self.SCORE_SCALE
-        return super().apply_grading_result(attempt_id, item_id, value, **options)
+        with self._using_connection(write=True) as db:
+            task = super().apply_grading_result(attempt_id, item_id, value, **options)
+            attempt = db.execute("SELECT status FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+            if attempt["status"] == "graded":
+                self._grading_notification(db, attempt_id, manual=False)
+            return task
+
+    def fail_grading(self, attempt_id, **options):
+        with self._using_connection(write=True) as db:
+            task = super().fail_grading(attempt_id, **options)
+            self._grading_notification(db, attempt_id, manual=True)
+            return task
+
+    def _grading_notification(self, db, attempt_id, *, manual):
+        row = db.execute("SELECT t.id,t.student_id,o.attempt_revision FROM attempts a JOIN learning_tasks t ON t.id=a.task_id JOIN grading_outbox o ON o.attempt_id=a.id WHERE a.id=?", (attempt_id,)).fetchone()
+        # Match the historical worker key and payload exactly. A worker running
+        # the old direct-delivery path and a dispatcher replay remain compatible.
+        self._notify(db, row["student_id"], "grading_manual_required" if manual else "results_ready", "task", row["id"],
+                     {"state": "awaiting_manual" if manual else "results_ready"},
+                     key=f"grading:{attempt_id}:{row['attempt_revision']}")
 
     def get_answer_policy(self, user_id, *, task_id=None, question_version_id=None):
         from .learning_store import TaskNotFound
@@ -359,10 +411,20 @@ class LearningOperations:
                 task = self._task_row(db, task_id, user_id)
                 if task["student_id"] != user_id:
                     raise TaskNotFound("题目未分配给当前学生")
-            active = db.execute("SELECT id FROM learning_tasks WHERE student_id=? AND status NOT IN ('results_ready','closed')", (user_id,)).fetchall()
+            candidates = db.execute("SELECT id,first_attempt_id FROM learning_tasks WHERE student_id=? AND status NOT IN ('results_ready','closed')", (user_id,)).fetchall()
+            active = []
             diagnostic = False; attempted = True
-            for row in active:
+            for row in candidates:
+                try:
+                    self._task_row(db, row["id"], user_id)
+                except (LookupError, PermissionError):
+                    continue
                 policy = self._policy(db, row["id"])
+                # An abandoned, never-submitted task need not block unrelated
+                # conversation forever. Its own scoped answer gate stays closed.
+                if policy.get("submission_closed") and row["first_attempt_id"] is None:
+                    continue
+                active.append(row)
                 diagnostic = diagnostic or bool(policy.get("diagnostic_required") and not policy.get("diagnostic_completed"))
                 attempted = attempted and db.execute("SELECT 1 FROM draft_answers WHERE task_id=? LIMIT 1", (row["id"],)).fetchone() is not None
             blocked = bool(active)

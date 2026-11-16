@@ -80,7 +80,7 @@ async function request(method, path, { body, expect = 200, extraHeaders = {}, si
 const get = (path, options) => request("GET", path, options).then((r) => r.data);
 const post = (path, body, options = {}) => request("POST", path, { ...options, body }).then((r) => r.data);
 const put = (path, body, options = {}) => request("PUT", path, { ...options, body }).then((r) => r.data);
-const call = (method, path, body) => request(method, path, { body }).then((result) => result.data);
+const call = (method, path, body, options = {}) => request(method, path, { ...options, body }).then((result) => result.data);
 
 async function upload(path, formData) {
   const url = path.startsWith("/api/") ? path : `${API_BASE}${path}`;
@@ -176,14 +176,17 @@ async function teacherClasses() {
   return out;
 }
 
-async function classMembers(classId) {
-  const data = await get(`/classes/${classId}/members`);
+async function classMembers(classId, { signal } = {}) {
+  const data = await get(`/classes/${encodeURIComponent(classId)}/members`, { signal });
   return Array.isArray(data) ? data : data.items || [];
 }
 
-async function goals(classId) {
-  const query = classId ? `?class_id=${encodeURIComponent(classId)}` : "";
-  const data = await get(`/goals${query}`);
+async function goals(classId, { limit, offset, signal } = {}) {
+  const query = new URLSearchParams();
+  if (classId) query.set("class_id", classId);
+  if (limit !== undefined) query.set("limit", String(limit));
+  if (offset !== undefined) query.set("offset", String(offset));
+  const data = await get(`/goals${query.size ? `?${query}` : ""}`, { signal });
   return data.items || [];
 }
 
@@ -193,13 +196,17 @@ async function goalEvidence(goalId, studentId) {
 }
 
 /** 学生端：自己的任务列表。 */
-async function myTasks(goalId) {
-  const query = goalId ? `?goal_id=${encodeURIComponent(goalId)}` : "";
-  const data = await get(`/tasks${query}`);
+async function myTasks(goalId, { classId, limit, offset, signal } = {}) {
+  const query = new URLSearchParams();
+  if (goalId) query.set("goal_id", goalId);
+  if (classId) query.set("class_id", classId);
+  if (limit !== undefined) query.set("limit", String(limit));
+  if (offset !== undefined) query.set("offset", String(offset));
+  const data = await get(`/tasks${query.size ? `?${query}` : ""}`, { signal });
   return data.items || [];
 }
 
-const task = (taskId) => get(`/tasks/${encodeURIComponent(taskId)}`);
+const task = (taskId, { signal } = {}) => get(`/tasks/${encodeURIComponent(taskId)}`, { signal });
 const courses = () => get("/courses").then((data) => Array.isArray(data) ? data : data.items || []);
 const conversations = ({ archived = false, limit = 100, offset = 0, signal } = {}) => {
   const query = new URLSearchParams({ archived: String(archived), limit: String(limit), offset: String(offset) });
@@ -560,32 +567,90 @@ async function helpEvent(taskId, payload, requestId) {
   return post(`/tasks/${encodeURIComponent(taskId)}/help-events`, { request_id: requestId, ...payload });
 }
 
-/** 教师端报告：先取源修订，再生成，最后拿到可下载的导出链接。 */
-async function reportFormats() {
-  return get("/reports/rules");
+/** 报告生成重试沿用已确认的源修订，预览和下载固定到同一冻结版本。 */
+const reportFormats = ({ signal } = {}) => get("/reports/rules", { signal });
+
+function reportSource(scope, { signal } = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(scope)) {
+    if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+  }
+  return get(`/reports/source-revision?${params}`, { signal });
 }
 
-async function reportSource(scope) {
-  const params = new URLSearchParams(scope).toString();
-  return get(`/reports/source-revision?${params}`);
-}
+const reportList = ({ signal } = {}) => get("/reports", { signal }).then((data) => data.items || []);
+const reportRevisions = (reportId, { signal } = {}) =>
+  get(`/reports/${encodeURIComponent(reportId)}/revisions`, { signal }).then((data) => data.items || []);
+const reportRevision = (reportId, revisionId, { signal } = {}) =>
+  get(`/reports/${encodeURIComponent(reportId)}${revisionId ? `/revisions/${encodeURIComponent(revisionId)}` : ""}`, { signal });
 
-async function generateReport(scope, key) {
-  const rules = await reportFormats();
-  const source = await reportSource(scope);
-  return request("POST", "/reports/generate", {
+async function generateReport(scope, key, prepared) {
+  let input = prepared;
+  if (!input) {
+    const rules = await reportFormats();
+    const source = await reportSource(scope);
+    input = { schema_version: rules.schema_version, rule_version: rules.default_rule_version, expected_source_revision: source.source_revision };
+  }
+  return request("POST", "/reports", {
     body: {
       scope,
-      schema_version: rules.schema_version,
-      rule_version: rules.default_rule_version,
-      expected_source_revision: source.source_revision,
+      schema_version: input.schema_version,
+      rule_version: input.rule_version,
+      expected_source_revision: input.expected_source_revision,
     },
     extraHeaders: { "Idempotency-Key": key },
   }).then((r) => r.data);
 }
 
-const exportUrl = (reportId, format) =>
-  `${API_BASE}/reports/${encodeURIComponent(reportId)}/export/${format}`;
+function exportUrl(reportId, format, revisionId) {
+  const path = `${API_BASE}/reports/${encodeURIComponent(reportId)}/export/${encodeURIComponent(format)}`;
+  return revisionId ? `${path}?${new URLSearchParams({ revision_id: revisionId })}` : path;
+}
+
+async function reportExport(reportId, format, revisionId, { signal, snapshotHash } = {}) {
+  if (!revisionId) throw new ApiError(422, "report_revision_required", "请先选择报告版本");
+  if (!["html", "pdf", "xlsx", "json", "csv"].includes(format)) throw new ApiError(422, "invalid_format", "报告格式不支持");
+  let response;
+  try {
+    response = await fetch(exportUrl(reportId, format, revisionId), {
+      credentials: "same-origin", headers: { Accept: format === "html" ? "text/html" : "application/octet-stream" },
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    if (signal?.aborted || error?.name === "AbortError") throw error;
+    throw new ApiError(0, "network_unavailable", "报告文件没有读到，请重试", true);
+  }
+  if (!response.ok) {
+    let payload = null;
+    try { payload = await response.json(); } catch { /* Export errors may have an empty body. */ }
+    throw toApiError(response.status, payload);
+  }
+  if (response.headers.get("X-Report-Revision") !== revisionId
+      || (snapshotHash && response.headers.get("X-Report-Snapshot-SHA256") !== snapshotHash)) {
+    throw new ApiError(409, "report_revision_mismatch", "报告版本未核对一致，请重新读取");
+  }
+  return response;
+}
+
+async function reportPreview(reportId, revisionId, options = {}) {
+  const response = await reportExport(reportId, "html", revisionId, options);
+  return response.text();
+}
+
+async function reportDownload(reportId, format, revisionId, options = {}) {
+  const response = await reportExport(reportId, format, revisionId, options);
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  const quoted = disposition.match(/filename="([^"]+)"/i);
+  let name = quoted?.[1] || "";
+  try { if (encoded) name = decodeURIComponent(encoded[1]); } catch { /* Use the local filename fallback. */ }
+  const extension = format === "csv" ? "zip" : format;
+  const fallback = `report-${revisionId}.${extension}`;
+  // A response filename is only a display name, never a path.
+  name = name.replace(/[\\/\\\\:\x00-\x1f\x7f]/g, "_").replace(/^\.+/, "");
+  if (!name.toLowerCase().endsWith(`.${extension}`)) name = fallback;
+  return { blob: await response.blob(), filename: name || fallback };
+}
 
 export const api = {
   state, probe, currentUser, login, logout, call, upload,
@@ -595,7 +660,7 @@ export const api = {
   restoreConversation, postMessage, getResponse, cancelCompanionJob, resumeCompanionJob, responseEvents, companionAnswerPolicy, openResponseStream, retryTask,
   acquireLease, renewLease, saveDraft, submitTask,
   startDiagnostic, submitDiagnostic, answerPolicy, helpEvent,
-  reportFormats, reportSource, generateReport, exportUrl,
+  reportFormats, reportSource, reportList, reportRevisions, reportRevision, generateReport, exportUrl, reportPreview, reportDownload,
   ApiError,
 };
 

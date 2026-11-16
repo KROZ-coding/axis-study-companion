@@ -60,7 +60,13 @@ class Runtime:
         if user is None or user["status"] != "active":
             return False
         if user["role"] == "student":
-            return scope.get("student_id") == actor_id
+            if scope.get("student_id") != actor_id:
+                return False
+            class_id = scope.get("class_id")
+            # Learning access follows the current class membership. A task or
+            # appeal must stop being readable/writable after the student leaves
+            # its class, even when the learning row still exists for history.
+            return class_id is None or self.platform.get_class_membership(class_id, actor_id) is not None
         if scope.get("class_id"):
             return self.platform.can_access_class(actor_id, scope["class_id"], teaching=write)
         if scope.get("course_id") and scope.get("kind") in {"question", "question_bank"}:

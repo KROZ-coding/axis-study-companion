@@ -90,6 +90,67 @@ def answer_policy(runtime, user_id: str, *, task_id: str | None = None,
     }
 
 
+def actor_task_scope(runtime, user_id: str, task_id: str,
+                     question_version_id: str | None = None) -> dict[str, Any]:
+    """Validate a notification/task locator using the actor's current role."""
+    user = runtime.platform.get_user(user_id)
+    if user is None or user.get("status") != "active":
+        raise PermissionError("account is inactive")
+    if user.get("role") == "student":
+        return task_scope(runtime, user_id, task_id, question_version_id)
+    if user.get("role") != "teacher":
+        raise PermissionError("explicit student-content access grant required")
+    scope = runtime.learning.get_task_scope(task_id, user_id)
+    if not isinstance(scope, Mapping) or scope.get("task_id", task_id) != task_id:
+        raise PermissionError("task binding changed")
+    course_id, class_id, student_id = scope.get("course_id"), scope.get("class_id"), scope.get("student_id")
+    classroom = runtime.platform.get_class(class_id) if class_id else None
+    membership = runtime.platform.get_class_membership(class_id, student_id) if class_id and student_id else None
+    if (classroom is None or classroom.get("course_id") != course_id
+            or membership is None or membership.get("status", "active") != "active"
+            or not runtime.platform.can_access_class(user_id, class_id)):
+        raise PermissionError("task class is inaccessible")
+    if question_version_id is not None:
+        task = runtime.learning.get_task(task_id, user_id)
+        questions = task.get("questions") if isinstance(task, Mapping) else None
+        if not isinstance(questions, list) or not any(
+            isinstance(question, Mapping) and question_matches(question, question_version_id)
+            for question in questions
+        ):
+            raise PermissionError("question version is not assigned to task")
+    return {**scope, "task_id": task_id}
+
+
+def actor_answer_policy(runtime, user_id: str, *, task_id: str | None = None,
+                        question_version_id: str | None = None) -> dict[str, Any]:
+    user = runtime.platform.get_user(user_id)
+    if user is None or user.get("status") != "active":
+        raise PermissionError("account is inactive")
+    if user.get("role") == "student":
+        return answer_policy(runtime, user_id, task_id=task_id, question_version_id=question_version_id)
+    if not task_id:
+        raise PermissionError("teacher notification requires a task")
+    actor_task_scope(runtime, user_id, task_id, question_version_id)
+    # Teachers read class-scoped evidence before release. This is not a student
+    # generation permission and does not consult a nonexistent teacher task.
+    return {"allow_assistant_content": True, "allow_generation": False, "task_id": task_id}
+
+
+def discussion_teacher_recipients(runtime, class_id: str) -> list[str]:
+    classroom = runtime.platform.get_class(class_id)
+    if classroom is None:
+        raise LookupError("discussion class not found")
+    candidates = {classroom.get("owner_teacher_id")}
+    candidates.update(row["teacher_id"] for row in runtime.platform.list_class_collaborators(class_id))
+    recipients = []
+    for candidate in sorted(value for value in candidates if value):
+        user = runtime.platform.get_user(candidate)
+        if (user is not None and user.get("role") == "teacher" and user.get("status") == "active"
+                and runtime.platform.can_access_class(candidate, class_id, teaching=True)):
+            recipients.append(candidate)
+    return recipients
+
+
 def answer_policy_provider(runtime, user_id: str):
     def policy(_user_id, *, task_id=None, question_version_id=None):
         if _user_id != user_id:

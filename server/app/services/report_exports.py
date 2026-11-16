@@ -438,7 +438,10 @@ def _xlsx_export(snapshot: dict[str, Any], manifest: dict[str, Any]) -> bytes:
         ws.merge_cells(start_row=2, start_column=2, end_row=2, end_column=last_col)
         ws["B2"] = safe_spreadsheet_text(title)
         ws["B2"].font = title_font
+        ws.merge_cells(start_row=3, start_column=2, end_row=3, end_column=last_col)
         ws["B3"] = f"源修订 {snapshot['source_revision']} · {snapshot['rule']['version']} · {name}"
+        ws["B3"].font = body_font
+        ws["B3"].alignment = Alignment(vertical="center", shrink_to_fit=True)
         for index, column in enumerate(columns, 2):
             cell = ws.cell(4, index, safe_spreadsheet_text(column["label"]))
             cell.font, cell.fill, cell.border = header_font, header_fill, header_border
@@ -457,25 +460,40 @@ def _xlsx_export(snapshot: dict[str, Any], manifest: dict[str, Any]) -> bytes:
                 if number % 2 == 0:
                     cell.fill = PatternFill("solid", fgColor=_XLSX_COLORS["stripe"])
             ws.row_dimensions[number].height = 24
-        # Fit columns from actual data, then grow wrapped rows; no silent clipping.
+        # Excel column widths use the default digit font, not the wider body
+        # font. Reserve space for word wrapping as well as CJK line spacing.
         for index, column in enumerate(columns, 2):
             texts = [_display(row[column["key"]]) for row in rows]
             width = max([len(column["label"]) * 2 + 2, 10] + [min(38, sum(2 if ord(char) > 255 else 1 for char in text) + 2) for text in texts])
             ws.column_dimensions[get_column_letter(index)].width = min(38, width)
+        if name in {"manifest", "rules"}:
+            # Long JSON metadata must fit below Excel's 409-point row limit.
+            ws.column_dimensions["B"].width = 32
+            ws.column_dimensions["C"].width = 90
         for number in range(5, len(rows) + 5):
             lines = 1
             for index in range(2, last_col + 1):
                 value = _display(ws.cell(number, index).value)
                 width = ws.column_dimensions[get_column_letter(index)].width
-                lines = max(lines, sum(max(1, math.ceil(sum(2 if ord(char) > 255 else 1 for char in line) / max(1, width - 2))) for line in value.split("\n")))
-            ws.row_dimensions[number].height = min(409, max(24, lines * 16 + 8))
+                lines = max(lines, sum(max(1, math.ceil(sum(2.5 if ord(char) > 255 else 1.25 for char in line) / max(1, width - 3))) for line in value.split("\n")))
+            ws.row_dimensions[number].height = min(409, max(28, (lines + 1) * 21 + 8))
         end = max(4, len(rows) + 4)
         ws.auto_filter.ref = f"B4:{get_column_letter(last_col)}{end}"
         ws.freeze_panes = "C5"
         ws.print_title_rows = "4:4"
         ws.print_area = f"B2:{get_column_letter(last_col)}{end}"
-        ws.page_setup.orientation = "landscape" if len(columns) > 5 else "portrait"
-        ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+        total_width = sum(ws.column_dimensions[get_column_letter(index)].width for index in range(2, last_col + 1))
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.orientation = "landscape" if len(columns) > 5 or total_width > 100 else "portrait"
+        if name in {"evidence", "mastery"}:
+            # Keep wide evidence tables readable and identifiable on every
+            # horizontal page; mastery needs both student and goal identifiers.
+            ws.print_title_cols = "B:C" if name == "mastery" else "B:B"
+            ws.sheet_properties.pageSetUpPr.fitToPage = False
+            ws.page_setup.scale = 100
+        else:
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
         # Verify each completed sheet before the next is constructed.
         for row in ws.iter_rows(min_row=4, max_row=end, min_col=2, max_col=last_col):
             if any(cell.data_type in {"f", "e"} or cell.hyperlink is not None for cell in row):
@@ -729,6 +747,11 @@ def _pymupdf_export(snapshot: dict[str, Any], manifest: dict[str, Any]) -> bytes
             for row_index, row in enumerate(rows):
                 lines = [wrap(row[column["key"]], width - 2 * padding, size) for column in columns]
                 total = max(map(len, lines))
+                row_height = total * leading + 2 * padding
+                fresh_page_space = bottom - 48 - header_height
+                if row_height <= fresh_page_space and y + row_height > bottom:
+                    new_page()
+                    repeat_header()
                 offset = 0
                 while offset < total:
                     capacity = int((bottom - y - 2 * padding) // leading)

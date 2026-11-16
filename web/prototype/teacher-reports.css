@@ -1,0 +1,61 @@
+.teacher-reports { display: grid; gap: 20px; min-width: 0; font-family: var(--cjk); color: var(--ink); }
+.teacher-report-heading h1 { margin: 5px 0 10px; font-size: clamp(27px, 2.5vw, 36px); font-weight: 600; }
+.teacher-report-kicker { color: var(--ink-soft); font-size: 13px; margin: 0; }
+.teacher-reports h2 { margin: 0 0 14px; font-size: 21px; font-weight: 600; }
+.teacher-reports h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.teacher-reports p { line-height: 1.75; overflow-wrap: anywhere; }
+.teacher-reports .panel { min-width: 0; padding: 24px; }
+.teacher-report-muted, .teacher-report-scope-help, .teacher-report-selection-note { color: var(--ink-soft); font-size: 14px; }
+.teacher-report-scope-tabs, .teacher-report-download-buttons, .teacher-report-saved-list { display: flex; flex-wrap: wrap; gap: 10px; }
+.teacher-report-button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; border: 1px solid #aecbd8; border-radius: 9px; background: #f5fafc; color: #254e62; padding: 10px 15px; font: inherit; font-size: 14px; line-height: 1.5; cursor: pointer; }
+.teacher-report-button.primary { background: #285e75; color: #fff; border-color: #285e75; }
+.teacher-report-button:hover:not(:disabled), .teacher-report-revision:hover:not(:disabled) { border-color: #386f86; box-shadow: 0 2px 8px #294c6212; }
+.teacher-report-button:disabled, .teacher-report-revision:disabled { opacity: .55; cursor: not-allowed; }
+.teacher-report-button.selected { border-color: #36758f; background: #e4f3fa; }
+.teacher-reports :is(button, select, summary):focus-visible { outline: 3px solid #4a95b3; outline-offset: 3px; }
+.teacher-report-selection { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 24px; }
+.teacher-report-selection-note { flex: 1 1 260px; margin: 0; align-self: center; }
+.teacher-report-field { display: grid; gap: 8px; flex: 1 1 250px; min-width: 0; font-size: 14px; }
+.teacher-report-field select { min-width: 0; width: 100%; min-height: 44px; padding: 9px 12px; background: #fff; border: 1px solid #aecbd8; border-radius: 8px; color: var(--ink); font: inherit; }
+.teacher-report-scope-help { margin: 18px 0; font-size: 13px; }
+.teacher-report-source-meta { display: flex; flex-wrap: wrap; gap: 16px 36px; border-top: 1px solid var(--line); margin: 18px 0 0; padding-top: 18px; }
+.teacher-report-source-meta dt { font-size: 12px; color: var(--ink-soft); }
+.teacher-report-source-meta dd { margin: 5px 0 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+.teacher-report-notice { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 18px 0 0; padding: 14px 16px; border-left: 3px solid #4a95b3; border-radius: 0 8px 8px 0; background: #e7f4fa; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.teacher-report-error { color: #953734; background: #fff0ee; }
+.teacher-report-notice.teacher-report-error { border-left-color: #b45049; }
+.teacher-report-revision-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 10px; margin-top: 18px; }
+.teacher-report-revision { min-width: 0; display: grid; gap: 7px; text-align: left; padding: 14px 16px; border: 1px solid #bfd5df; border-radius: 10px; background: #fff; color: var(--ink); cursor: pointer; font: inherit; font-size: 13px; }
+.teacher-report-revision strong { font-size: 15px; }
+.teacher-report-revision span { color: var(--ink-soft); }
+.teacher-report-revision.selected { border-color: #36758f; box-shadow: inset 0 0 0 1px #36758f; background: #eaf6fb; }
+.teacher-report-pagination { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 14px; margin-top: 18px; font-size: 14px; }
+.teacher-report-result-head { display: flex; justify-content: space-between; align-items: start; gap: 20px; }
+.teacher-report-tag { border: 1px solid #b4d4df; color: #2d6073; background: #eff8fb; border-radius: 6px; padding: 6px 9px; font-size: 12px; white-space: nowrap; }
+.teacher-report-metrics { display: flex; flex-wrap: wrap; gap: 22px 40px; margin: 12px 0 24px; padding: 20px 0; border-block: 1px solid var(--line); }
+.teacher-report-metrics dt { font-size: 13px; color: var(--ink-soft); }
+.teacher-report-metrics dd { font-size: 26px; font-variant-numeric: tabular-nums; margin: 6px 0 0; }
+.teacher-report-preview iframe { width: 100%; height: 600px; border: 1px solid #bfd5df; border-radius: 8px; background: #fff; }
+.teacher-report-downloads { padding-block: 24px; }
+.teacher-report-table { border-top: 1px solid var(--line); padding-block: 8px; }
+.teacher-report-table summary { min-height: 44px; display: list-item; padding: 12px 4px; font-size: 15px; cursor: pointer; }
+.teacher-report-table-scroll { max-width: 100%; overflow: auto; overscroll-behavior-inline: contain; margin-bottom: 16px; }
+.teacher-report-table table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 13px; }
+.teacher-report-table :is(th, td) { text-align: left; vertical-align: top; padding: 11px 12px; border-bottom: 1px solid #e0ebef; max-width: 340px; overflow-wrap: anywhere; line-height: 1.6; }
+.teacher-report-table th { background: #edf6fa; color: #365b6d; font-weight: 600; }
+.teacher-report-empty p { margin-bottom: 0; font-size: 14px; color: var(--ink-soft); }
+@media (max-width: 650px) {
+  .teacher-reports { gap: 15px; }
+  .teacher-reports .panel { padding: 18px 15px; }
+  .teacher-report-scope-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .teacher-report-button { padding-inline: 10px; }
+  .teacher-report-selection { align-items: stretch; }
+  .teacher-report-field { flex-basis: 100%; }
+  .teacher-report-selection > button { flex: 1; }
+  .teacher-report-result-head { flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .teacher-report-result-head p { margin-bottom: 0; }
+  .teacher-report-preview iframe { height: 480px; }
+  .teacher-report-metrics { gap: 18px 28px; }
+  .teacher-report-download-buttons { display: grid; grid-template-columns: 1fr 1fr; }
+  .teacher-report-saved-list { display: grid; }
+}

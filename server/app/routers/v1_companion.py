@@ -17,7 +17,8 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..companion_store import (
-    CompanionStore, Forbidden, IdempotencyConflict, InvalidTransition, NotFound, SAFE_GUIDANCE, StaleGeneration,
+    CompanionStore, DISCUSSION_STUDENT_REPLY_EVENT, DISCUSSION_TEACHER_MESSAGE_EVENT,
+    Forbidden, IdempotencyConflict, InvalidTransition, NotFound, SAFE_GUIDANCE, StaleGeneration,
 )
 from ..models import User
 from ..platform_store import PlatformStore
@@ -172,14 +173,14 @@ class Access:
         return row
 
     def policy(self, user_id: str, *, task_id: str | None = None, question_version_id: str | None = None) -> Mapping[str, Any]:
-        from ..services.companion_access import answer_policy
+        from ..services.companion_access import actor_answer_policy
         if user_id != self.user.id:
             raise PermissionError("policy actor changed")
-        return answer_policy(self.runtime, user_id, task_id=task_id, question_version_id=question_version_id)
+        return actor_answer_policy(self.runtime, user_id, task_id=task_id, question_version_id=question_version_id)
 
     def task(self, task_id: str, *, question_version_id: str | None = None) -> dict[str, Any]:
-        from ..services.companion_access import task_scope
-        return task_scope(self.runtime, self.user.id, task_id, question_version_id)
+        from ..services.companion_access import actor_task_scope
+        return actor_task_scope(self.runtime, self.user.id, task_id, question_version_id)
 
     @staticmethod
     def question_matches(question: Mapping[str, Any], reference: str) -> bool:
@@ -220,6 +221,9 @@ class Access:
 
     def discussion_scope(self, task_id: str, attempt_id: str, question_version_id: str,
                          grading_revision: int, *, student_id: str | None = None) -> dict[str, Any]:
+        actor = self.platform.get_user(self.user.id)
+        if actor is None or actor.get("status") != "active" or actor.get("role") != self.user.role:
+            raise NotFound("discussion actor changed")
         method = getattr(self.runtime.learning, "get_discussion_scope", None)
         if not callable(method):
             raise _error(503, "learning_scope_unavailable", "暂时无法核验讨论绑定范围", retryable=True)
@@ -240,7 +244,8 @@ class Access:
         classroom = self.platform.get_class(result["class_id"])
         if classroom is None or classroom["course_id"] != result["course_id"]:
             raise NotFound("discussion class not found")
-        if self.platform.get_class_membership(result["class_id"], result["student_id"]) is None:
+        membership = self.platform.get_class_membership(result["class_id"], result["student_id"])
+        if membership is None or membership.get("status", "active") != "active":
             raise NotFound("student is outside discussion class")
         if self.user.role == "student":
             if result["student_id"] != self.user.id or not self.platform.can_access_class(self.user.id, result["class_id"]):
@@ -494,17 +499,19 @@ def create_discussion_thread(payload: ThreadCreate, access: Access = Depends(get
 
 @router.get("/companion/discussion-threads")
 def list_discussion_threads(class_id: str | None = None, task_id: str | None = None,
-                            limit: int = Query(100, ge=1, le=500), access: Access = Depends(get_access)):
+                            limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                            access: Access = Depends(get_access)):
     if access.user.role == "student":
         if class_id is not None and not access.platform.can_access_class(access.user.id, class_id):
             raise NotFound("class not found")
-        rows = access.companion.list_discussion_threads(student_id=access.user.id, class_id=class_id, task_id=task_id, limit=limit)
+        rows = access.companion.list_discussion_threads(student_id=access.user.id, class_id=class_id, task_id=task_id,
+                                                         limit=limit, offset=offset)
     elif access.user.role == "teacher":
         if class_id is None:
             raise _error(422, "class_required", "请指定讨论所属班级")
         if not access.platform.can_access_class(access.user.id, class_id):
             raise NotFound("class not found")
-        rows = access.companion.list_discussion_threads(class_id=class_id, task_id=task_id, limit=limit)
+        rows = access.companion.list_discussion_threads(class_id=class_id, task_id=task_id, limit=limit, offset=offset)
     else:
         raise Forbidden("explicit student-content access grant required")
     result = []
@@ -530,18 +537,23 @@ def get_discussion_thread(thread_id: str, access: Access = Depends(get_access)):
 
 
 @router.get("/companion/discussion-threads/{thread_id}/messages")
-def list_discussion_messages(thread_id: str, access: Access = Depends(get_access)):
+def list_discussion_messages(thread_id: str, limit: int = Query(500, ge=1, le=500), offset: int = Query(0, ge=0),
+                             access: Access = Depends(get_access)):
     _, scope, _ = access.thread(thread_id)
     return access.companion.list_discussion_messages(thread_id, access.user.id, role=access.user.role, can_read=True,
-                                                     results_released=scope.get("results_released") is True)
+                                                     results_released=scope.get("results_released") is True,
+                                                     limit=limit, offset=offset)
 
 
 @router.post("/companion/discussion-threads/{thread_id}/messages", status_code=201)
 def post_discussion_message(thread_id: str, payload: ThreadMessageCreate, access: Access = Depends(get_access)):
-    _, scope, manage = access.thread(thread_id, write=True)
+    from ..services.companion_access import discussion_teacher_recipients
+    thread, scope, manage = access.thread(thread_id, write=True)
+    teachers = discussion_teacher_recipients(access.runtime, thread["class_id"]) if access.user.role == "student" else ()
     result = access.companion.post_discussion_message(thread_id, access.user.id, payload.text, author_role=access.user.role,
                                                        request_id=payload.request_id, results_released=scope.get("results_released") is True,
-                                                       preset_key=payload.preset_key, can_manage=manage)
+                                                       preset_key=payload.preset_key, can_manage=manage,
+                                                       teacher_recipient_ids=teachers)
     # A teacher's posted text is returned to that teacher only. Student reads
     # dynamically hide every teacher free-text message while results are closed.
     return result
@@ -556,8 +568,35 @@ def _notification_projection(item: dict, access: Access) -> dict:
             response = access.companion.get_response(resource_id, access.user.id, answer_policy=access.policy)
             access.conversation(response["conversation_id"])
         elif kind in {"discussion_thread", "thread"}:
-            access.thread(resource_id)
-        elif kind in {"attempt", "grade", "feedback", "result"}:
+            thread, scope, manage = access.thread(resource_id)
+            if item["event_type"] in {DISCUSSION_TEACHER_MESSAGE_EVENT, DISCUSSION_STUDENT_REPLY_EVENT}:
+                payload = item.get("payload", {})
+                message_id = payload.get("message_id")
+                if not message_id or payload.get("thread_id") != thread["id"]:
+                    raise NotFound("notification message binding is missing")
+                if item["event_type"] == DISCUSSION_STUDENT_REPLY_EVENT:
+                    # A prior delivery is not a grant after management is revoked,
+                    # even when the teacher still has read-only thread access.
+                    if access.user.role != "teacher" or not manage:
+                        raise NotFound("notification teaching permission changed")
+                elif access.user.role != "student" or access.user.id != thread["student_id"]:
+                    raise NotFound("notification student changed")
+                message = access.companion.get_discussion_message(
+                    thread["id"], message_id, access.user.id, role=access.user.role, can_read=True,
+                    results_released=scope.get("results_released") is True,
+                )
+                canonical = access.companion._discussion_notification_payload(thread, message)
+                if canonical["event_type"] != item["event_type"]:
+                    raise NotFound("notification event binding changed")
+                # Rebuild from authoritative facts rather than returning cached
+                # notification text/title or an old release decision. No free
+                # text is embedded: the thread remains the source of its content.
+                item.update(payload={**canonical, "delivery": message["delivery"]},
+                            redacted=message["redacted"])
+                item.pop("notice", None)
+                if message["redacted"]:
+                    item["notice"] = message["notice"]
+        elif kind in {"attempt", "grade", "feedback", "result", "appeal"}:
             task_id = item.get("payload", {}).get("task_id")
             if task_id is None:
                 raise NotFound("notification does not convey resource access")

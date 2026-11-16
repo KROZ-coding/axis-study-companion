@@ -9,7 +9,7 @@ actor from a response read is a Python-only trusted worker operation.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 import hashlib
 import json
@@ -32,6 +32,9 @@ SAFE_GUIDANCE = {
 }
 _POLICY_NOTICE = "为保护独立作答，相关讲解暂时收起，结果开放后可查看。"
 _UNKNOWN_POLICY_NOTICE = "当前学习状态暂不可核验，相关讲解已暂时收起。"
+DISCUSSION_TEACHER_MESSAGE_EVENT = "discussion_teacher_message"
+DISCUSSION_STUDENT_REPLY_EVENT = "discussion_student_reply"
+_DISCUSSION_NOTIFICATION_EVENTS = {DISCUSSION_TEACHER_MESSAGE_EVENT, DISCUSSION_STUDENT_REPLY_EVENT}
 _TERMINAL = {"completed", "failed", "cancelled"}
 _POLICY_RESOURCES = {"conversations", "messages", "responses", "events", "collections", "notes", "memories", "discussion_threads", "notifications"}
 AnswerPolicy = Callable[..., Mapping[str, Any] | bool]
@@ -1143,16 +1146,17 @@ class CompanionStore:
             return self._public(row)
 
     def list_discussion_threads(self, *, student_id: str | None = None, class_id: str | None = None,
-                                task_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+                                task_id: str | None = None, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         self._integer(limit, "limit", 1, 500)
+        self._integer(offset, "offset")
         if student_id is None and class_id is None:
             raise ValueError("a student or class scope is required")
         with self.connect() as db:
             rows = db.execute(
                 "SELECT * FROM discussion_threads WHERE (? IS NULL OR student_id=?) "
                 "AND (? IS NULL OR class_id=?) AND (? IS NULL OR task_id=?) "
-                "ORDER BY updated_at DESC,id LIMIT ?",
-                (student_id, student_id, class_id, class_id, task_id, task_id, limit)).fetchall()
+                "ORDER BY updated_at DESC,id LIMIT ? OFFSET ?",
+                (student_id, student_id, class_id, class_id, task_id, task_id, limit, offset)).fetchall()
             return [self._public(row) for row in rows]
 
     @staticmethod
@@ -1164,9 +1168,27 @@ class CompanionStore:
             return
         raise NotFound("thread not found")
 
+    @staticmethod
+    def _discussion_notification_payload(thread: Mapping[str, Any], message: Mapping[str, Any]) -> dict[str, Any]:
+        event_type = (DISCUSSION_TEACHER_MESSAGE_EVENT if message["author_role"] == "teacher"
+                      else DISCUSSION_STUDENT_REPLY_EVENT)
+        # Persist locators only. Titles, replies and deferred teacher text must
+        # never become a permanently visible copy inside a notification.
+        return {**{key: thread[key] for key in ("student_id", "course_id", "class_id", "task_id", "attempt_id",
+                                                "question_version_id", "grading_revision")},
+                "question_version": thread["question_version_id"], "thread_id": thread["id"],
+                "message_id": message["id"], "author_id": message["author_id"],
+                "author_role": message["author_role"], "event_type": event_type}
+
     def post_discussion_message(self, thread_id: str, author_id: str, text: str = "", *, author_role: str,
                                 request_id: str, results_released: bool = False, preset_key: str | None = None,
-                                can_manage: bool = False) -> dict[str, Any]:
+                                can_manage: bool = False,
+                                teacher_recipient_ids: Iterable[str] = ()) -> dict[str, Any]:
+        """Commit a message and its notifications together; routes resolve current teachers."""
+        author_id = self._id(author_id, "author_id")
+        if isinstance(teacher_recipient_ids, (str, bytes)):
+            raise ValueError("teacher_recipient_ids must be a collection of IDs")
+        teachers = {self._id(value, "teacher_recipient_id") for value in teacher_recipient_ids}
         request_id = self._request(request_id)
         if preset_key is not None:
             if author_role != "teacher" or preset_key not in SAFE_GUIDANCE or preset_key == "response_failed":
@@ -1190,32 +1212,55 @@ class CompanionStore:
             db.execute("INSERT INTO discussion_messages(id,thread_id,author_id,author_role,text,preset_key,delivery,request_id,request_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                        (record_id, thread_id, author_id, author_role, text, preset_key, delivery, request_id, digest, now))
             db.execute("UPDATE discussion_threads SET updated_at=? WHERE id=?", (now, thread_id))
-            return self._public(db.execute("SELECT * FROM discussion_messages WHERE id=?", (record_id,)).fetchone())
+            message = db.execute("SELECT * FROM discussion_messages WHERE id=?", (record_id,)).fetchone()
+            payload = self._discussion_notification_payload(thread, message)
+            recipients = {thread["student_id"]} if author_role == "teacher" else teachers
+            for recipient in sorted(recipients - {author_id}):
+                self._insert_notification(db, recipient, payload["event_type"], "discussion_thread", thread_id,
+                                          business_key=f"discussion:{record_id}:{recipient}", payload=payload)
+            return self._public(message)
 
-    def list_discussion_messages(self, thread_id: str, user_id: str, *, role: str, can_read: bool = False,
-                                 results_released: bool = False, limit: int = 500) -> list[dict[str, Any]]:
-        self._integer(limit, "limit", 1, 500)
+    def _project_discussion_message(self, row: Mapping[str, Any], *, role: str,
+                                    results_released: bool) -> dict[str, Any]:
+        item = self._public(row)
+        safe = row["preset_key"] in SAFE_GUIDANCE and SAFE_GUIDANCE.get(row["preset_key"]) == row["text"]
+        if role == "student" and row["author_role"] == "teacher" and not results_released and not safe:
+            item.update(text="", redacted=True, delivery="deferred", notice="教师短评将在本轮全部结果开放后显示。")
+        else:
+            item.update(redacted=False)
+            if results_released:
+                item["delivery"] = "delivered"
+        return item
+
+    def get_discussion_message(self, thread_id: str, message_id: str, user_id: str, *, role: str,
+                               can_read: bool = False, results_released: bool = False) -> dict[str, Any]:
         with self.connect() as db:
             thread = db.execute("SELECT * FROM discussion_threads WHERE id=?", (thread_id,)).fetchone()
             if thread is None:
                 raise NotFound("thread not found")
             self._thread_access(thread, user_id, role, can_read=can_read)
-            rows = db.execute("SELECT * FROM discussion_messages WHERE thread_id=? ORDER BY rowid LIMIT ?", (thread_id, limit)).fetchall()
-        result = []
-        for row in rows:
-            item = self._public(row)
-            safe = row["preset_key"] in SAFE_GUIDANCE and SAFE_GUIDANCE.get(row["preset_key"]) == row["text"]
-            if role == "student" and row["author_role"] == "teacher" and not results_released and not safe:
-                item.update(text="", redacted=True, delivery="deferred", notice="教师短评将在本题结果开放后显示。")
-            else:
-                item.update(redacted=False)
-                if results_released:
-                    item["delivery"] = "delivered"
-            result.append(item)
-        return result
+            row = db.execute("SELECT * FROM discussion_messages WHERE id=? AND thread_id=?", (message_id, thread_id)).fetchone()
+            if row is None:
+                raise NotFound("discussion message not found")
+        return self._project_discussion_message(row, role=role, results_released=results_released)
 
-    def create_notification(self, user_id: str, event_type: str, resource_type: str, resource_id: str, *,
-                            business_key: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def list_discussion_messages(self, thread_id: str, user_id: str, *, role: str, can_read: bool = False,
+                                 results_released: bool = False, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
+        self._integer(limit, "limit", 1, 500)
+        self._integer(offset, "offset")
+        with self.connect() as db:
+            thread = db.execute("SELECT * FROM discussion_threads WHERE id=?", (thread_id,)).fetchone()
+            if thread is None:
+                raise NotFound("thread not found")
+            self._thread_access(thread, user_id, role, can_read=can_read)
+            rows = db.execute("SELECT * FROM discussion_messages WHERE thread_id=? ORDER BY rowid LIMIT ? OFFSET ?",
+                              (thread_id, limit, offset)).fetchall()
+        return [self._project_discussion_message(row, role=role, results_released=results_released) for row in rows]
+
+    def _insert_notification(self, db: sqlite3.Connection, user_id: str, event_type: str,
+                             resource_type: str, resource_id: str, *, business_key: str,
+                             payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Insert using the caller's transaction, including discussion fan-out."""
         user_id, event_type = self._id(user_id, "user_id"), self._text(event_type, "event_type", 100)
         resource_type, resource_id = self._text(resource_type, "resource_type", 100), self._id(resource_id, "resource_id")
         business_key = self._text(business_key, "business_key", 300)
@@ -1225,22 +1270,36 @@ class CompanionStore:
         if len(encoded) > 20000:
             raise ValueError("notification payload is too large")
         digest = self._hash([user_id, event_type, resource_type, resource_id, dict(payload)])
+        old = db.execute("SELECT * FROM notifications WHERE business_key=?", (business_key,)).fetchone()
+        if old is not None:
+            self._same(old, digest)
+            return dict(self._public(old), payload=json.loads(old["payload_json"]))
+        record_id, now = uuid4().hex, time.time()
+        db.execute("INSERT INTO notifications(id,user_id,event_type,resource_type,resource_id,business_key,payload_json,request_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (record_id, user_id, event_type, resource_type, resource_id, business_key, encoded, digest, now))
+        return dict(self._public(self._owned(db, "notifications", record_id, user_id)), payload=dict(payload))
+
+    def create_notification(self, user_id: str, event_type: str, resource_type: str, resource_id: str, *,
+                            business_key: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._transaction() as db:
-            old = db.execute("SELECT * FROM notifications WHERE business_key=?", (business_key,)).fetchone()
-            if old is not None:
-                self._same(old, digest)
-                return dict(self._public(old), payload=json.loads(old["payload_json"]))
-            record_id, now = uuid4().hex, time.time()
-            db.execute("INSERT INTO notifications(id,user_id,event_type,resource_type,resource_id,business_key,payload_json,request_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                       (record_id, user_id, event_type, resource_type, resource_id, business_key, encoded, digest, now))
-            return dict(self._public(self._owned(db, "notifications", record_id, user_id)), payload=dict(payload))
+            return self._insert_notification(db, user_id, event_type, resource_type, resource_id,
+                                             business_key=business_key, payload=payload)
 
     def _project_notification(self, row: sqlite3.Row, user_id: str,
                               provider: AnswerPolicy | Mapping[str, Any] | None) -> dict[str, Any]:
         result, payload = self._public(row), json.loads(row["payload_json"])
         task_id = payload.get("task_id") or (row["resource_id"] if row["resource_type"] == "task" else None)
         policy = self._policy(user_id, task_id, payload.get("question_version_id"), provider)
-        if not policy["allow_assistant_content"]:
+        if row["resource_type"] == "discussion_thread" and row["event_type"] in _DISCUSSION_NOTIFICATION_EVENTS:
+            # Keep only stable locators through a closed answer gate. The HTTP
+            # layer reauthorizes the thread and reprojects the referenced message.
+            fields = ("event_type", "student_id", "course_id", "class_id", "task_id", "attempt_id", "thread_id",
+                      "question_version_id", "question_version", "grading_revision", "message_id", "author_id", "author_role")
+            payload = {key: payload[key] for key in fields if key in payload}
+            result.update(payload=payload, redacted=not policy["allow_assistant_content"])
+            if result["redacted"]:
+                result["notice"] = self._notice(policy)
+        elif not policy["allow_assistant_content"]:
             result.update(payload={}, redacted=True, notice=self._notice(policy))
         else:
             result.update(payload=payload, redacted=False)

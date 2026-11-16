@@ -337,9 +337,57 @@ class ReportExportsTests(unittest.TestCase):
         parser.feed(text)
         self.assertEqual(json.loads(parser.data)["snapshot"], snapshot)
 
+    def test_xlsx_print_pages_keep_identifiers_and_allow_wrapped_metadata(self):
+        snapshot = build_report_snapshot(report_input(), scopes()[0])
+        student_id = "10000000-1234-5678-9012-123456789012"
+        goal_ids = ["20000000-1234-5678-9012-123456789012", "30000000-1234-5678-9012-123456789012"]
+        snapshot["tables"]["students"]["rows"][0]["student_id"] = student_id
+        snapshot["tables"]["questions"]["rows"][0]["goal_ids"] = goal_ids
+        artifact = render_export(snapshot, "xlsx")
+        self.check_xlsx(snapshot, artifact)
+        workbook = load_workbook(io.BytesIO(artifact.content))
+        self.addCleanup(workbook.close)
+        for title, identifiers in (("作答证据", "$B:$B"), ("掌握度证据", "$B:$C")):
+            worksheet = workbook[title]
+            self.assertEqual(worksheet.print_title_cols, identifiers)
+            self.assertFalse(worksheet.sheet_properties.pageSetUpPr.fitToPage)
+            self.assertEqual(worksheet.page_setup.scale, 100)
+        for title in ("学习目标", "题目版本", "来源", "学生", "导出清单"):
+            worksheet = workbook[title]
+            self.assertTrue(worksheet.sheet_properties.pageSetUpPr.fitToPage)
+            self.assertEqual(worksheet.page_setup.fitToWidth, 1)
+            self.assertEqual(worksheet.page_setup.fitToHeight, 0)
+            self.assertTrue(worksheet["B3"].alignment.shrinkToFit)
+        self.assertGreaterEqual(workbook["学生"].row_dimensions[5].height, 60)
+        self.assertGreaterEqual(workbook["题目版本"].row_dimensions[5].height, 80)
+        manifest = workbook["导出清单"]
+        self.assertGreater(manifest.column_dimensions["C"].width, 60)
+        for row in manifest.iter_rows(min_row=5, min_col=2, max_col=3):
+            self.assertLess(manifest.row_dimensions[row[0].row].height, 409)
+            if row[0].value == "table.mastery":
+                self.assertEqual(json.loads(row[1].value), artifact.manifest["tables"]["mastery"])
+
+    def test_pymupdf_keeps_page_sized_rows_together(self):
+        from app.services.report_exports import _pymupdf_export, export_manifest
+        snapshot = build_report_snapshot(report_input(), scopes()[0])
+        snapshot["tables"]["sources"]["rows"] = [
+            {"source_id": f"source-{number}", "title": "分页来源",
+             "locator": f"ROW{number:02d}_START\n" + "每行出处需要完整保留\n" * 4 + f"ROW{number:02d}_END"}
+            for number in range(20)
+        ]
+        content = _pymupdf_export(snapshot, export_manifest(snapshot))
+        with pymupdf.open(stream=content, filetype="pdf") as document:
+            pages = [page.get_text() for page in document]
+            self.assertGreater(len(pages), 3)
+            for number in range(20):
+                starts = [index for index, text in enumerate(pages) if f"ROW{number:02d}_START" in text]
+                ends = [index for index, text in enumerate(pages) if f"ROW{number:02d}_END" in text]
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(starts, ends, f"ordinary row {number} was split across pages")
+
     def test_pdf_long_table_repeats_header_and_wraps_long_attribution(self):
         source = report_input(rows=70)
-        source["sources"][0]["locator"] = "第12页：" + "长出处说明与公式 x^2+y^2=z^2。" * 80
+        source["sources"][0]["locator"] = "第12页：" + "长出处说明与公式 x^2+y^2=z^2。" * 80 + "\nLONG_ATTRIBUTION_END"
         snapshot = build_report_snapshot(source, scopes()[0])
         artifact = render_export(snapshot, "pdf")
         with pymupdf.open(stream=artifact.content, filetype="pdf") as document:
@@ -348,6 +396,7 @@ class ReportExportsTests(unittest.TestCase):
             self.assertGreater(text.count("证据标识"), 1)
             self.assertIn("e70", text)
             self.assertIn("q70", text)
+            self.assertIn("LONG_ATTRIBUTION_END", text)
             for page in document:
                 for word in page.get_text("words"):
                     x0, y0, x1, y1, *_ = word
