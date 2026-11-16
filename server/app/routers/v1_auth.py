@@ -6,7 +6,7 @@ import sqlite3
 import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..models import User
@@ -61,6 +61,13 @@ class AccountOut(BaseModel):
     status: Literal["active", "pending", "disabled"]
 
 
+class AccountPage(BaseModel):
+    items: list[AccountOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class LoginOut(BaseModel):
     user: AccountOut
 
@@ -71,9 +78,14 @@ class ApplicationOut(BaseModel):
     message: str = "申请已提交，等待管理员审核"
 
 
+class TeacherReview(StrictRequest):
+    note: str = Field(default="", max_length=500)
+
+
 class ReviewOut(BaseModel):
     user_id: str
     status: Literal["active", "disabled"]
+    review_note: str
 
 
 class StudentCreated(BaseModel):
@@ -150,12 +162,23 @@ def apply_teacher(payload: TeacherApplication, request: Request, store: Platform
     return ApplicationOut(id=user["id"])
 
 
+@router.get("/accounts", response_model=AccountPage)
+def list_accounts(query: str = Query("", max_length=200),
+                  role: Literal["", "student", "teacher", "admin"] | None = None,
+                  status: Literal["", "active", "pending", "disabled"] | None = None,
+                  limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=2**63 - 1),
+                  actor: User = Depends(require_platform_roles("admin")), store: PlatformStore = Depends(get_platform_store)):
+    require_current_actor(store, actor.id, "admin")
+    rows, total = store.page_users(role=role or None, status=status or None, query=query, limit=limit, offset=offset)
+    return AccountPage(items=[_user_out(row) for row in rows], total=total, limit=limit, offset=offset)
+
+
 @router.get("/teacher-applications", response_model=list[AccountOut])
 def teacher_applications(actor: User = Depends(require_platform_roles("admin")), store: PlatformStore = Depends(get_platform_store)):
     return [_user_out(row) for row in store.list_users(role="teacher", status="pending")]
 
 
-def _review_teacher(store: PlatformStore, actor: User, user_id: str, approve: bool) -> ReviewOut:
+def _review_teacher(store: PlatformStore, actor: User, user_id: str, approve: bool, note: str = "") -> ReviewOut:
     with store.transaction():
         require_current_actor(store, actor.id, "admin")
         row = store.get_user(user_id)
@@ -164,18 +187,20 @@ def _review_teacher(store: PlatformStore, actor: User, user_id: str, approve: bo
         new_status = "active" if approve else "disabled"
         store.update_user(user_id, status=new_status)
         store.record_audit_event("teacher_application_approved" if approve else "teacher_application_rejected", actor.id,
-                                 resource_type="user", resource_id=user_id)
-    return ReviewOut(user_id=user_id, status=new_status)
+                                 resource_type="user", resource_id=user_id, payload={"note": note})
+    return ReviewOut(user_id=user_id, status=new_status, review_note=note)
 
 
 @router.post("/teacher-applications/{user_id}/approve", response_model=ReviewOut)
-def approve_teacher(user_id: str, actor: User = Depends(require_platform_roles("admin")), store: PlatformStore = Depends(get_platform_store)):
-    return _review_teacher(store, actor, user_id, True)
+def approve_teacher(user_id: str, payload: TeacherReview | None = None,
+                    actor: User = Depends(require_platform_roles("admin")), store: PlatformStore = Depends(get_platform_store)):
+    return _review_teacher(store, actor, user_id, True, payload.note if payload else "")
 
 
 @router.post("/teacher-applications/{user_id}/reject", response_model=ReviewOut)
-def reject_teacher(user_id: str, actor: User = Depends(require_platform_roles("admin")), store: PlatformStore = Depends(get_platform_store)):
-    return _review_teacher(store, actor, user_id, False)
+def reject_teacher(user_id: str, payload: TeacherReview | None = None,
+                   actor: User = Depends(require_platform_roles("admin")), store: PlatformStore = Depends(get_platform_store)):
+    return _review_teacher(store, actor, user_id, False, payload.note if payload else "")
 
 
 @router.patch("/users/{user_id}/status", response_model=AccountOut)

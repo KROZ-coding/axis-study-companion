@@ -15,7 +15,7 @@ from ..services.access import can_access_job, job_view, require_job
 from ..services.companion_access import (
     answer_policy_provider, response_access, response_event_access, response_job_state, validate_response_access,
 )
-from ..v1_deps import get_platform_user, require_platform_roles
+from ..v1_deps import get_platform_user, require_current_actor, require_platform_roles
 
 router = APIRouter(prefix="/api/v1", tags=["background-jobs"])
 
@@ -31,9 +31,9 @@ class ResumeRequest(Input):
 class BudgetPolicy(Input):
     scope_type: Literal["student_daily", "teaching", "project"]
     scope_id: str = Field(min_length=1, max_length=160)
-    class_id: str | None = Field(default=None, max_length=160)
-    limit_units: int = Field(ge=0, strict=True)
-    emergency_units: int = Field(default=0, ge=0, strict=True)
+    class_id: str | None = Field(default=None, min_length=1, max_length=160)
+    limit_units: int = Field(ge=0, le=2**63 - 1, strict=True)
+    emergency_units: int = Field(default=0, ge=0, le=2**63 - 1, strict=True)
     period: str | None = Field(default=None, max_length=10)
 
 
@@ -263,43 +263,71 @@ async def response_stream(response_id: str, request: Request, after: int = Query
 def set_budget_limit(payload: BudgetPolicy, request: Request,
                      actor=Depends(require_platform_roles("teacher", "admin"))):
     runtime = get_runtime(request)
-    if actor.role != "admin":
-        if payload.scope_type != "student_daily" or not payload.class_id:
-            raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "教师只能设置所属学生日额度"})
-        classroom = runtime.platform.get_class(payload.class_id)
-        if classroom is None or classroom.get("owner_teacher_id") != actor.id:
-            raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "学生有效日额度由班级负责人确认"})
-        if runtime.platform.get_class_membership(payload.class_id, payload.scope_id) is None:
-            raise HTTPException(status_code=404, detail={"code": "student_not_found", "message": "该学生不属于该班级"})
-    classroom = runtime.platform.get_class(payload.class_id) if payload.class_id else None
-    if payload.class_id and classroom is None:
-        raise HTTPException(status_code=404, detail={"code": "class_not_found", "message": "班级不存在"})
-    result = runtime.queue.budget_ledger.set_limit(
-        payload.scope_type, payload.scope_id, payload.limit_units,
-        emergency_units=payload.emergency_units, period=payload.period,
-        course_id=classroom["course_id"] if classroom else None, class_id=payload.class_id,
-    )
-    runtime.platform.record_audit_event("budget_limit_set", actor.id, resource_type="budget", resource_id=payload.scope_id,
-                                        payload={"scope_type": payload.scope_type, "limit_units": payload.limit_units})
+    # Keep owner/membership authority stable until the queue write completes.
+    with runtime.platform.transaction():
+        current = require_current_actor(runtime.platform, actor.id, "teacher", "admin")
+        classroom = runtime.platform.get_class(payload.class_id) if payload.class_id else None
+        if current["role"] != "admin":
+            if payload.scope_type != "student_daily" or not payload.class_id:
+                raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "教师只能设置所属学生日额度"})
+            if classroom is None or classroom.get("owner_teacher_id") != actor.id:
+                raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "学生有效日额度由班级负责人确认"})
+        if payload.class_id and classroom is None:
+            raise HTTPException(status_code=404, detail={"code": "class_not_found", "message": "班级不存在"})
+        if payload.scope_type == "student_daily":
+            student = runtime.platform.get_user(payload.scope_id)
+            if student is None or student["role"] != "student":
+                raise HTTPException(status_code=404, detail={"code": "student_not_found", "message": "学生账号不存在"})
+            if classroom and runtime.platform.get_class_membership(classroom["id"], payload.scope_id) is None:
+                raise HTTPException(status_code=404, detail={"code": "student_not_found", "message": "该学生不属于该班级"})
+        try:
+            result = runtime.queue.budget_ledger.set_limit(
+                payload.scope_type, payload.scope_id, payload.limit_units,
+                emergency_units=payload.emergency_units, period=payload.period,
+                course_id=classroom["course_id"] if classroom else None, class_id=payload.class_id,
+            )
+        except (ValueError, OverflowError) as error:
+            raise HTTPException(status_code=422, detail={"code": "invalid_budget_policy", "message": "额度、周期或适用范围无效"}) from error
+        runtime.platform.record_audit_event("budget_limit_set", actor.id, resource_type="budget", resource_id=payload.scope_id,
+                                            payload={"scope_type": payload.scope_type, "limit_units": payload.limit_units,
+                                                     "class_id": payload.class_id, "period": payload.period})
     return asdict(result)
 
 
 @router.get("/budgets/limits")
-def list_budget_limits(request: Request, actor=Depends(get_platform_user)):
+def list_budget_limits(request: Request, class_id: str | None = Query(None, min_length=1, max_length=160),
+                       actor=Depends(get_platform_user)):
     runtime = get_runtime(request)
+    current = require_current_actor(runtime.platform, actor.id)
+    classroom = runtime.platform.get_class(class_id) if class_id else None
+    if class_id:
+        if current["role"] == "teacher" and (classroom is None or classroom["owner_teacher_id"] != actor.id):
+            raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "只能查看本人负责班级的学生日额度"})
+        if current["role"] == "student" and (classroom is None or runtime.platform.get_class_membership(class_id, actor.id) is None):
+            raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "无权查看该班级额度"})
+        if classroom is None:
+            raise HTTPException(status_code=404, detail={"code": "class_not_found", "message": "班级不存在"})
     limits = runtime.queue.budget_ledger.list_limits()
-    if actor.role == "admin":
+    if current["role"] == "admin" and class_id is None:
         visible = limits
-    elif actor.role == "student":
-        visible = [item for item in limits if item.scope_type == "student_daily" and item.scope_id == actor.id]
+    elif current["role"] == "student":
+        visible = [item for item in limits if item.scope_type == "student_daily" and item.scope_id == actor.id
+                   and (class_id is None or (item.class_id == class_id and item.course_id == classroom["course_id"]))]
     else:
-        classes = runtime.platform.list_accessible_classes(actor.id)
-        class_ids = {classroom["id"] for classroom in classes}
-        allowed = {member["user_id"] for classroom in classes
-                   for member in runtime.platform.list_class_memberships(classroom["id"])}
-        visible = [item for item in limits if item.scope_type == "student_daily" and item.scope_id in allowed
-                   and (not item.class_id or item.class_id in class_ids)]
-    return {"items": [asdict(item) for item in visible], "currency": runtime.settings.budget_currency}
+        classes = [classroom] if classroom else [
+            row for row in runtime.platform.list_accessible_classes(actor.id) if row["owner_teacher_id"] == actor.id
+        ]
+        # Match each policy to its own current class membership, not a union of
+        # students that could reveal another class's policy for a shared student.
+        allowed = {(row["course_id"], row["id"], member["user_id"])
+                   for row in classes for member in runtime.platform.list_class_memberships(row["id"])}
+        visible = [item for item in limits if item.scope_type == "student_daily"
+                   and (item.course_id, item.class_id, item.scope_id) in allowed]
+    return {
+        "items": [asdict(item) for item in visible], "currency": runtime.settings.budget_currency,
+        "unit": "billing_unit", "unit_scale": 1,
+        "unit_description": "额度按原始非负整数计费单位显示和提交，缩放为1。币种取自服务端预算配置；site-credit为名义计费单位，不提供法币兑换比例或供应商现金收费上限保证。",
+    }
 
 
 @router.post("/admin/budgets/fund")

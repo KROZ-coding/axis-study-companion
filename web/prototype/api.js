@@ -160,18 +160,18 @@ async function logout() {
 
 /** 教师端：拿到自己带得动的课程与班级。 */
 async function teacherClasses() {
-  const courses = await get("/courses");
-  const list = Array.isArray(courses) ? courses : courses.items || [];
-  const out = [];
-  for (const course of list) {
-    let classes = [];
-    try {
-      classes = await get(`/courses/${course.id}/classes`);
-      classes = Array.isArray(classes) ? classes : classes.items || [];
-    } catch {
-      classes = [];
+  const [courseData, classData] = await Promise.all([get("/courses"), get("/classes")]);
+  const courseList = Array.isArray(courseData) ? courseData : courseData.items || [];
+  const classList = Array.isArray(classData) ? classData : classData.items || [];
+  const out = courseList.map((course) => ({ course, classes: classList.filter((item) => item.course_id === course.id) }));
+  // 班级协作与课程材料分别授权，只有班级权限的教师仍能进入自己的班级。
+  for (const classroom of classList) {
+    let entry = out.find((item) => item.course.id === classroom.course_id);
+    if (!entry) {
+      entry = { course: { id: classroom.course_id, name: "班级所属课程", can_manage_materials: false, can_create_classes: false }, classes: [] };
+      out.push(entry);
     }
-    out.push({ course, classes });
+    if (!entry.classes.some((item) => item.id === classroom.id)) entry.classes.push(classroom);
   }
   return out;
 }

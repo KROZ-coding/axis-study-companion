@@ -112,7 +112,7 @@ class V1CourseTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/v1/course-applications/{application_id}/review", json={"approve": True}).status_code, 409)
         self.as_user(self.owner)
         courses = self.client.get("/api/v1/courses").json()
-        self.assertEqual(set(courses[0]), {"id", "name", "term", "teacher_id"})
+        self.assertEqual(set(courses[0]), {"id", "name", "term", "teacher_id", "can_manage_materials", "can_create_classes", "can_manage_collaborators"})
         self.assertEqual(self.client.get(f"/api/v1/courses/{course['id']}/classes").json(), [])
 
     def test_material_owner_does_not_see_all_classes_or_rosters(self):
@@ -122,7 +122,7 @@ class V1CourseTests(unittest.TestCase):
         self.assertEqual(self.client.patch(f"/api/v1/courses/{self.course['id']}", json={"name": "Updated Math", "term": "2027"}).status_code, 200)
         created = self.client.post(f"/api/v1/courses/{self.course['id']}/classes", json={"name": "Class C", "owner_teacher_id": self.owner["id"]})
         self.assertEqual(created.status_code, 201, created.text)
-        self.assertEqual(set(created.json()), {"id", "course_id", "name", "owner_teacher_id"})
+        self.assertEqual(set(created.json()), {"id", "course_id", "name", "owner_teacher_id", "can_manage", "can_manage_permissions", "can_set_student_budgets"})
         self.assertEqual(self.client.get(f"/api/v1/classes/{created.json()['id']}").status_code, 403)
         self.as_user(self.owner)
         self.assertEqual(self.client.patch(f"/api/v1/courses/{self.course['id']}", json={"name": "Denied", "term": "2027"}).status_code, 403)

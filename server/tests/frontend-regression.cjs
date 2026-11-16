@@ -126,6 +126,8 @@ function harness(names, options = {}) {
     onAction: record("onAction"), onSubmit: record("onSubmit"),
     teacherLibrary: { bind: record("teacherLibrary.bind"), reset: record("teacherLibrary.reset") },
     teacherComposer: { bind: record("teacherComposer.bind"), reset: record("teacherComposer.reset") },
+    adminWorkspace: { bind: record("adminWorkspace.bind"), reset: record("adminWorkspace.reset"), load: record("adminWorkspace.load"), render: () => '<section data-admin-workspace>管理页面</section>' },
+    teacherManagement: { bind: record("teacherManagement.bind"), reset: record("teacherManagement.reset"), leave: () => { calls.push(["teacherManagement.leave"]); return true; }, load: record("teacherManagement.load"), render: () => '<section data-teacher-management>班级管理</section>' },
     resetEvents: record("resetEvents"), mountScene: record("mountScene"),
     fitCanvas: record("fitCanvas"), refreshAnchors: record("refreshAnchors"),
     loadWorkspace: record("loadWorkspace"),
@@ -1085,6 +1087,90 @@ test("logout removes conversation metadata, selected student, and all private wo
   assert.deepEqual(plain(h.state.studentDrafts), {});
   assert.equal(h.state.teacherView, "home");
   assert.equal(h.state.activeChat, 0);
+});
+
+test("admin workspace loads only management data and renders a dedicated role boundary", async () => {
+  const h = harness(["loadWorkspace", "renderAdmin", "escapeHtml"], {
+    state: { role: "admin", who: "<Admin>", live: true },
+    globals: { loadTeacher: () => assert.fail("admin fetched teacher learning data"), loadStudent: () => assert.fail("admin fetched student learning data") },
+  });
+  await h.context.loadWorkspace();
+  assert.equal(h.calls.filter(([name]) => name === "adminWorkspace.load").length, 1);
+  h.context.renderAdmin();
+  assert.match(h.context.view.innerHTML, /data-admin-workspace/);
+  assert.match(h.context.view.innerHTML, /&lt;Admin&gt;/);
+  assert.doesNotMatch(h.context.view.innerHTML, /data-teacher-management|教师审核与账号管理尚未接入/);
+});
+
+test("management navigation clears one-time-code state when leaving and loads when entering", async () => {
+  const h = harness(["bind"], { state: { role: "teacher", teacherView: "management" } });
+  const home = controlNode({ view: "home" });
+  const management = controlNode({ view: "management" });
+  h.nodes.set("[data-view]", [home, management]);
+  h.context.bind();
+  home.fire("click");
+  assert.equal(h.state.teacherView, "home");
+  assert.equal(h.calls.filter(([name]) => name === "teacherManagement.leave").length, 1);
+  assert.equal(h.calls.filter(([name]) => name === "teacherManagement.reset").length, 0);
+  management.fire("click");
+  assert.equal(h.state.teacherView, "management");
+  assert.equal(h.calls.filter(([name]) => name === "teacherManagement.load").length, 1);
+  h.state.loggingOut = true;
+  home.fire("click");
+  assert.equal(h.state.teacherView, "management");
+});
+
+test("management navigation keeps the current view when a write result is unresolved", () => {
+  const h = harness(["bind"], { state: { role: "teacher", teacherView: "management" } });
+  const home = controlNode({ view: "home" });
+  h.nodes.set("[data-view]", [home]);
+  h.context.teacherManagement.leave = () => false;
+  h.context.bind();
+  const renders = h.calls.filter(([name]) => name === "render").length;
+  home.fire("click");
+  assert.equal(h.state.teacherView, "management");
+  assert.equal(h.calls.filter(([name]) => name === "render").length, renders);
+  assert.equal(h.calls.filter(([name]) => name === "teacherManagement.reset").length, 0);
+  h.context.teacherManagement.leave = () => true;
+  home.fire("click");
+  assert.equal(h.state.teacherView, "home");
+});
+
+test("empty course and empty class states clear prior records and offer management", async () => {
+  for (const courses of [[], [{ course: { id: "new-course", name: "New course" }, classes: [] }]]) {
+    const h = harness(["loadTeacher", "teacherHomeLive", "escapeHtml"], {
+      state: { role: "teacher", courseId: "old-course", classId: "old-class", liveStudents: [{ id: "private" }], liveGoals: [{ id: "old" }], openStudent: "private" },
+      api: { teacherClasses: async () => courses, classMembers: () => assert.fail("no class to read") },
+    });
+    await h.context.loadTeacher();
+    assert.equal(h.state.classId, null);
+    assert.equal(h.state.openStudent, null);
+    assert.deepEqual(plain(h.state.liveStudents), []);
+    assert.deepEqual(plain(h.state.liveGoals), []);
+    assert.match(h.context.teacherHomeLive(), /data-view="management"/);
+  }
+});
+
+test("teacher course list keeps empty courses and independently authorized classes", async () => {
+  const requests = [];
+  const api = apiHarness(async (url) => {
+    requests.push(url);
+    if (url === "/api/v1/courses") return response(200, [{ id: "empty", name: "No classes", can_create_classes: true }]);
+    if (url === "/api/v1/classes") return response(200, [{ id: "collaborative", course_id: "hidden-course", name: "Shared class", can_manage: false }]);
+    assert.fail(`Unexpected request ${url}`);
+  });
+  const result = plain(await api.teacherClasses());
+  assert.equal(result[0].course.id, "empty");
+  assert.deepEqual(result[0].classes, []);
+  assert.equal(result[1].classes[0].id, "collaborative");
+  assert.equal(result[1].course.can_manage_materials, false);
+  assert.equal(result[1].course.can_create_classes, false);
+  assert.deepEqual(requests.sort(), ["/api/v1/classes", "/api/v1/courses"]);
+});
+
+test("teacher class-list failures stay errors instead of masquerading as an empty school", async () => {
+  const api = apiHarness(async (url) => url.endsWith("/classes") ? response(503, { detail: { code: "temporarily_unavailable", message: "read failed" } }) : response(200, []));
+  await assert.rejects(api.teacherClasses(), (error) => error.status === 503);
 });
 
 test("late teacher data cannot restore the previous teacher's private records after logout", async () => {

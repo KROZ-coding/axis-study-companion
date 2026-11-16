@@ -46,6 +46,9 @@ class CourseOut(BaseModel):
     name: str
     term: str
     teacher_id: str
+    can_manage_materials: bool
+    can_create_classes: bool
+    can_manage_collaborators: bool
 
 
 class CourseUpdate(StrictRequest):
@@ -67,6 +70,9 @@ class ClassOut(BaseModel):
     course_id: str
     name: str
     owner_teacher_id: str | None
+    can_manage: bool
+    can_manage_permissions: bool
+    can_set_student_budgets: bool
 
 
 class CollaboratorGrant(StrictRequest):
@@ -106,6 +112,22 @@ class MembershipOut(BaseModel):
 
 def _out(model, row: dict):
     return model(**{field: row[field] for field in model.model_fields})
+
+
+def _course_out(store: PlatformStore, actor: User, row: dict) -> CourseOut:
+    manage = store.can_manage_course_materials(actor.id, row["id"])
+    return _out(CourseOut, {
+        **row, "can_manage_materials": manage, "can_create_classes": manage,
+        "can_manage_collaborators": manage and (actor.role == "admin" or row["teacher_id"] == actor.id),
+    })
+
+
+def _class_out(store: PlatformStore, actor: User, row: dict) -> ClassOut:
+    permissions = store.can_manage_class_permissions(actor.id, row["id"])
+    return _out(ClassOut, {
+        **row, "can_manage": store.can_access_class(actor.id, row["id"], teaching=True),
+        "can_manage_permissions": permissions, "can_set_student_budgets": permissions,
+    })
 
 
 def _forbidden(message: str = "无权管理该资源") -> HTTPException:
@@ -177,12 +199,12 @@ def review_course(application_id: str, payload: CourseReview, actor: User = Depe
 def list_courses(actor: User = Depends(get_platform_user), store: PlatformStore = Depends(get_platform_store)):
     # Class teaching rights do not imply material editing rights; listings include
     # material readers and students who actually belong to the course.
-    return [_out(CourseOut, row) for row in store.list_courses() if store.can_access_course(actor.id, row["id"])]
+    return [_course_out(store, actor, row) for row in store.list_courses() if store.can_access_course(actor.id, row["id"])]
 
 
 @router.get("/courses/{course_id}", response_model=CourseOut)
 def get_course(course_id: str, actor: User = Depends(get_platform_user), store: PlatformStore = Depends(get_platform_store)):
-    return _out(CourseOut, _course_check(store, actor, course_id))
+    return _course_out(store, actor, _course_check(store, actor, course_id))
 
 
 @router.patch("/courses/{course_id}", response_model=CourseOut)
@@ -192,7 +214,7 @@ def update_course(course_id: str, payload: CourseUpdate, actor: User = Depends(r
         _course_check(store, actor, course_id, manage=True)
         course = store.update_course(course_id, name=payload.name, term=payload.term)
         store.record_audit_event("course_updated", actor.id, resource_type="course", resource_id=course_id)
-    return _out(CourseOut, course)
+    return _course_out(store, actor, course)
 
 
 @router.get("/courses/{course_id}/collaborators", response_model=list[CollaboratorOut])
@@ -230,23 +252,23 @@ def create_class(course_id: str, payload: ClassCreate, actor: User = Depends(req
         classroom = store.create_class(course_id, payload.name, owner_teacher_id=payload.owner_teacher_id)
         store.record_audit_event("class_created", actor.id, resource_type="class", resource_id=classroom["id"],
                                  payload={"course_id": course_id, "owner_teacher_id": payload.owner_teacher_id})
-    return _out(ClassOut, classroom)
+    return _class_out(store, actor, classroom)
 
 
 @router.get("/courses/{course_id}/classes", response_model=list[ClassOut])
 def list_course_classes(course_id: str, actor: User = Depends(get_platform_user), store: PlatformStore = Depends(get_platform_store)):
     # A course owner receives no additional class rows here.
-    return [_out(ClassOut, row) for row in store.list_accessible_classes(actor.id, course_id=course_id)]
+    return [_class_out(store, actor, row) for row in store.list_accessible_classes(actor.id, course_id=course_id)]
 
 
 @router.get("/classes", response_model=list[ClassOut])
 def list_classes(actor: User = Depends(get_platform_user), store: PlatformStore = Depends(get_platform_store)):
-    return [_out(ClassOut, row) for row in store.list_accessible_classes(actor.id)]
+    return [_class_out(store, actor, row) for row in store.list_accessible_classes(actor.id)]
 
 
 @router.get("/classes/{class_id}", response_model=ClassOut)
 def get_class(class_id: str, actor: User = Depends(get_platform_user), store: PlatformStore = Depends(get_platform_store)):
-    return _out(ClassOut, _class_check(store, actor, class_id))
+    return _class_out(store, actor, _class_check(store, actor, class_id))
 
 
 @router.patch("/classes/{class_id}", response_model=ClassOut)
@@ -256,7 +278,7 @@ def update_class(class_id: str, payload: ClassUpdate, actor: User = Depends(requ
         _class_check(store, actor, class_id, manage=True)
         result = store.update_class(class_id, name=payload.name)
         store.record_audit_event("class_updated", actor.id, resource_type="class", resource_id=class_id)
-    return _out(ClassOut, result)
+    return _class_out(store, actor, result)
 
 
 @router.get("/classes/{class_id}/members", response_model=list[MemberOut])
@@ -349,4 +371,4 @@ def transfer_owner(class_id: str, payload: OwnerTransfer, actor: User = Depends(
         result = store.transfer_class_owner(class_id, payload.owner_teacher_id, transferred_by=actor.id)
         store.record_audit_event("class_owner_transferred", actor.id, resource_type="class", resource_id=class_id,
                                  payload={"owner_teacher_id": payload.owner_teacher_id})
-    return _out(ClassOut, result)
+    return _class_out(store, actor, result)

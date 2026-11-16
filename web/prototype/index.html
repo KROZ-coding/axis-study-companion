@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/prototype/student.css">
   <link rel="stylesheet" href="/prototype/teacher-planning.css">
   <link rel="stylesheet" href="/prototype/teacher-library.css">
+  <link rel="stylesheet" href="/prototype/management.css">
 </head>
 <body>
   <a class="skip" href="#view">跳到主要内容</a>
@@ -23,10 +24,14 @@
     import { api } from "/prototype/api.js";
     import { createTeacherPlanning } from "/prototype/teacher-planning.js";
     import { createTeacherLibrary } from "/prototype/teacher-library.js";
+    import { createAdminWorkspace } from "/prototype/admin-workspace.js";
+    import { createTeacherManagement } from "/prototype/teacher-management.js";
     window.createScene = createScene;
     window.api = api;
     window.createTeacherPlanning = createTeacherPlanning;
     window.createTeacherLibrary = createTeacherLibrary;
+    window.createAdminWorkspace = createAdminWorkspace;
+    window.createTeacherManagement = createTeacherManagement;
     // 正式服务不可用时暂停认证，不创建本地虚构会话。
     await api.probe();
     await import("/prototype/app.js");

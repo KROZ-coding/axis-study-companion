@@ -153,6 +153,24 @@ const teacherComposer = window.createTeacherPlanning({
     teacherLibrary.load(options);
   },
 });
+const adminWorkspace = window.createAdminWorkspace({
+  api, state, render, toast,
+  onChanged: () => loadWorkspace(),
+});
+const teacherManagement = window.createTeacherManagement({
+  api, state, render, toast,
+  onChanged: async ({ classId, courseId } = {}) => {
+    if (state.role !== "teacher" || state.loggingOut) return;
+    if (courseId !== undefined || classId !== undefined) {
+      state.teacherContextVersion += 1;
+      if (courseId !== undefined) state.courseId = courseId;
+      if (classId !== undefined) state.classId = classId;
+      state.openStudent = null; state.liveStudents = []; state.liveGoals = [];
+      teacherLibrary.reset(); teacherComposer.reset();
+    }
+    await loadWorkspace();
+  },
+});
 
 function toast(text) {
   toastEl.textContent = text;
@@ -467,12 +485,21 @@ function authFields() {
 }
 
 function renderAdmin() {
-  view.innerHTML = `<main class="admin-boundary" aria-labelledby="admin-title">
-    <p class="eyebrow">伴星导学 · 管理员会话</p>
-    <h1 id="admin-title">此账号仅用于平台管理</h1>
-    <p>教师审核与账号管理尚未接入当前工作区。为保护权限范围，管理员账号不会进入教师或学生界面。</p>
-    <button class="btn primary" type="button" data-action="logout">安全退出</button>
-  </main>`;
+  view.innerHTML = `<div class="app admin-app">
+    <aside class="side" aria-label="平台管理">
+      <div class="brand">伴星导学</div>
+      <p class="mgmt-side-title">平台管理</p>
+      <p class="muted">审核教师与课程，管理账号和使用额度。</p>
+      <div class="spacer"></div>
+      <p class="who muted">${escapeHtml(state.who)} · 管理员</p>
+      <button class="nav-btn" type="button" data-action="logout" ${state.loggingOut ? "disabled" : ""}>${state.loggingOut ? "正在退出" : "安全退出"}</button>
+    </aside>
+    <main class="main" id="admin-main" tabindex="-1" aria-labelledby="admin-title">
+      <h1 class="page" id="admin-title">平台管理</h1>
+      <p class="muted">教师申请、课程审核与账号状态以正式服务的记录为准。</p>
+      ${adminWorkspace.render()}
+    </main>
+  </div>`;
 }
 
 function renderTeacher() {
@@ -481,17 +508,18 @@ function renderTeacher() {
     student: teacherStudent,
     materials: teacherMaterials,
     reports: teacherReports,
-  }[state.teacherView];
+    management: () => teacherManagement.render(),
+  }[state.teacherView] || teacherHome;
   view.innerHTML = `
     <div class="app teacher-app" ${state.drawer ? "inert" : ""}>
       <aside class="side">
         <div class="brand">伴星导学</div>
-        ${nav("home", "班级学情")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("reports", "阶段成果")}
+        ${nav("home", "班级学情")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("reports", "阶段成果")}${nav("management", "课程与班级")}
         <div class="spacer"></div>
         <p class="who muted">${escapeHtml(state.who)} · ${escapeHtml(state.className || "教师工作区")}</p>
         <button class="nav-btn" data-action="logout">退出</button>
       </aside>
-      <main class="main">${teacherContext()}${page()}</main>
+      <main class="main" id="teacher-main" tabindex="-1">${state.teacherView === "management" ? "" : teacherContext()}${page()}</main>
     </div>
     ${state.drawer ? drawer() : ""}`;
 }
@@ -502,7 +530,7 @@ function nav(id, label) {
 
 function teacherContext() {
   const entries = state.teacherCourses || [];
-  if (!entries.length) return "";
+  if (!entries.some((item) => item.classes.length)) return "";
   return `<div class="teacher-context"><label class="field">课程与班级<select data-teacher-class aria-label="课程与班级" ${state.loading ? "disabled" : ""}>${entries.map(({ course, classes }) => classes.length ? `<optgroup label="${escapeHtml(course.name)}">${classes.map((classroom) => `<option value="${escapeHtml(classroom.id)}" ${state.classId === classroom.id ? "selected" : ""}>${escapeHtml(course.name)} / ${escapeHtml(classroom.name)}</option>`).join("")}</optgroup>` : "").join("")}</select></label><p class="muted">题库按课程共享，发布范围由所选班级和学生确定。</p></div>`;
 }
 
@@ -514,7 +542,7 @@ async function selectTeacherClass(classId) {
   state.courseId = entry.course.id; state.courseName = entry.course.name;
   state.classId = classroom.id; state.className = classroom.name;
   state.openStudent = null; state.liveStudents = []; state.liveGoals = [];
-  teacherLibrary.reset(); teacherComposer.reset();
+  teacherLibrary.reset(); teacherComposer.reset(); teacherManagement.reset();
   await loadWorkspace();
   if (state.teacherView === "materials") teacherLibrary.load();
 }
@@ -528,7 +556,13 @@ function teacherHomeLive() {
   if (state.liveError) {
     return `<h1 class="page">这次没有读全</h1>
       <div class="state-banner bad">${escapeHtml(state.liveError)}</div>
-      <button class="btn" data-action="reload">再读一次</button>`;
+      <button class="btn" data-action="reload">再读一次</button>
+      <button class="btn" data-view="management">课程与班级</button>`;
+  }
+  if (!state.classId) {
+    return `<h1 class="page">从一门课程开始</h1>
+      <p class="muted">${state.courseId ? "课程已准备好，建好班级后即可邀请学生并布置学习任务。" : "申请课程，审核通过后创建班级，再为学生发放激活码。"}</p>
+      <button class="btn primary" data-view="management">管理课程与班级</button>`;
   }
   const goal = state.liveGoals[0];
   const students = state.liveStudents;
@@ -1194,9 +1228,12 @@ function bind() {
     if (monitorAccount) monitorAccount.textContent = state.authAccount || "—";
   }));
   view.querySelectorAll("[data-view]").forEach((node) => node.addEventListener("click", () => {
+    if (state.role !== "teacher" || state.loggingOut || state.transition || state.loading) return;
+    if (state.teacherView === "management" && node.dataset.view !== "management" && !teacherManagement.leave()) return;
     state.teacherView = node.dataset.view;
     render();
     if (state.teacherView === "materials") teacherLibrary.load();
+    if (state.teacherView === "management") teacherManagement.load();
   }));
   view.querySelectorAll("[data-teacher-class]").forEach((node) => node.addEventListener("change", () => selectTeacherClass(node.value)));
   view.querySelectorAll("[data-open-student]").forEach((node) => node.addEventListener("click", () => {
@@ -1272,7 +1309,9 @@ function bind() {
     state.studentTab = "companion";
     render();
   }));
-  view.querySelectorAll("form").forEach((form) => form.addEventListener("submit", onSubmit));
+  view.querySelectorAll("form").forEach((form) => {
+    if (!form.closest?.("[data-admin-workspace], [data-teacher-management]")) form.addEventListener("submit", onSubmit);
+  });
   view.querySelectorAll("[data-chat-rename-input]").forEach((input) => input.addEventListener("input", () => {
     state.chatRenameTitle = input.value;
     state.chatRenameError = "";
@@ -1309,6 +1348,8 @@ function bind() {
   }));
   teacherLibrary.bind(view);
   teacherComposer.bind(view);
+  adminWorkspace.bind(view);
+  teacherManagement.bind(view);
 }
 
 async function finishLogout() {
@@ -1316,6 +1357,8 @@ async function finishLogout() {
   workspaceRequest += 1;
   teacherLibrary.reset();
   teacherComposer.reset();
+  adminWorkspace.reset();
+  teacherManagement.reset();
   clearInterval(leaseTimer);
   leaseTimer = 0;
   closeStudentChatStream();
@@ -1578,6 +1621,8 @@ function onSubmit(event) {
 
 async function enterWorkspace(role, displayName, { live, message }) {
   const generation = ++state.transitionId;
+  adminWorkspace.reset();
+  teacherManagement.reset();
   cancelAnimationFrame(revealTimer);
   drag = null;
   touchY = null;
@@ -1614,7 +1659,7 @@ async function enterWorkspace(role, displayName, { live, message }) {
   toast(message);
   render();
   window.scrollTo(0, 0);
-  view.querySelector("#student-main")?.focus({ preventScroll: true });
+  view.querySelector(role === "admin" ? "#admin-main" : role === "teacher" ? "#teacher-main" : "#student-main")?.focus({ preventScroll: true });
   if (live) {
     await loadWorkspace();
     if (generation === state.transitionId && role === "student" && chatRoute()) await loadConversation(chatRoute());
@@ -1706,14 +1751,19 @@ function submitAuth(data) {
 // 免得渲染函数里到处判断"这是真数据还是样例"。
 
 async function loadWorkspace() {
-  if (!state.live || state.role === "admin" || state.loggingOut) return;
+  if (!state.live || !state.role || state.loggingOut) return;
+  if (state.role === "admin") {
+    await adminWorkspace.load();
+    return;
+  }
   const request = ++workspaceRequest;
   state.loading = true;
   state.liveError = "";
   render();
   try {
-    if (state.role === "teacher" || state.role === "admin") {
+    if (state.role === "teacher") {
       await loadTeacher();
+      if (request === workspaceRequest && state.role === "teacher" && state.teacherView === "management") await teacherManagement.load();
     } else {
       await loadStudent();
     }
@@ -1737,7 +1787,7 @@ async function loadTeacher() {
   const withClasses = courses.find((entry) => entry.course.id === state.courseId)
     || courses.find((entry) => entry.classes.length) || courses[0];
   if (!withClasses) {
-    state.liveError = "这个账号还没有可访问的课程";
+    Object.assign(state, { courseId: null, courseName: "", classId: null, className: "", liveStudents: [], liveGoals: [], openStudent: null });
     return;
   }
   state.courseId = withClasses.course.id;
@@ -1748,7 +1798,7 @@ async function loadTeacher() {
     state.className = "";
     state.liveStudents = [];
     state.liveGoals = [];
-    state.liveError = "这门课还没有班级，可先在题库与材料中准备课程内容。";
+    state.openStudent = null;
     return;
   }
   state.classId = classroom.id;
