@@ -9,7 +9,7 @@
 面向教师与学生的学习证据系统，将课程要求、独立作答、学伴引导和教师复核连成完整学习流程。
 
 [![License: PolyForm NC 1.0.0](https://img.shields.io/badge/License-PolyForm_NC_1.0.0-315b6b?style=flat-square)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/server/requirements.txt)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://github.com/KROZ-coding/axis-study-companion/blob/main/server/requirements.txt)
 [![FastAPI](https://img.shields.io/badge/FastAPI-1f8aa8?style=flat-square&logo=fastapi&logoColor=white)](#技术构成)
 [![Native ES modules](https://img.shields.io/badge/Web-Native_ES_Modules-14343f?style=flat-square&logo=javascript&logoColor=white)](#技术构成)
 
@@ -24,7 +24,7 @@
 > [!NOTE]
 > **当前为开发中的比赛项目。** 正式认证、师生工作区与学伴会话已接通；独立演示可走通发布、作答、反馈、讨论和报告。真实模型质量、供应商账单与正式赛事成果仍待验收。
 >
-> 本页展示[当前开发版本](https://github.com/KROZ-coding/axis-study-companion/tree/docs/competition-production-direction)。`main` 的首页文档同步更新，业务代码仍保留其原有基线；体验时请使用下方获取命令。
+> 正式代码与当前任务统一在 [`main`](https://github.com/KROZ-coding/axis-study-companion/tree/main) 更新。根目录用于正式开发，`demo/recording-demo/` 保留独立演示。
 
 ## 让学习记录真正连起来
 
@@ -86,7 +86,7 @@ flowchart LR
 本地运行使用 **Windows PowerShell、Python 3.11+**，前端无需构建。首次获取当前开发版本：
 
 ```powershell
-git clone --branch docs/competition-production-direction https://github.com/KROZ-coding/axis-study-companion.git
+git clone --branch main https://github.com/KROZ-coding/axis-study-companion.git
 cd axis-study-companion
 python -m venv server/.venv
 .\server\.venv\Scripts\python.exe -m pip install -r server/requirements.txt
@@ -100,7 +100,7 @@ python -m venv server/.venv
 .\demo\recording-demo\start_recording_demo.bat
 ```
 
-打开 **[本机演示工作区](http://127.0.0.1:8010/prototype/)**，按[全流程演示指南](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/demo/recording-demo/docs/全流程演示操作指南.md)操作：
+打开 **[本机演示工作区](http://127.0.0.1:8010/prototype/)**，按[全流程演示指南](https://github.com/KROZ-coding/axis-study-companion/blob/main/demo/recording-demo/docs/全流程演示操作指南.md)操作：
 
 **教师发布 → 学生首诊 → 四类题型作答 → 分步提示 → 交卷反馈 → 教师短评 → 学生回复 → 报告下载**
 
@@ -110,7 +110,7 @@ python -m venv server/.venv
 
 根目录 `server/`、`web/` 是正式开发位置；`demo/recording-demo/` 保留独立演示副本。
 
-按[本地部署说明](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/本地部署与承接说明.md)设置环境和数据目录，首次初始化管理员后启动：
+按[本地部署说明](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/本地部署与承接说明.md)设置环境和数据目录，首次初始化管理员后启动：
 
 ```powershell
 .\start_study_companion.bat
@@ -123,7 +123,7 @@ python -m venv server/.venv
 | 层次 | 选择与作用 |
 | :--- | :--- |
 | **交互** | 原生 JavaScript ES modules + 手写 WebGL，资源本地提供，无前端构建步骤。 |
-| **服务** | Python + FastAPI，统一 `/api/v1`，后台 worker 处理评分、学伴与报告。 |
+| **服务** | Python + FastAPI，统一 `/api/v1`，后台 worker 处理评分与学伴；报告由冻结证据同步生成。 |
 | **持久化** | SQLite WAL；platform、learning、jobs、content、reports、companion 六库按职责保存。 |
 | **一致性** | 编辑租约、幂等请求和版本校验；草稿与交卷分离，报告绑定冻结快照与修订号。 |
 | **认证与授权** | Argon2 口令散列、HttpOnly Cookie、一次性激活／重置码、同源 Origin 与角色范围检查。 |
@@ -131,14 +131,15 @@ python -m venv server/.venv
 
 **四类报告 × 五种格式：** 班级、个人、目标、题库；HTML、PDF、XLSX、JSON、多表 CSV ZIP。
 
-接口与数据契约见[正式后端接入说明](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/decisions-backend-platform.md)，模型路由及费用规则见[模型接入约定](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/模型分工与接入约定.md)。
+接口与数据契约见[正式后端接入说明](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/decisions-backend-platform.md)，模型路由及费用规则见[模型接入约定](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/模型分工与接入约定.md)。
 
 ## 进展与验证
 
-以下为已执行的历史验证，分别绑定对应版本。本次首页改版没有重跑业务全量测试。
+正式管理工作区已接通教师与课程审核、账号搜索、停用／恢复、口令重设，以及教师建班、学生建号发码和额度设置。以下测试数字分别对应所列开发阶段与版本。
 
 | 版本与日期 | 验证记录 | 解释 |
 | :--- | :--- | :--- |
+| 管理与建班阶段 · 2026-11-16 | **439 / 439** Python、**235 / 235** Node 联合回归 | 浏览器已走通教师申请与审核、课程申请与审核、建班、学生建号、首次激活登录及班级日额保存；合成账号、临时数据库、无真实供应商调用。 |
 | `fc2cd4c` · 2026-11-15 | **418 / 418** Python 回归；学伴 HTTP **8 阶段、90 次请求** | 隔离上游配置，使用 FakeGateway；验证真实应用、认证、数据库、worker、SSE 与恢复。 |
 | `aede83a` · 2026-11-15 | **144 / 144** Node 联合回归 | 学生、传输、教师相关前端回归；是该冻结版本的记录。 |
 | `77b1d86` · 2026-11-15 | 独立演示 **3 / 3** Python、**3 / 3** Node | 目录迁移后的流程、报告和权限专项；独立启动与静态资源来源核对通过。 |
@@ -148,6 +149,7 @@ python -m venv server/.venv
 <details>
 <summary><strong>当前边界与接下来的工作</strong></summary>
 
+- **当前开发：** 历史提交、人工批改、师生短评与冻结报告页面正在 `main` 完成联调验收；AI 学情总结与针对性下一轮练习随后推进。
 - **真实模型与费用验收：** 教师／学生 Sol、评分／摘要 Terra 的正式线路、内容质量和供应商账单仍需核验；缺价格或预算时阻断付费调用。
 - **正式辅导能力：** 活跃任务仍采用固定 `safe_guidance`；逐步解题提示、课程检索和记忆增强待完成。演示中的模拟提示不代表正式能力已交付。
 - **浏览器与设备：** 已验证部分主流程、刷新恢复及停服后草稿保留；新增暂停／取消／确认恢复控件仅有自动化验证，未完成生成中断线重连、真实软键盘与移动实机验收。
@@ -162,12 +164,12 @@ python -m venv server/.venv
 
 | 想了解什么 | 从这里开始 |
 | :--- | :--- |
-| 安装、初始化与本机运行 | [本地部署与承接说明](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/本地部署与承接说明.md) |
-| 演示流程与真实／模拟边界 | [独立演示说明](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/demo/recording-demo/README.md) · [操作指南](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/demo/recording-demo/docs/全流程演示操作指南.md) |
-| 赛题与产品方向 | [赛题要求与数据边界](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/赛题要求与数据边界.md) · [产品技术总方案](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/智慧学伴产品与前后端技术总方案.md) |
-| 已做什么、还差什么 | [需求覆盖清单](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/需求覆盖与复核清单.md) · [验证记录与边界](docs/验证记录与边界.md) |
-| 接口、存储与模型 | [后端接入说明](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/decisions-backend-platform.md) · [模型接入约定](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/模型分工与接入约定.md) |
-| 成果组织与设计依据 | [制作方向](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/制作方向/README.md) · [前端设计调研](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/前端参考与设计技能调研.md) |
+| 安装、初始化与本机运行 | [本地部署与承接说明](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/本地部署与承接说明.md) |
+| 演示流程与真实／模拟边界 | [独立演示说明](https://github.com/KROZ-coding/axis-study-companion/blob/main/demo/recording-demo/README.md) · [操作指南](https://github.com/KROZ-coding/axis-study-companion/blob/main/demo/recording-demo/docs/全流程演示操作指南.md) |
+| 赛题与产品方向 | [赛题要求与数据边界](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/赛题要求与数据边界.md) · [产品技术总方案](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/智慧学伴产品与前后端技术总方案.md) |
+| 已做什么、还差什么 | [需求覆盖清单](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/需求覆盖与复核清单.md) · [验证记录与边界](docs/验证记录与边界.md) |
+| 接口、存储与模型 | [后端接入说明](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/decisions-backend-platform.md) · [模型接入约定](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/模型分工与接入约定.md) |
+| 成果组织与设计依据 | [制作方向](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/制作方向/README.md) · [前端设计调研](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/前端参考与设计技能调研.md) |
 
 <details>
 <summary><strong>目录结构与首页设计参考</strong></summary>
@@ -198,7 +200,7 @@ axis-study-companion/
 Required Notice: Copyright (c) 2026 KROZ-coding (https://github.com/KROZ-coding/audit-companion)
 ```
 
-项目包含源自 [KROZ-coding/audit-companion](https://github.com/KROZ-coding/audit-companion) 的代码，上游提交为 `d01ab02d287641e5c62b731a7941b9a5c4e07b29`。完整条款与来源见 [LICENSE](LICENSE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和[承接说明](https://github.com/KROZ-coding/axis-study-companion/blob/docs/competition-production-direction/docs/本地部署与承接说明.md)。
+项目包含源自 [KROZ-coding/audit-companion](https://github.com/KROZ-coding/audit-companion) 的代码，上游提交为 `d01ab02d287641e5c62b731a7941b9a5c4e07b29`。完整条款与来源见 [LICENSE](LICENSE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和[承接说明](https://github.com/KROZ-coding/axis-study-companion/blob/main/docs/本地部署与承接说明.md)。
 
 正式赛题资料、个人信息、模型密钥、数据库、上传原件与生成产物不进入代码仓库。资料使用须登记来源、用途、引用位置与许可；第三方模型外发与留存遵守授权范围，不引入真实学生个人信息。
 

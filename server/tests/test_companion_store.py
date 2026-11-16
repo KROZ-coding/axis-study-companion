@@ -1,15 +1,18 @@
 """File-backed companion storage, worker fencing, projection and HTTP tests."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.companion_store import (
@@ -18,6 +21,8 @@ from app.companion_store import (
 )
 from app.platform_store import PlatformStore
 from app.routers.v1_companion import router
+from app.routers.v1_jobs import response_stream
+from app.services.companion_access import answer_policy, response_access, response_events
 from app.models import User
 from app.v1_deps import get_platform_store, get_platform_user
 
@@ -152,6 +157,75 @@ class CompanionStoreTests(unittest.TestCase):
         self.assertEqual([row["generation"] for row in events], [2, 2, 2])
         with self.assertRaises(InvalidTransition):
             self.store.begin_response(response_id, call_id="old", generation=3, expected_generation=1)
+
+    def test_response_snapshot_text_generation_and_cursor_share_read_transaction(self):
+        posted = self.post(task_id="task-1", question_version_id="q1:1")
+        response_id = posted["response_id"]
+        first = self.store.append_delta(response_id, 1, "prefix", call_id="call", generation=1)
+        writer = CompanionStore(self.database)
+        read_row = self.store._response_row
+        changed = False
+
+        def append_between_row_and_watermark(db, record_id, user_id=None):
+            nonlocal changed
+            row = read_row(db, record_id, user_id)
+            if not changed:
+                changed = True
+                writer.append_delta(response_id, 2, "suffix", call_id="call", generation=1)
+            return row
+
+        with patch.object(CompanionStore, "_response_row", side_effect=append_between_row_and_watermark):
+            snapshot = self.store.get_response(response_id)
+        self.assertEqual((snapshot["text"], snapshot["generation"], snapshot["last_event_id"]),
+                         ("prefix", 1, first["event_id"]))
+        current = self.store.get_response(response_id)
+        self.assertEqual(current["text"], "prefixsuffix")
+        self.assertGreater(current["last_event_id"], snapshot["last_event_id"])
+
+    def test_message_summary_freezes_cursor_before_policy_projection_and_paginates(self):
+        posted = self.post(task_id="task-1", question_version_id="q1:1")
+        response_id = posted["response_id"]
+        first = self.store.append_delta(response_id, 1, "before", call_id="call", generation=1)
+        changed = False
+
+        def policy(*args, **options):
+            nonlocal changed
+            if not changed:
+                changed = True
+                self.store.append_delta(response_id, 2, "after", call_id="call", generation=1)
+            return True
+
+        summary = self.store.list_messages(self.conversation["id"], "student-1", answer_policy=policy)[0]["response"]
+        self.assertEqual((summary["text"], summary["generation"], summary["last_event_id"]),
+                         ("before", 1, first["event_id"]))
+        self.assertEqual((summary["task_id"], summary["question_version_id"]), ("task-1", "q1:1"))
+        second = self.post("second", request_id="second")
+        third = self.post("third", request_id="third")
+        latest = self.store.list_messages(self.conversation["id"], "student-1", latest=True, limit=2)
+        self.assertEqual([item["id"] for item in latest], [second["message_id"], third["message_id"]])
+        previous = self.store.list_messages(self.conversation["id"], "student-1", before=second["message_id"], limit=2)
+        self.assertEqual([item["id"] for item in previous], [posted["message_id"]])
+        after = self.store.list_messages(self.conversation["id"], "student-1", after=posted["message_id"], limit=2)
+        self.assertEqual([item["id"] for item in after], [second["message_id"], third["message_id"]])
+        with self.assertRaises(NotFound):
+            self.store.list_messages(self.conversation["id"], "student-1", before="foreign-cursor")
+
+    def test_buffered_event_is_reprojected_and_fenced_after_generation_takeover(self):
+        posted = self.post()
+        response_id = posted["response_id"]
+        self.policy.allowed = True
+        delta = self.store.append_delta(response_id, 1, "private", call_id="call", generation=1)
+        snapshot, events = self.store.read_response_events(response_id, "student-1")
+        self.assertEqual(snapshot["last_event_id"], delta["event_id"])
+        self.assertEqual(events[-1]["data"]["text"], "private")
+        self.policy.allowed = False
+        current, event = self.store.get_response_event(response_id, delta["event_id"], "student-1")
+        self.assertTrue(current["redacted"])
+        self.assertEqual(event["data"]["text"], "")
+        self.store.begin_response(response_id, call_id="new-call", generation=2, expected_generation=1)
+        current, event = self.store.get_response_event(response_id, delta["event_id"], "student-1")
+        self.assertEqual(current["generation"], 2)
+        self.assertIsNone(event)
 
     def test_unknown_policy_hides_full_multi_question_history_but_not_safe_hints(self):
         posted = self.post(task_id="task-1", question_version_id="q1:1")
@@ -416,6 +490,298 @@ class CompanionRouterTests(unittest.TestCase):
         posted = self.companion.pending_outbox()[0]
         self.assertEqual(posted["payload"]["resource_id"], self.companion.pending_outbox()[0]["response_id"])
         self.assertEqual(self.client.get(f"/api/v1/companion/conversations/{conversation_id}/messages").status_code, 200)
+
+    def make_response(self, *, completed=False, task=True):
+        conversation = self.companion.create_conversation(self.student["id"], "Live", course_id="course", request_id=f"live-{time.time_ns()}")
+        posted = self.companion.post_message(
+            conversation["id"], self.student["id"], "question", request_id="message",
+            task_id="task-1" if task else None, question_version_id="q1:1" if task else None,
+        )
+        self.learning.released = True
+        self.companion.append_delta(posted["response_id"], 1, "first", call_id="call", generation=1)
+        self.companion.append_delta(posted["response_id"], 2, "second", call_id="call", generation=1)
+        if completed:
+            self.companion.complete_response(posted["response_id"], call_id="call", generation=1)
+        return posted
+
+    def stream_request(self):
+        return SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(runtime=self.runtime)), headers={},
+            is_disconnected=self.not_disconnected,
+        )
+
+    @staticmethod
+    async def not_disconnected():
+        return False
+
+    @staticmethod
+    def parse_frame(frame):
+        if isinstance(frame, bytes):
+            frame = frame.decode()
+        values = {line.split(":", 1)[0]: line.split(":", 1)[1].strip()
+                  for line in frame.splitlines() if ":" in line}
+        return values.get("event"), json.loads(values["data"]) if "data" in values else None
+
+    def test_answer_policy_validates_user_question_class_and_global_task_gate(self):
+        scoped = self.learning.get_answer_policy
+        def policies(user_id, *, task_id=None, question_version_id=None):
+            if task_id:
+                return {"allow_assistant_content": True, "allow_generation": True, "attempted": True}
+            return {"allow_assistant_content": False, "allow_generation": False,
+                    "diagnostic": True, "attempted": False, "active_count": 1}
+        self.learning.get_answer_policy = policies
+        policy = answer_policy(self.runtime, self.student["id"], task_id="task-1", question_version_id="q1:1")
+        self.assertFalse(policy["allow_generation"])
+        self.assertFalse(policy["allow_assistant_content"])
+        self.assertEqual(policy["guidance_key"], "independent_attempt")
+        for task_id, question in ((None, "q1:1"), ("task-1", "foreign:1")):
+            with self.subTest(task=task_id, question=question), self.assertRaises(PermissionError):
+                answer_policy(self.runtime, self.student["id"], task_id=task_id, question_version_id=question)
+        self.platform.delete_class_membership("class", self.student["id"])
+        with self.assertRaises(PermissionError):
+            answer_policy(self.runtime, self.student["id"], task_id="task-1")
+        self.learning.get_answer_policy = scoped
+        self.platform.update_user(self.student["id"], status="disabled")
+        with self.assertRaises(PermissionError):
+            answer_policy(self.runtime, self.student["id"])
+
+    def test_json_response_and_events_share_policy_and_atomic_cursor(self):
+        posted = self.make_response(completed=True)
+        response_id = posted["response_id"]
+        shown = self.client.get(f"/api/v1/companion/responses/{response_id}")
+        self.assertEqual(shown.status_code, 200, shown.text)
+        self.assertEqual(shown.json()["text"], "firstsecond")
+        events = self.client.get(f"/api/v1/companion/responses/{response_id}/events").json()
+        self.assertEqual(shown.json()["last_event_id"], events[-1]["event_id"])
+        self.learning.released = False
+        hidden = self.client.get(f"/api/v1/companion/responses/{response_id}").json()
+        self.assertTrue(hidden["redacted"])
+        self.assertEqual(hidden["text"], "")
+        hidden_events = self.client.get(f"/api/v1/companion/responses/{response_id}/events").json()
+        self.assertTrue(all(not event["data"].get("text") for event in hidden_events))
+        self.platform.delete_class_membership("class", self.student["id"])
+        self.assertIn(self.client.get(f"/api/v1/companion/responses/{response_id}").status_code, (403, 404))
+        self.assertIn(self.client.get(f"/api/v1/companion/responses/{response_id}/events").status_code, (403, 404))
+        messages = self.client.get(f"/api/v1/companion/conversations/{posted['conversation_id']}/messages").json()
+        self.assertTrue(all(not row["text"] for row in messages))
+        self.assertEqual(messages[0]["response"]["text"], "")
+
+    def test_stream_reconnect_at_idle_tail_reprojects_policy_without_new_events(self):
+        for resume in ("after", "last-event-id"):
+            with self.subTest(resume=resume):
+                posted = self.make_response()
+                response_id = posted["response_id"]
+                visible = response_access(self.runtime, self.student["id"], response_id)
+                self.assertEqual(visible["text"], "firstsecond")
+                tail = visible["last_event_id"]
+
+                async def scenario():
+                    request = self.stream_request()
+                    after = tail
+                    if resume == "last-event-id":
+                        request.headers["last-event-id"] = str(tail)
+                        after = 0
+                    stream = await response_stream(response_id, request, after=after, once=False,
+                                                   actor=self._current_user())
+                    # Tighten policy after route admission, before the first
+                    # frame of the connection replacing the visible snapshot.
+                    self.learning.released = False
+                    iterator = stream.body_iterator
+                    try:
+                        frame = await anext(iterator)
+                        event, data = self.parse_frame(frame)
+                        self.assertEqual(event, "snapshot")
+                        self.assertIn(f"id: {tail}\n", frame)
+                        self.assertEqual(data["last_event_id"], tail)
+                        self.assertEqual(data["generation"], visible["generation"])
+                        self.assertEqual(data["status"], "streaming")
+                        self.assertTrue(data["redacted"])
+                        self.assertEqual(data["text"], "")
+                        self.assertEqual(await anext(iterator), ": keepalive\n\n")
+                    finally:
+                        await iterator.aclose()
+
+                with patch("app.routers.v1_jobs.get_platform_user", side_effect=lambda *args: self._current_user()):
+                    asyncio.run(scenario())
+                unchanged = self.companion.get_response(response_id)
+                self.assertEqual((unchanged["text"], unchanged["last_event_id"]), ("firstsecond", tail))
+
+    def test_stream_reconnect_replaces_old_generation_before_new_deltas(self):
+        posted = self.make_response()
+        response_id = posted["response_id"]
+        stale = response_access(self.runtime, self.student["id"], response_id)
+        self.companion.begin_response(response_id, call_id="next", generation=2, expected_generation=1)
+        self.companion.append_delta(response_id, 1, "new", call_id="next", generation=2)
+        current = self.companion.get_response(response_id)
+
+        async def scenario():
+            request = self.stream_request()
+            request.headers["last-event-id"] = str(stale["last_event_id"])
+            stream = await response_stream(response_id, request, after=0, once=False, actor=self._current_user())
+            iterator = stream.body_iterator
+            try:
+                frame = await anext(iterator)
+                event, data = self.parse_frame(frame)
+                self.assertEqual(event, "snapshot")
+                self.assertEqual((data["text"], data["generation"], data["last_event_id"]),
+                                 ("new", 2, current["last_event_id"]))
+                self.assertIn(f"id: {current['last_event_id']}\n", frame)
+                self.companion.append_delta(response_id, 2, " suffix", call_id="next", generation=2)
+                event, data = self.parse_frame(await anext(iterator))
+                self.assertEqual((event, data["text"], data["generation"]), ("delta", " suffix", 2))
+            finally:
+                await iterator.aclose()
+
+        with patch("app.routers.v1_jobs.get_platform_user", side_effect=lambda *args: self._current_user()):
+            asyncio.run(scenario())
+
+    def test_stream_rechecks_access_before_initial_snapshot(self):
+        for revoked in ("session", "class"):
+            with self.subTest(revoked=revoked):
+                if self.platform.get_class_membership("class", self.student["id"]) is None:
+                    self.platform.create_class_membership("class", self.student["id"])
+                posted = self.make_response()
+                active = True
+                def current_user(*args):
+                    if not active:
+                        raise HTTPException(401)
+                    return self._current_user()
+                async def scenario():
+                    nonlocal active
+                    stream = await response_stream(posted["response_id"], self.stream_request(), after=0,
+                                                   once=False, actor=self._current_user())
+                    if revoked == "session":
+                        active = False
+                    else:
+                        self.platform.delete_class_membership("class", self.student["id"])
+                    frames = [self.parse_frame(frame) async for frame in stream.body_iterator]
+                    self.assertEqual(frames, [("revoked", {"code": "access_revoked"})])
+                with patch("app.routers.v1_jobs.get_platform_user", side_effect=current_user):
+                    asyncio.run(scenario())
+
+    def test_stream_idle_job_changes_emit_snapshot_without_response_events(self):
+        posted = self.make_response()
+        response_id = posted["response_id"]
+        tail = self.companion.get_response(response_id)["last_event_id"]
+        job = SimpleNamespace(status="running", cancel_requested=False,
+                              reconciliation_required=False, cost_pending=False)
+        self.runtime.queue = SimpleNamespace(get_job=lambda job_id: job)
+
+        async def scenario():
+            stream = await response_stream(response_id, self.stream_request(), after=tail, once=False,
+                                           actor=self._current_user())
+            iterator = stream.body_iterator
+            try:
+                event, data = self.parse_frame(await anext(iterator))
+                self.assertEqual((event, data["job_id"], data["job"]["status"]),
+                                 ("snapshot", posted["job_id"], "running"))
+                for change in ({"status": "reconciling", "reconciliation_required": True, "cost_pending": True},
+                               {"status": "awaiting_confirmation", "reconciliation_required": False},
+                               {"cost_pending": False}, {"cancel_requested": True}):
+                    for key, value in change.items():
+                        setattr(job, key, value)
+                    event, data = self.parse_frame(await anext(iterator))
+                    self.assertEqual(event, "snapshot")
+                    self.assertEqual(data["job"], vars(job))
+                    self.assertEqual((data["status"], data["text"], data["last_event_id"]),
+                                     ("streaming", "firstsecond", tail))
+            finally:
+                await iterator.aclose()
+
+        with patch("app.routers.v1_jobs.get_platform_user", side_effect=lambda *args: self._current_user()):
+            asyncio.run(scenario())
+
+    def test_stream_rechecks_policy_and_generation_between_prefetched_events(self):
+        for change in ("policy", "generation", "session", "class", "account"):
+            with self.subTest(change=change):
+                # Restore the disposable grant between cases.
+                self.platform.update_user(self.student["id"], status="active")
+                if self.platform.get_class_membership("class", self.student["id"]) is None:
+                    self.platform.create_class_membership("class", self.student["id"])
+                posted = self.make_response()
+                active = True
+                def current(*args):
+                    if not active:
+                        raise HTTPException(401)
+                    return self._current_user()
+                async def scenario():
+                    nonlocal active
+                    response_id = posted["response_id"]
+                    response = await response_stream(response_id, self.stream_request(), after=0, once=False, actor=self._current_user())
+                    iterator = response.body_iterator
+                    first = self.parse_frame(await anext(iterator))
+                    self.assertEqual(first[0], "snapshot")
+                    self.assertEqual(first[1]["text"], "firstsecond")
+                    # New events after the initial snapshot must still be
+                    # checked individually when their page is prefetched.
+                    self.companion.append_delta(response_id, 3, "third", call_id="call", generation=1)
+                    self.companion.append_delta(response_id, 4, "fourth", call_id="call", generation=1)
+                    delta = self.parse_frame(await anext(iterator))
+                    self.assertEqual(delta[0], "delta")
+                    self.assertEqual(delta[1]["text"], "third")
+                    if change == "policy":
+                        self.learning.released = False
+                    elif change == "generation":
+                        self.companion.begin_response(posted["response_id"], call_id="next", generation=2, expected_generation=1)
+                        self.companion.append_delta(posted["response_id"], 1, "new", call_id="next", generation=2)
+                    elif change == "session":
+                        active = False
+                    elif change == "class":
+                        self.platform.delete_class_membership("class", self.student["id"])
+                    else:
+                        self.platform.update_user(self.student["id"], status="disabled")
+                    event, data = self.parse_frame(await anext(iterator))
+                    if change in {"session", "class", "account"}:
+                        self.assertEqual(event, "revoked")
+                    else:
+                        self.assertEqual(event, "snapshot")
+                        self.assertEqual(data["text"], "new" if change == "generation" else "")
+                        self.assertEqual(data["generation"], 2 if change == "generation" else 1)
+                        self.assertEqual(data["last_event_id"], self.companion.get_response(posted["response_id"])["last_event_id"])
+                    await iterator.aclose()
+                with patch("app.routers.v1_jobs.get_platform_user", side_effect=current):
+                    asyncio.run(scenario())
+
+    def test_stream_tail_ahead_resume_and_terminal_drain_beyond_thousand_events(self):
+        posted = self.make_response(completed=True)
+        response_id = posted["response_id"]
+        tail = self.companion.get_response(response_id)["last_event_id"]
+        async def collect(after):
+            result = await response_stream(response_id, self.stream_request(), after=after, once=True, actor=self._current_user())
+            return [self.parse_frame(frame) async for frame in result.body_iterator]
+        async def drain_new_events():
+            result = await response_stream(response_id, self.stream_request(), after=0, once=False, actor=self._current_user())
+            iterator = result.body_iterator
+            try:
+                frames = [self.parse_frame(await anext(iterator))]
+                self.assertEqual(frames[0][0], "snapshot")
+                self.assertEqual(frames[0][1]["text"], "firstsecond")
+                # The initial snapshot already covers the first two deltas.
+                # Drain an oversized page committed after that watermark.
+                with self.companion._transaction() as db:
+                    for seq in range(3, 1004):
+                        self.companion._event(db, response_id, "delta", 1, {"text": "x"}, seq=seq)
+                    db.execute("UPDATE responses SET text=text||?,last_seq=1003 WHERE id=?", ("x" * 1001, response_id))
+                self.companion.complete_response(response_id, call_id="call", generation=1)
+                frames.extend([self.parse_frame(frame) async for frame in iterator])
+                return frames
+            finally:
+                await iterator.aclose()
+        with patch("app.routers.v1_jobs.get_platform_user", side_effect=lambda *args: self._current_user()):
+            for cursor in (0, tail, tail + 10000):
+                frames = asyncio.run(collect(cursor))
+                self.assertEqual(len(frames), 1)
+                event, data = frames[0]
+                self.assertEqual(event, "snapshot")
+                self.assertEqual((data["text"], data["last_event_id"]), ("firstsecond", tail))
+            live = self.make_response()
+            response_id = live["response_id"]
+            frames = asyncio.run(drain_new_events())
+        self.assertEqual(sum(event == "delta" for event, data in frames), 1001)
+        self.assertEqual(sum(event == "end" for event, data in frames), 1)
+        self.assertEqual(frames[-1][0], "snapshot")
+        self.assertEqual(frames[-1][1]["text"], "firstsecond" + "x" * 1001)
+        self.assertEqual(frames[-1][1]["status"], "completed")
 
     def test_collection_question_projection_does_not_leak_answer_and_retention_admin_only(self):
         collection = self.client.post("/api/v1/companion/collections", json={"title": "Saved", "request_id": "collection"})

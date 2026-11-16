@@ -11,21 +11,27 @@ from zoneinfo import ZoneInfo
 from .job_queue import IdempotencyConflict
 
 
-def ensure_job(runtime, job_id: str, kind: str, payload: Mapping, *, steps=(), paid=False):
+def ensure_job(runtime, job_id: str, kind: str, payload: Mapping, *, steps=(), paid=False, **scope):
     try:
         existing = runtime.queue.get_job(job_id)
     except LookupError:
         try:
             return runtime.queue.enqueue(
                 kind, payload, job_id=job_id, steps=steps, paid=paid,
-                purpose=payload.get("purpose", ""), student_id=payload.get("student_id") or payload.get("user_id"),
-                course_id=payload.get("course_id"), class_id=payload.get("class_id"), teaching_scope=payload.get("class_id"),
-                project_id="platform", budget_day=datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+                purpose=scope.get("purpose", payload.get("purpose", "")),
+                student_id=scope.get("student_id", payload.get("student_id") or payload.get("user_id")),
+                course_id=scope.get("course_id", payload.get("course_id")),
+                class_id=scope.get("class_id", payload.get("class_id")),
+                teaching_scope=scope.get("teaching_scope", payload.get("class_id")),
+                project_id=scope.get("project_id", "platform"),
+                budget_day=scope.get("budget_day", datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()),
             )
         except sqlite3.IntegrityError:
             existing = runtime.queue.get_job(job_id)
-    if existing.kind != kind or existing.payload != dict(payload):
-        raise IdempotencyConflict("domain event was delivered with different queue input")
+    if existing.kind != kind:
+        raise IdempotencyConflict("domain event was delivered with different queue kind")
+    if existing.payload != dict(payload):
+        return runtime.queue.bind_job_scope(job_id, payload)
     return existing
 
 
@@ -77,10 +83,25 @@ class Dispatcher:
 
     def _companion(self) -> int:
         count = 0
+        from .services.companion_access import freeze_response_job_scope
         for event in self.runtime.companion.pending_outbox(limit=100):
             payload = dict(event.get("payload") or {})
             payload.update(purpose="student", resource_type="response", resource_id=event["response_id"])
-            ensure_job(self.runtime, event["job_id"], "interaction", payload, steps=("answer",), paid=True)
+            try:
+                scope = freeze_response_job_scope(self.runtime, event["response_id"], payload.get("user_id", ""))
+            except (LookupError, PermissionError):
+                # Deliver revoked requests so the worker can close their domain
+                # response, but it must validate/freeze before any paid call.
+                scope = None
+            if scope is not None:
+                for key in ("student_id", "course_id", "class_id", "task_id", "project_id"):
+                    payload.pop(key, None)
+                payload.update(scope, budget_scope_frozen=True)
+            ensure_job(self.runtime, event["job_id"], "interaction", payload, steps=("answer",), paid=True,
+                       purpose="student", student_id=payload.get("student_id") or payload.get("user_id"),
+                       course_id=payload.get("course_id"), class_id=payload.get("class_id"),
+                       teaching_scope=payload.get("class_id"), project_id="platform",
+                       budget_day=datetime.fromtimestamp(event["created_at"], ZoneInfo("Asia/Shanghai")).date().isoformat())
             self.runtime.companion.mark_outbox(event["outbox_id"], job_id=event["job_id"])
             count += 1
         return count

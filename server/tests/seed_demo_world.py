@@ -13,6 +13,9 @@
     .\\server\\.venv\\Scripts\\python.exe -I -B -X utf8 server/tests/seed_demo_world.py --data-dir server/data/demo-world
 
 密码只在终端打印一次；加 --password-file 才会另存一份到本机。
+账号与口令可用 --admin-username/--admin-password/--teacher-username/
+--teacher-password/--student-password 覆盖默认值；平台口令策略不放宽
+（管理员 12–128 位，教师与学生至少 8 位）。
 """
 
 from __future__ import annotations
@@ -264,6 +267,11 @@ def main() -> int:
     parser.add_argument("--data-dir", default=str(SERVER / "data" / "demo-world"))
     parser.add_argument("--password-file", default="")
     parser.add_argument("--keep-server", action="store_true", help="脚本结束后不停止服务")
+    parser.add_argument("--admin-username", default="axis_admin", help="管理员账号；默认 axis_admin")
+    parser.add_argument("--admin-password", default="", help="管理员口令；不填则随机生成。要求 12–128 位")
+    parser.add_argument("--teacher-username", default="", help="教师账号；不填则用世界设定里的 chenning")
+    parser.add_argument("--teacher-password", default="", help="教师口令；不填则随机生成。至少 8 位")
+    parser.add_argument("--student-password", default="", help="两名学生共用口令；不填则各自随机生成。至少 8 位")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir).resolve()
@@ -277,6 +285,21 @@ def main() -> int:
         "lin": secrets.token_urlsafe(18),
         "zhou": secrets.token_urlsafe(18),
     }
+    admin_username = args.admin_username.strip()
+    teacher_username = args.teacher_username.strip() or WORLD["teacher"]["username"]
+    teacher_password = args.teacher_password or passwords["teacher"]
+    if args.admin_password:
+        if not 12 <= len(args.admin_password) <= 128:
+            raise SystemExit("管理员口令要求 12–128 位（平台策略，脚本不做放宽）")
+        passwords["admin"] = args.admin_password
+    if args.teacher_password:
+        if len(args.teacher_password) < 8:
+            raise SystemExit("教师口令至少 8 位")
+        passwords["teacher"] = args.teacher_password
+    if args.student_password:
+        if len(args.student_password) < 8:
+            raise SystemExit("学生口令至少 8 位")
+        passwords["lin"] = passwords["zhou"] = args.student_password
 
     # 1. 建管理员（只在新库首次执行）
     env = dict(os.environ)
@@ -285,9 +308,9 @@ def main() -> int:
     sys.path.insert(0, str(SERVER))
     from app.init_admin import initialize_admin  # noqa: E402
 
-    initialize_admin(data_dir / "platform.sqlite3", username="axis_admin",
+    initialize_admin(data_dir / "platform.sqlite3", username=admin_username,
                      display_name="演示管理员", password=passwords["admin"])
-    print("已建立管理员 axis_admin")
+    print(f"已建立管理员 {admin_username}")
 
     # 2. 起正式服务（非 demo 模式）
     port = free_port()
@@ -308,17 +331,17 @@ def main() -> int:
         admin, teacher = Client(base), Client(base)
         lin, zhou = Client(base), Client(base)
 
-        admin.request("POST", "/api/v1/auth/login", body={"username": "axis_admin", "password": passwords["admin"]})
+        admin.request("POST", "/api/v1/auth/login", body={"username": admin_username, "password": passwords["admin"]})
 
         # 3. 教师：申请 → 管理员审核 → 登录
         application = admin.request("POST", "/api/v1/auth/teacher-applications", expect=202, body={
-            "username": WORLD["teacher"]["username"],
+            "username": teacher_username,
             "display_name": WORLD["teacher"]["display_name"],
-            "password": passwords["teacher"],
+            "password": teacher_password,
         })
         admin.request("POST", f"/api/v1/auth/teacher-applications/{application['id']}/approve")
         teacher.request("POST", "/api/v1/auth/login", body={
-            "username": WORLD["teacher"]["username"], "password": passwords["teacher"], "role": "teacher",
+            "username": teacher_username, "password": teacher_password, "role": "teacher",
         })
         teacher_user = teacher.request("GET", "/api/v1/auth/me")
         print(f"教师已就绪：{WORLD['teacher']['display_name']}")
@@ -493,8 +516,8 @@ def main() -> int:
             "class_id": class_id,
             "goal_id": goal["id"],
             "accounts": {
-                "admin": {"username": "axis_admin", "password": passwords["admin"]},
-                "teacher": {"username": WORLD["teacher"]["username"], "password": passwords["teacher"]},
+                "admin": {"username": admin_username, "password": passwords["admin"]},
+                "teacher": {"username": teacher_username, "password": teacher_password},
                 "lin": {"username": WORLD["students"][0]["username"], "password": passwords["lin"]},
                 "zhou": {"username": WORLD["students"][1]["username"], "password": passwords["zhou"]},
             },

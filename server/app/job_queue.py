@@ -783,6 +783,51 @@ class JobQueue:
         with closing(self._connect()) as db:
             return self._job(self._job_row(db, job_id))
 
+    def bind_job_scope(self, job_id: str, payload: Mapping[str, Any], *,
+                       worker_id: str | None = None, generation: int | None = None) -> Job:
+        """Freeze trusted scope before the first call, including leased legacy jobs.
+
+        A running job needs its current lease. Once a call exists its billing
+        bindings cannot move, and frozen non-null scope can never be replaced.
+        """
+        if not isinstance(payload, Mapping):
+            raise TypeError("payload must be a mapping")
+        requested = dict(payload)
+        scope_fields = {"student_id", "course_id", "class_id", "task_id", "project_id", "budget_day", "budget_scope_frozen"}
+        columns = ("student_id", "course_id", "class_id", "teaching_scope", "project_id", "budget_day", "purpose")
+        with self._transaction() as db:
+            row = self._job_row(db, job_id)
+            old = json.loads(row["payload_json"])
+            old_core = {key: value for key, value in old.items() if key not in scope_fields}
+            new_core = {key: value for key, value in requested.items() if key not in scope_fields}
+            if old_core != new_core:
+                raise IdempotencyConflict("job was delivered with different immutable input")
+            frozen = old.get("budget_scope_frozen") is True
+            if frozen and (requested.get("budget_scope_frozen") is not True or any(
+                old.get(key) != requested.get(key) for key in scope_fields - {"budget_scope_frozen"}
+            )):
+                raise IdempotencyConflict("job budget scope is frozen")
+            values = {key: _optional_text(requested.get(key))
+                      for key in ("student_id", "course_id", "class_id", "project_id")}
+            values["teaching_scope"] = values["class_id"]
+            values["budget_day"] = _date_key(requested["budget_day"]) if requested.get("budget_day") else row["budget_day"]
+            values["purpose"] = _text(requested.get("purpose") or row["purpose"], "purpose")
+            if values["class_id"] and not values["course_id"]:
+                raise ValueError("class_id requires course_id")
+            if old == requested and all(row[key] == values[key] for key in columns):
+                return self._job(row)
+            if db.execute("SELECT 1 FROM upstream_calls WHERE job_id=? LIMIT 1", (job_id,)).fetchone():
+                raise InvalidTransition("job scope cannot change after a provider call exists")
+            if worker_id is not None and generation is not None:
+                self._lease(db, job_id, worker_id, generation, time.time())
+            elif row["attempts"] or row["status"] != "queued":
+                raise InvalidTransition("running job scope requires the current lease")
+            db.execute(
+                "UPDATE jobs SET payload_json=?,student_id=?,course_id=?,class_id=?,teaching_scope=?,project_id=?,budget_day=?,purpose=? WHERE job_id=?",
+                (_json(requested), *(values[key] for key in columns), job_id),
+            )
+            return self._job(self._job_row(db, job_id))
+
     def list_jobs(self, *, status: str | None = None, kind: str | None = None, limit: int = 100, offset: int = 0) -> tuple[Job, ...]:
         limit, offset = _positive_integer(limit, "limit"), _integer(offset, "offset")
         if status is not None and status not in _STATUSES:
@@ -1187,7 +1232,9 @@ class JobQueue:
                 self._release_wallet(db, self._refresh_pending(db, job_id))
                 self._event(db, job_id, "recovery_declined", current)
             else:
-                if not row["reservation_active"] and not row["cost_pending"]:
+                if row["reconciliation_required"] or row["cost_pending"]:
+                    raise ReconciliationRequired("reconcile results and settle usage before recovery")
+                if not row["reservation_active"]:
                     self._reserve_wallet(db, row)
                 db.execute("UPDATE jobs SET status='queued',queue_order=?,cancel_requested=0,updated_at=?,last_error=NULL WHERE job_id=?", (self._ticket(db), current, job_id))
                 self._event(db, job_id, "recovery_confirmed", current)

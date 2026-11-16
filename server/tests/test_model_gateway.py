@@ -73,8 +73,10 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exact_routing_high_purpose_limits_and_pinned_tls(self):
         records = []
-        sol, terra = provider(), provider("student", "student", "gpt-5.6-terra")
-        config = settings(sol, terra, llm_reasoning_effort="low", llm_max_tokens=1, llm_timeout_seconds=1)
+        config = settings(provider(), provider("student", "student", "gpt-5.6-sol"),
+                          provider("grading", "grading", "gpt-5.6-terra"),
+                          provider("summary", "summary", "gpt-5.6-terra"),
+                          llm_reasoning_effort="low", llm_max_tokens=1, llm_timeout_seconds=1)
 
         def handler(request):
             records.append(request)
@@ -85,7 +87,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         expected = {
             "teacher": ("gpt-5.6-sol", 4096), "suggest": ("gpt-5.6-sol", 4096),
             "generate": ("gpt-5.6-sol", 8192), "review": ("gpt-5.6-sol", 8192),
-            "student": ("gpt-5.6-terra", 4096), "hint": ("gpt-5.6-terra", 4096),
+            "student": ("gpt-5.6-sol", 4096), "hint": ("gpt-5.6-sol", 4096),
             "grading": ("gpt-5.6-terra", 8192), "summary": ("gpt-5.6-terra", 8192),
         }
         for purpose, (model, tokens) in expected.items():
@@ -160,7 +162,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         configs = (
             settings(provider("shared", "shared")),
             Settings(llm_providers=(), llm_base_url="https://relay.example/v1", llm_api_key=secrets.token_urlsafe(24), llm_model="gpt-5.6-sol"),
-            settings(provider("student", "student", "gpt-5.6-terra")),
+            settings(provider("student", "student", "gpt-5.6-sol")),
             settings(provider(model="gpt-6-sol"), provider("shared", "shared")),
             settings(provider("wrong", "teacher", "gpt-5.6-terra"), provider("correct")),
         )
@@ -172,15 +174,38 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(caught.exception.unknown_outcome)
                 self.assertEqual(caught.exception.status_code, 503)
         grading = provider("grading", "grading", "wrong")
-        gateway = ModelGateway(settings(grading, provider("student", "student", "gpt-5.6-terra")))
+        gateway = ModelGateway(settings(grading, provider("student", "student", "gpt-5.6-sol")))
         with self.assertRaises(GatewayError) as caught:
             gateway.provider_for("grading")
         self.assertEqual(caught.exception.code, "model_mismatch")
         specific = provider("grading", "grading", "gpt-5.6-terra")
         summary = provider("summary", "summary", "gpt-5.6-terra")
-        gateway = ModelGateway(settings(specific, summary, provider("student", "student", "gpt-5.6-terra")))
+        gateway = ModelGateway(settings(specific, summary, provider("student", "student", "gpt-5.6-sol")))
         self.assertIs(gateway.provider_for("grading"), specific)
         self.assertIs(gateway.provider_for("summary"), summary)
+
+    async def test_student_sol_and_explicit_terra_groups_are_required_before_send(self):
+        cases = (
+            ("student", "gpt-5.6-terra", "model_mismatch"),
+            ("hint", "gpt-5.6-terra", "model_mismatch"),
+            ("grading", "gpt-5.6-sol", "not_configured"),
+            ("summary", "gpt-5.6-sol", "not_configured"),
+            ("grading", "gpt-5.6-terra", "not_configured"),
+            ("summary", "gpt-5.6-terra", "not_configured"),
+        )
+        sends = []
+        for purpose, student_model, code in cases:
+            gateway = ModelGateway(settings(provider("student", "student", student_model)),
+                                   transport=httpx.MockTransport(lambda request: sends.append(request) or response()))
+            with self.subTest(purpose=purpose, student_model=student_model), patch(
+                "app.services.model_gateway.pin_remote_url", side_effect=AssertionError("must not resolve"),
+            ):
+                with self.assertRaises(GatewayError) as caught:
+                    await self.complete(gateway, purpose)
+                self.assertEqual(caught.exception.code, code)
+                self.assertFalse(caught.exception.request_sent)
+                self.assertFalse(caught.exception.unknown_outcome)
+        self.assertEqual(sends, [])
 
     async def test_no_retry_or_failover_after_upstream_error(self):
         requests = []
@@ -307,19 +332,26 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             visible.append(text)
             first_observed.set()
 
-        requests = []
-        gateway = ModelGateway(settings(provider()), transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(200, stream=LiveStream(), headers={"content-type": "text/event-stream; charset=utf-8"})))
-        result = await self.complete(gateway, on_delta=callback)
-        self.assertEqual(visible, ["你好", " world"])
-        self.assertEqual(result.text, "你好 world")
-        self.assertEqual(result.usage, {"prompt_tokens": 9, "completion_tokens": 8})
-        self.assertFalse(result.cost_pending)
-        self.assertTrue(closed.is_set())
-        self.assertEqual(len(requests), 1)
-        payload = json.loads(requests[0].content)
-        self.assertTrue(payload["stream"])
-        self.assertEqual(payload["stream_options"], {"include_usage": True})
-        self.assertNotIn("private", repr(result))
+        for purpose in ("teacher", "student"):
+            with self.subTest(purpose=purpose):
+                visible.clear()
+                first_observed.clear()
+                closed.clear()
+                requests = []
+                gateway = ModelGateway(settings(provider(purpose, purpose)), transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(200, stream=LiveStream(), headers={"content-type": "text/event-stream; charset=utf-8"})))
+                result = await self.complete(gateway, purpose, on_delta=callback)
+                self.assertEqual(visible, ["你好", " world"])
+                self.assertEqual(result.text, "你好 world")
+                self.assertEqual(result.model, "gpt-5.6-sol")
+                self.assertEqual(result.usage, {"prompt_tokens": 9, "completion_tokens": 8})
+                self.assertFalse(result.cost_pending)
+                self.assertTrue(closed.is_set())
+                self.assertEqual(len(requests), 1)
+                payload = json.loads(requests[0].content)
+                self.assertEqual((payload["model"], payload["reasoning_effort"]), ("gpt-5.6-sol", "high"))
+                self.assertTrue(payload["stream"])
+                self.assertEqual(payload["stream_options"], {"include_usage": True})
+                self.assertNotIn("private", repr(result))
 
     async def test_async_delta_json_sse_and_usage_missing(self):
         deltas = []

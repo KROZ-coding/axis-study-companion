@@ -1,0 +1,19 @@
+# 演示副本自己的运行环境与数据
+/server/data/
+/server/uploads/
+/server/outputs/
+/server/artifacts/
+/server/.venv/
+/server/.env
+/server/.env.*
+.venv/
+.env
+.env.*
+__pycache__/
+*.py[cod]
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+.mimosa/

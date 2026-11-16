@@ -384,13 +384,44 @@ class PlatformStore:
                 "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username.strip(),)
             ).fetchone())
 
-    def list_users(self, *, role: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+    @staticmethod
+    def _user_filter(role: str | None, status: str | None, query: str) -> tuple[str, tuple]:
+        # Escape LIKE metacharacters: account lookup treats user input literally.
+        query = query.strip().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        pattern = f"%{query}%"
+        return (
+            """(? IS NULL OR role = ?) AND (? IS NULL OR status = ?) AND
+               (id LIKE ? ESCAPE '!' OR username LIKE ? ESCAPE '!' OR display_name LIKE ? ESCAPE '!')""",
+            (role, role, status, status, pattern, pattern, pattern),
+        )
+
+    def list_users(self, *, role: str | None = None, status: str | None = None, query: str = "",
+                   limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise ValueError("limit must be a positive integer")
+        if type(offset) is not int or not 0 <= offset <= 2**63 - 1:
+            raise ValueError("offset must be a non-negative SQLite integer")
+        where, values = self._user_filter(role, status, query)
         with self._using_connection() as connection:
             rows = connection.execute(
-                """SELECT * FROM users WHERE (? IS NULL OR role = ?) AND (? IS NULL OR status = ?)
-                   ORDER BY username COLLATE NOCASE, id""", (role, role, status, status),
+                f"SELECT * FROM users WHERE {where} ORDER BY username COLLATE NOCASE, id LIMIT ? OFFSET ?",
+                (*values, -1 if limit is None else limit, offset),
             )
             return [dict(row) for row in rows]
+
+    def count_users(self, *, role: str | None = None, status: str | None = None, query: str = "") -> int:
+        where, values = self._user_filter(role, status, query)
+        with self._using_connection() as connection:
+            return connection.execute(f"SELECT COUNT(*) FROM users WHERE {where}", values).fetchone()[0]
+
+    def page_users(self, *, role: str | None = None, status: str | None = None, query: str = "",
+                   limit: int = 50, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        # Count and page share one read snapshot, without reserving a write lock.
+        with self._using_connection() as connection:
+            if not connection.in_transaction:
+                connection.execute("BEGIN")
+            filters = {"role": role, "status": status, "query": query}
+            return self.list_users(**filters, limit=limit, offset=offset), self.count_users(**filters)
 
     def update_user(self, user_id: str, **changes: Any) -> dict[str, Any] | None:
         unknown = changes.keys() - self._USER_FIELDS

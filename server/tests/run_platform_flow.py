@@ -437,7 +437,8 @@ class Flow:
         self.check(response.headers.get("Cache-Control") == "no-store" and "attachment;" in response.headers.get("Content-Disposition", ""), "unsafe export response headers")
         return response
 
-    def run(self):
+    def run_flow(self):
+        """方法名刻意不叫 run：与其它测试脚本的同名符号在跨文件调用图中区分开。"""
         with self.stage("bootstrap") as row:
             from app.config import Settings
             from app.init_admin import initialize_admin
@@ -902,7 +903,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="platform-real-flow-") as directory:
             try:
                 flow = Flow(Path(directory), output, args)
-                flow.run()
+                flow.run_flow()
             except KeyboardInterrupt:
                 if flow:
                     flow.evidence["failures"].append({"stage": flow.stage_name, "type": "KeyboardInterrupt", "message": "run interrupted"})

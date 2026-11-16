@@ -7,13 +7,16 @@ def can_access_job(runtime, actor, job, *, write: bool = False) -> bool:
     scope = job.payload
     purpose = scope.get("purpose")
     if actor.role == "admin":
+        # Job/call views contain operational metadata only. Student response
+        # text remains behind the separate owner-only companion access gate.
         return True
-    if purpose in {"student", "hint", "summary"} and scope.get("resource_type") == "response":
+    if scope.get("resource_type") == "response" and purpose in {"student", "hint", "summary", "teacher", "suggest"}:
         try:
-            response = runtime.companion.get_response(scope["resource_id"], actor.id)
+            from .companion_access import response_access
+            response_access(runtime, actor.id, scope["resource_id"])
+            return True
         except (LookupError, PermissionError):
             return False
-        return response is not None
     if actor.role == "student":
         return not write and scope.get("student_id") == actor.id
     if actor.role != "teacher":

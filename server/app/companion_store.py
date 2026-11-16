@@ -28,6 +28,7 @@ SAFE_GUIDANCE = {
     "try_first": "先写下你的想法或试着作答，保存后再继续获取提示。",
     "await_results": "先检查题目要求、已知条件和当前步骤，保留你的尝试；本轮交卷并完成评分后可查看完整解析。",
     "response_failed": "本次回复未完成，请稍后重试。",
+    "response_cancelled": "本次回复已取消。",
 }
 _POLICY_NOTICE = "为保护独立作答，相关讲解暂时收起，结果开放后可查看。"
 _UNKNOWN_POLICY_NOTICE = "当前学习状态暂不可核验，相关讲解已暂时收起。"
@@ -473,7 +474,8 @@ class CompanionStore:
                 "job_id": response["job_id"], "status": response["status"], "message": CompanionStore._public(message)}
 
     def post_message(self, conversation_id: str, user_id: str, text: str, *, request_id: str,
-                     task_id: str | None = None, question_version_id: str | None = None) -> dict[str, Any]:
+                     task_id: str | None = None, question_version_id: str | None = None,
+                     budget_scope: Mapping[str, Any] | None = None) -> dict[str, Any]:
         text, request_id = self._text(text, "text", 20000, strip=False), self._request(request_id)
         task_id = self._id(task_id, "task_id") if task_id is not None else None
         question_version_id = self._id(question_version_id, "question_version_id") if question_version_id is not None else None
@@ -496,25 +498,88 @@ class CompanionStore:
                        (response_id, conversation_id, user_id, message_id, job_id, now, now))
             payload = {"purpose": "student", "resource_id": response_id, "response_id": response_id,
                        "conversation_id": conversation_id, "user_id": user_id}
+            if budget_scope is not None:
+                frozen = {key: self._id(budget_scope[key], key)
+                          for key in ("student_id", "course_id", "class_id", "task_id", "project_id")
+                          if budget_scope.get(key) is not None}
+                if frozen.get("student_id") != user_id or frozen.get("task_id") != task_id:
+                    raise ValueError("budget scope must match the response owner and task")
+                if frozen.get("class_id") and not frozen.get("course_id"):
+                    raise ValueError("budget class requires course_id")
+                if task_id is None and (frozen.get("course_id") or frozen.get("class_id")):
+                    raise ValueError("free chat uses the personal student budget")
+                frozen.setdefault("project_id", "platform")
+                payload.update(frozen, budget_scope_frozen=True)
             db.execute("INSERT INTO response_outbox(id,response_id,job_id,status,payload_json,created_at) VALUES(?,?,?,'pending',?,?)",
                        (outbox_id, response_id, job_id, self._json(payload), now))
             db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
             return self._posted(db, db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone())
 
     def list_messages(self, conversation_id: str, user_id: str, *, after: str | None = None,
-                      limit: int = 100, answer_policy: AnswerPolicy | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+                      before: str | None = None, latest: bool = False, limit: int = 100,
+                      answer_policy: AnswerPolicy | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         self._integer(limit, "limit", 1, 500)
         with self.connect() as db:
+            # The page, response text/generation and replay watermark belong to
+            # one SQLite snapshot, including pagination cursor lookups.
+            db.execute("BEGIN")
             self._owned(db, "conversations", conversation_id, user_id)
             after_rowid = 0
+            before_rowid = 9223372036854775807
             if after is not None:
                 cursor = db.execute("SELECT rowid FROM messages WHERE id=? AND conversation_id=? AND user_id=?", (after, conversation_id, user_id)).fetchone()
                 if cursor is None:
                     raise NotFound("message cursor not found")
                 after_rowid = cursor[0]
-            rows = db.execute("SELECT * FROM messages WHERE conversation_id=? AND user_id=? AND rowid>? ORDER BY rowid LIMIT ?",
-                              (conversation_id, user_id, after_rowid, limit)).fetchall()
-        return [self._project_message(row, user_id, answer_policy) for row in rows]
+            if before is not None:
+                cursor = db.execute("SELECT rowid FROM messages WHERE id=? AND conversation_id=? AND user_id=?", (before, conversation_id, user_id)).fetchone()
+                if cursor is None:
+                    raise NotFound("message cursor not found")
+                before_rowid = cursor[0]
+
+            select = """SELECT m.*,r.id AS linked_response_id,r.job_id AS linked_job_id,
+                              r.status AS linked_response_status,r.generation AS linked_generation,
+                              r.text AS linked_response_text,r.content_type AS linked_content_type,
+                              r.guidance_key AS linked_guidance_key,r.assistant_message_id AS linked_assistant_message_id,
+                              m.task_id AS linked_task_id,m.question_version_id AS linked_question_version_id,
+                              COALESCE((SELECT MAX(e.event_id) FROM events e
+                                        WHERE e.response_id=r.id AND e.generation=r.generation),0) AS linked_last_event_id
+                       FROM messages m LEFT JOIN responses r ON r.message_id=m.id
+                       WHERE m.conversation_id=? AND m.user_id=? AND m.rowid>? AND m.rowid<?"""
+            if latest and after is None and before is None:
+                rows = db.execute(select + " ORDER BY m.rowid DESC LIMIT ?", (conversation_id, user_id, 0, before_rowid, limit)).fetchall()[::-1]
+            elif before is not None:
+                rows = db.execute(select + " ORDER BY m.rowid DESC LIMIT ?", (conversation_id, user_id, after_rowid, before_rowid, limit)).fetchall()[::-1]
+            else:
+                rows = db.execute(select + " ORDER BY m.rowid LIMIT ?", (conversation_id, user_id, after_rowid, before_rowid, limit)).fetchall()
+        result = []
+        for row in rows:
+            message_row = {key: row[key] for key in row.keys() if not key.startswith("linked_")}
+            message = self._project_message(message_row, user_id, answer_policy)
+            if row["role"] == "user":
+                message["client_request_id"] = row["request_id"]
+            if row["linked_response_id"]:
+                policy = self._policy(user_id, row["linked_task_id"], row["linked_question_version_id"], answer_policy)
+                safe = (row["linked_content_type"] == "safe_guidance"
+                        and SAFE_GUIDANCE.get(row["linked_guidance_key"]) == row["linked_response_text"])
+                blocked = not safe and not policy["allow_assistant_content"]
+                failed = row["linked_response_status"] in {"failed", "cancelled"}
+                message["response"] = {
+                    "response_id": row["linked_response_id"],
+                    "assistant_message_id": row["linked_assistant_message_id"],
+                    "job_id": row["linked_job_id"],
+                    "status": row["linked_response_status"],
+                    "generation": row["linked_generation"],
+                    "task_id": row["linked_task_id"],
+                    "question_version_id": row["linked_question_version_id"],
+                    "last_event_id": int(row["linked_last_event_id"]),
+                    "text": "" if blocked or failed else row["linked_response_text"],
+                    "redacted": blocked,
+                    "notice": self._notice(policy) if blocked else SAFE_GUIDANCE["response_cancelled" if row["linked_response_status"] == "cancelled" else "response_failed"] if failed else None,
+                    "content_type": row["linked_content_type"],
+                }
+            result.append(message)
+        return result
 
     def get_message(self, message_id: str, user_id: str, *, answer_policy: AnswerPolicy | Mapping[str, Any] | None = None) -> dict[str, Any]:
         with self.connect() as db:
@@ -526,6 +591,37 @@ class CompanionStore:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM response_outbox WHERE status='pending' ORDER BY created_at,id LIMIT ?", (limit,)).fetchall()
         return [dict(self._public(row), outbox_id=row["id"], kind="interaction", payload=json.loads(row["payload_json"])) for row in rows]
+
+    def freeze_response_budget_scope(self, response_id: str, user_id: str,
+                                     scope: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist trusted scope once, also for pre-live-chat outbox records."""
+        frozen = {key: self._id(scope[key], key)
+                  for key in ("student_id", "course_id", "class_id", "task_id", "project_id")
+                  if scope.get(key) is not None}
+        frozen.setdefault("project_id", "platform")
+        with self._transaction() as db:
+            response = self._response_row(db, response_id, user_id)
+            if frozen.get("student_id") != user_id or frozen.get("task_id") != response["task_id"]:
+                raise IdempotencyConflict("budget scope does not match the response")
+            if frozen.get("class_id") and not frozen.get("course_id"):
+                raise ValueError("budget class requires course_id")
+            if response["task_id"] is None and (frozen.get("course_id") or frozen.get("class_id")):
+                raise ValueError("free chat uses the personal student budget")
+            row = db.execute("SELECT payload_json FROM response_outbox WHERE response_id=?", (response_id,)).fetchone()
+            if row is None:
+                raise NotFound("response outbox not found")
+            payload = json.loads(row["payload_json"])
+            prior = {key: payload[key] for key in ("student_id", "course_id", "class_id", "task_id", "project_id")
+                     if payload.get(key) is not None}
+            if payload.get("budget_scope_frozen"):
+                if prior != frozen:
+                    raise IdempotencyConflict("response budget scope changed")
+                return frozen
+            for key in ("student_id", "course_id", "class_id", "task_id", "project_id"):
+                payload.pop(key, None)
+            payload.update(frozen, budget_scope_frozen=True)
+            db.execute("UPDATE response_outbox SET payload_json=? WHERE response_id=?", (self._json(payload), response_id))
+        return frozen
 
     def mark_outbox(self, outbox_id: str, *, job_id: str | None = None) -> dict[str, Any]:
         with self._transaction() as db:
@@ -548,23 +644,40 @@ class CompanionStore:
             raise NotFound("response not found")
         return row
 
+    @classmethod
+    def _response_snapshot(cls, db: sqlite3.Connection, response_id: str,
+                           user_id: str | None = None) -> dict[str, Any]:
+        row = cls._response_row(db, response_id, user_id)
+        result = cls._public(row)
+        result["response_id"] = row["id"]
+        result["last_event_id"] = int(db.execute(
+            "SELECT COALESCE(MAX(event_id),0) FROM events WHERE response_id=? AND generation=?",
+            (response_id, row["generation"]),
+        ).fetchone()[0])
+        return result
+
+    def _project_response(self, response: Mapping[str, Any], user_id: str | None,
+                          answer_policy: AnswerPolicy | Mapping[str, Any] | None) -> dict[str, Any]:
+        result = dict(response)
+        if user_id is None:
+            return result
+        safe = response["content_type"] == "safe_guidance" and SAFE_GUIDANCE.get(response["guidance_key"]) == response["text"]
+        policy = self._policy(user_id, response["task_id"], response["question_version_id"], answer_policy)
+        if not safe and not policy["allow_assistant_content"]:
+            result.update(text="", content="", error=None, redacted=True, notice=self._notice(policy))
+        elif response["status"] in {"failed", "cancelled"}:
+            code = "response_cancelled" if response["status"] == "cancelled" else "response_failed"
+            result.update(text="", content="", error=code, redacted=False, notice=SAFE_GUIDANCE[code])
+        else:
+            result.update(content=response["text"], error=None, redacted=False)
+        return result
+
     def get_response(self, response_id: str, user_id: str | None = None, *,
                      answer_policy: AnswerPolicy | Mapping[str, Any] | None = None) -> dict[str, Any]:
         with self.connect() as db:
-            row = self._response_row(db, response_id, user_id)
-        result = self._public(row)
-        result["response_id"] = row["id"]
-        if user_id is None:
-            return result
-        safe = row["content_type"] == "safe_guidance" and SAFE_GUIDANCE.get(row["guidance_key"]) == row["text"]
-        policy = self._policy(user_id, row["task_id"], row["question_version_id"], answer_policy)
-        if not safe and not policy["allow_assistant_content"]:
-            result.update(text="", content="", error=None, redacted=True, notice=self._notice(policy))
-        elif row["status"] in {"failed", "cancelled"}:
-            result.update(text="", content="", error="response_failed", redacted=False, notice=SAFE_GUIDANCE["response_failed"])
-        else:
-            result.update(content=row["text"], error=None, redacted=False)
-        return result
+            db.execute("BEGIN")
+            response = self._response_snapshot(db, response_id, user_id)
+        return self._project_response(response, user_id, answer_policy)
 
     @staticmethod
     def _event(db: sqlite3.Connection, response_id: str, kind: str, generation: int,
@@ -688,9 +801,11 @@ class CompanionStore:
                       generation: int | None = None, expected_generation: int | None = None) -> dict[str, Any]:
         call_id, generation = self._id(call_id, "call_id"), self._generation(generation, expected_generation)
         error = self._text(error, "error", 2000)
+        status = "cancelled" if error == "cancelled" else "failed"
+        guidance_key = "response_cancelled" if status == "cancelled" else "response_failed"
         with self._transaction() as db:
             row = self._bind(db, self._response_row(db, response_id), call_id, generation)
-            if row["status"] == "failed":
+            if row["status"] == status:
                 if row["error"] != error:
                     raise IdempotencyConflict("response already failed with a different error")
                 return self._public(row)
@@ -698,11 +813,11 @@ class CompanionStore:
                 raise InvalidTransition("response is terminal")
             assistant_id, now = uuid4().hex, time.time()
             db.execute("""INSERT INTO messages(id,conversation_id,user_id,role,text,task_id,question_version_id,response_id,content_type,guidance_key,created_at)
-                          VALUES(?,?,?,'assistant',?,?,?,?,'safe_guidance','response_failed',?)""",
-                       (assistant_id, row["conversation_id"], row["user_id"], SAFE_GUIDANCE["response_failed"], row["task_id"], row["question_version_id"], response_id, now))
-            db.execute("UPDATE responses SET status='failed',error=?,assistant_message_id=?,updated_at=?,terminal_at=? WHERE id=?",
-                       (error, assistant_id, now, now, response_id))
-            self._event(db, response_id, "end", generation, {"status": "failed", "error": "response_failed", "message_id": assistant_id})
+                          VALUES(?,?,?,'assistant',?,?,?,?,'safe_guidance',?,?)""",
+                       (assistant_id, row["conversation_id"], row["user_id"], SAFE_GUIDANCE[guidance_key], row["task_id"], row["question_version_id"], response_id, guidance_key, now))
+            db.execute("UPDATE responses SET status=?,error=?,assistant_message_id=?,updated_at=?,terminal_at=? WHERE id=?",
+                       (status, error, assistant_id, now, now, response_id))
+            self._event(db, response_id, "end", generation, {"status": status, "error": guidance_key, "message_id": assistant_id})
             db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, row["conversation_id"]))
             return self._public(self._response_row(db, response_id))
 
@@ -712,28 +827,65 @@ class CompanionStore:
         result["data"] = json.loads(row["data_json"])
         return result
 
-    def list_response_events(self, response_id: str, user_id: str | None = None, *, after: int = 0,
-                             limit: int = 1000, answer_policy: AnswerPolicy | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
-        self._integer(after, "after")
-        self._integer(limit, "limit", 1, 1000)
-        with self.connect() as db:
-            response = self._response_row(db, response_id, user_id)
-            # Events from a fenced generation must not reappear during replay.
-            rows = db.execute("SELECT * FROM events WHERE response_id=? AND generation=? AND event_id>? ORDER BY event_id LIMIT ?",
-                              (response_id, response["generation"], after, limit)).fetchall()
-        result = [self._event_view(row) for row in rows]
+    def latest_response_event_id(self, response_id: str) -> int:
+        # Callers that need text/generation as well must use get_response rather
+        # than stitching this watermark onto a separately read response.
+        return self.get_response(response_id)["last_event_id"]
+
+    def _project_event(self, event: Mapping[str, Any], response: Mapping[str, Any],
+                       user_id: str | None,
+                       answer_policy: AnswerPolicy | Mapping[str, Any] | None) -> dict[str, Any]:
+        result = {**event, "data": dict(event["data"])}
         if user_id is None:
             return result
-        safe = response["content_type"] == "safe_guidance" and SAFE_GUIDANCE.get(response["guidance_key"]) == response["text"]
-        policy = self._policy(user_id, response["task_id"], response["question_version_id"], answer_policy)
-        blocked = not safe and not policy["allow_assistant_content"]
-        for item in result:
-            if blocked or response["status"] == "failed":
-                if item["event_type"] == "delta":
-                    item["data"] = {"text": "", "redacted": True, "notice": self._notice(policy) if blocked else SAFE_GUIDANCE["response_failed"]}
-                elif item["event_type"] == "end":
-                    item["data"] = {"status": response["status"], "redacted": blocked}
+        projected = self._project_response(response, user_id, answer_policy)
+        blocked = projected.get("redacted", False)
+        failed = response["status"] in {"failed", "cancelled"}
+        if blocked or failed:
+            if result["event_type"] == "delta":
+                result["data"] = {"text": "", "redacted": bool(blocked),
+                                  "notice": projected.get("notice", SAFE_GUIDANCE["response_failed"])}
+            elif result["event_type"] == "end":
+                result["data"] = {"status": response["status"], "redacted": bool(blocked),
+                                  "message_id": response.get("assistant_message_id")}
         return result
+
+    def read_response_events(self, response_id: str, user_id: str | None = None, *, after: int = 0,
+                             limit: int = 1000,
+                             answer_policy: AnswerPolicy | Mapping[str, Any] | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Read the response, its watermark and its event page in one snapshot."""
+        self._integer(after, "after", maximum=9223372036854775807)
+        self._integer(limit, "limit", 1, 1000)
+        with self.connect() as db:
+            db.execute("BEGIN")
+            response = self._response_snapshot(db, response_id, user_id)
+            rows = db.execute(
+                "SELECT * FROM events WHERE response_id=? AND generation=? AND event_id>? ORDER BY event_id LIMIT ?",
+                (response_id, response["generation"], after, limit),
+            ).fetchall()
+        policy = self._policy(user_id, response["task_id"], response["question_version_id"], answer_policy) if user_id else None
+        return (self._project_response(response, user_id, policy),
+                [self._project_event(self._event_view(row), response, user_id, policy) for row in rows])
+
+    def get_response_event(self, response_id: str, event_id: int, user_id: str | None = None, *,
+                           answer_policy: AnswerPolicy | Mapping[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Revalidate a buffered event against the current generation and policy."""
+        self._integer(event_id, "event_id", 1, 9223372036854775807)
+        with self.connect() as db:
+            db.execute("BEGIN")
+            response = self._response_snapshot(db, response_id, user_id)
+            row = db.execute(
+                "SELECT * FROM events WHERE response_id=? AND generation=? AND event_id=?",
+                (response_id, response["generation"], event_id),
+            ).fetchone()
+        policy = self._policy(user_id, response["task_id"], response["question_version_id"], answer_policy) if user_id else None
+        return (self._project_response(response, user_id, policy),
+                None if row is None else self._project_event(self._event_view(row), response, user_id, policy))
+
+    def list_response_events(self, response_id: str, user_id: str | None = None, *, after: int = 0,
+                             limit: int = 1000, answer_policy: AnswerPolicy | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+        return self.read_response_events(response_id, user_id, after=after, limit=limit,
+                                         answer_policy=answer_policy)[1]
 
     response_events = list_response_events
 
@@ -745,16 +897,28 @@ class CompanionStore:
         with self.connect() as db:
             row = self._response_row(db, response_id, user_id)
             current = db.execute("SELECT rowid,text FROM messages WHERE id=?", (row["message_id"],)).fetchone()
-            recent = db.execute("""SELECT text FROM messages WHERE conversation_id=? AND user_id=? AND role='user' AND rowid<?
+            recent = db.execute("""SELECT role,text,task_id,question_version_id,content_type,guidance_key
+                                   FROM messages WHERE conversation_id=? AND user_id=? AND rowid<?
                                    AND (task_id IS NULL OR task_id=?) ORDER BY rowid DESC LIMIT ?""",
                                 (row["conversation_id"], row["user_id"], current["rowid"], row["task_id"], recent_limit)).fetchall()
         policy = self._policy(row["user_id"], row["task_id"], row["question_version_id"], answer_policy)
         global_policy = self._policy(row["user_id"], None, None, answer_policy)
         allowed = policy["allow_generation"] and global_policy["allow_generation"]
         diagnostic = policy.get("diagnostic") is True or policy.get("phase") in {"diagnostic", "first_diagnostic"}
-        key = "independent_attempt" if diagnostic else ("try_first" if policy.get("attempted") is False else "await_results")
+        global_diagnostic = global_policy.get("diagnostic") is True or global_policy.get("phase") in {"diagnostic", "first_diagnostic"}
+        attempted = policy.get("attempted") is True and global_policy.get("attempted") is True
+        key = "independent_attempt" if diagnostic or global_diagnostic else ("try_first" if not attempted else "await_results")
+        history = []
+        for item in reversed(recent):
+            if item["role"] == "assistant":
+                safe = (item["content_type"] == "safe_guidance"
+                        and SAFE_GUIDANCE.get(item["guidance_key"]) == item["text"])
+                history_policy = self._policy(row["user_id"], item["task_id"], item["question_version_id"], answer_policy)
+                if not safe and not history_policy["allow_assistant_content"]:
+                    continue
+            history.append({"role": item["role"], "content": item["text"][:2000]})
         return {"current_question": current["text"][:4000],
-                "messages": [{"role": "user", "content": item["text"][:2000]} for item in reversed(recent)] + [{"role": "user", "content": current["text"][:4000]}],
+                "messages": history + [{"role": "user", "content": current["text"][:4000]}],
                 "allow_generation": bool(allowed), "safe_guidance_key": key,
                 "notice": "" if allowed else self._notice(policy if not policy["allow_generation"] else global_policy)}
 

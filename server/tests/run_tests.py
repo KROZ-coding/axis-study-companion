@@ -10,6 +10,11 @@ import unittest
 def main() -> int:
     server_dir = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="study-test-bootstrap-") as directory:
+        # Never inherit provider routing/credentials from the calling shell.
+        # Individual tests install explicit disposable doubles/configuration.
+        for key in tuple(os.environ):
+            if key.startswith(("LLM_", "MAXKB_")):
+                os.environ.pop(key)
         os.environ.update(
             SKIP_ENV_FILE="1", APP_ENV="test", DATA_DIR=directory, STUDY_DATA_DIR=directory,
             PERSISTENCE_ENABLED="false", STUDY_PERSISTENCE_ENABLED="false",

@@ -125,8 +125,11 @@ def check_argv(argv: list[str], *, cwd: Path | None = None) -> list[str]:
     return argv
 
 
-def run(argv: list[str], *, env=None, cwd: Path, title: str) -> None:
-    """统一用参数列表启动子进程：不经过 shell，且启动前过一遍白名单。"""
+def run_step(argv: list[str], *, env=None, cwd: Path, title: str) -> None:
+    """统一用参数列表启动子进程：不经过 shell，且启动前过一遍白名单。
+
+    命名说明：刻意不叫 run，避免与其它测试脚本里的同名符号在跨文件调用图中撞名。
+    """
     print(f"\n=== {title} ===")
     result = subprocess.run(check_argv(list(argv), cwd=cwd), env=env, cwd=str(cwd), text=True,
                             capture_output=True, shell=False, check=False)
@@ -175,7 +178,7 @@ def main() -> int:
 
     try:
         # 1. 种世界
-        run([sys.executable, "-I", "-B", "-X", "utf8", str(seed_script),
+        run_step([sys.executable, "-I", "-B", "-X", "utf8", str(seed_script),
              "--data-dir", str(data_dir), "--password-file", str(creds_file)],
             env=env, cwd=under(ROOT, ROOT), title="种出一个演示世界")
 
@@ -204,9 +207,9 @@ def main() -> int:
             live_env["AXIS_CREDS"] = str(creds_file)
 
             # 3. 浏览器走一遍
-            run([NODE, "check-live.mjs"], env=live_env, cwd=verify_cwd,
+            run_step([NODE, "check-live.mjs"], env=live_env, cwd=verify_cwd,
                 title="学生端：真实任务与真实结果")
-            run([NODE, "check-live-teacher.mjs"], env=live_env, cwd=verify_cwd,
+            run_step([NODE, "check-live-teacher.mjs"], env=live_env, cwd=verify_cwd,
                 title="教师端：真实班级与真实学情")
         finally:
             server.terminate()
@@ -227,9 +230,9 @@ def main() -> int:
             time.sleep(2)
             fallback_env = dict(os.environ)
             fallback_env["PROTO_BASE"] = static_base
-            run([NODE, "check-entry.mjs"], env=fallback_env, cwd=verify_cwd,
+            run_step([NODE, "check-entry.mjs"], env=fallback_env, cwd=verify_cwd,
                 title="无后端：入口仍可用")
-            run([NODE, "check-auth.mjs"], env=fallback_env, cwd=verify_cwd,
+            run_step([NODE, "check-auth.mjs"], env=fallback_env, cwd=verify_cwd,
                 title="无后端：登录流程仍可用")
         finally:
             static.terminate()

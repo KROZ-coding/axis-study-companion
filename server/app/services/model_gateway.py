@@ -31,8 +31,8 @@ _PURPOSES = {
     "suggest": ("teacher", "gpt-5.6-sol", "interaction"),
     "generate": ("teacher", "gpt-5.6-sol", "batch"),
     "review": ("teacher", "gpt-5.6-sol", "batch"),
-    "student": ("student", "gpt-5.6-terra", "interaction"),
-    "hint": ("student", "gpt-5.6-terra", "interaction"),
+    "student": ("student", "gpt-5.6-sol", "interaction"),
+    "hint": ("student", "gpt-5.6-sol", "interaction"),
     "grading": ("grading", "gpt-5.6-terra", "batch"),
     "summary": ("summary", "gpt-5.6-terra", "batch"),
 }
@@ -257,8 +257,6 @@ class ModelGateway:
         channel, model, _ = _PURPOSES[purpose]
         providers = list(getattr(self.settings, "llm_providers", ()))
         candidates = [item for item in providers if item.channel == channel]
-        if not candidates and purpose in {"grading", "summary"}:
-            candidates = [item for item in providers if item.channel == "student"]
         if not candidates:
             raise GatewayError("not_configured", status_code=503)
         # Invalid entries in the selected group are configuration errors, not

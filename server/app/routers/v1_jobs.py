@@ -12,7 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..job_queue import InvalidTransition, IdempotencyConflict, QueueError
 from ..runtime import get_runtime
 from ..services.access import can_access_job, job_view, require_job
-from ..v1_deps import get_platform_user, require_platform_roles
+from ..services.companion_access import (
+    answer_policy_provider, response_access, response_event_access, response_job_state, validate_response_access,
+)
+from ..v1_deps import get_platform_user, require_current_actor, require_platform_roles
 
 router = APIRouter(prefix="/api/v1", tags=["background-jobs"])
 
@@ -28,9 +31,9 @@ class ResumeRequest(Input):
 class BudgetPolicy(Input):
     scope_type: Literal["student_daily", "teaching", "project"]
     scope_id: str = Field(min_length=1, max_length=160)
-    class_id: str | None = Field(default=None, max_length=160)
-    limit_units: int = Field(ge=0, strict=True)
-    emergency_units: int = Field(default=0, ge=0, strict=True)
+    class_id: str | None = Field(default=None, min_length=1, max_length=160)
+    limit_units: int = Field(ge=0, le=2**63 - 1, strict=True)
+    emergency_units: int = Field(default=0, ge=0, le=2**63 - 1, strict=True)
     period: str | None = Field(default=None, max_length=10)
 
 
@@ -153,59 +156,104 @@ async def response_stream(response_id: str, request: Request, after: int = Query
                           once: bool = False, actor=Depends(get_platform_user)):
     runtime = get_runtime(request)
     try:
-        runtime.companion.get_response(response_id, actor.id, answer_policy=runtime.learning.get_answer_policy)
+        response_access(runtime, actor.id, response_id)
     except (LookupError, PermissionError):
         raise HTTPException(status_code=404, detail={"code": "response_not_found", "message": "回答不存在"}) from None
     raw = request.headers.get("last-event-id")
-    if raw:
+    if raw is not None:
         try:
-            after = max(after, int(raw))
+            header_cursor = int(raw)
+            if not 0 <= header_cursor <= 9223372036854775807:
+                raise ValueError("cursor out of range")
+            after = max(after, header_cursor)
         except ValueError:
             raise HTTPException(status_code=422, detail={"code": "invalid_cursor", "message": "事件游标无效"}) from None
+    if after > 9223372036854775807:
+        raise HTTPException(status_code=422, detail={"code": "invalid_cursor", "message": "事件游标无效"})
+
+    def frame(event_type, data, event_id):
+        return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def snapshot(response):
+        fields = ("response_id", "status", "text", "redacted", "notice", "error", "generation", "last_event_id",
+                  "assistant_message_id", "content_type", "task_id", "question_version_id", "job_id", "job")
+        return frame("snapshot", {key: response.get(key) for key in fields}, response["last_event_id"])
+
+    def visibility_state(response):
+        job = response.get("job") or {}
+        return (response.get("redacted", False), response.get("notice"),
+                response["status"] in {"failed", "cancelled"}, job.get("status"),
+                job.get("cancel_requested"), job.get("reconciliation_required"), job.get("cost_pending"))
 
     async def stream():
-        cursor, generation = after, None
+        cursor, generation, visibility = after, None, None
         while not await request.is_disconnected():
             try:
                 user = get_platform_user(request, runtime.platform)
-                response = runtime.companion.get_response(
-                    response_id, user.id, answer_policy=runtime.learning.get_answer_policy,
+                response, candidates = runtime.companion.read_response_events(
+                    response_id, user.id, after=cursor, limit=1000,
+                    answer_policy=answer_policy_provider(runtime, user.id),
                 )
+                validate_response_access(runtime, user.id, response)
+                response["job"] = response_job_state(runtime, response)
+                # This is a fresh check immediately before any output; only
+                # event IDs from the page are buffered, never projected text.
+                response = response_access(runtime, user.id, response_id)
             except (HTTPException, LookupError, PermissionError):
                 yield 'event: revoked\ndata: {"code":"access_revoked"}\n\n'
                 return
-            if generation is not None and generation != response["generation"]:
-                cursor = 0
-            generation = response["generation"]
-            events = runtime.companion.list_response_events(
-                response_id, user.id, after=cursor, limit=1000,
-                answer_policy=runtime.learning.get_answer_policy,
-            )
-            if not events:
-                committed = runtime.companion.list_response_events(
-                    response_id, user.id, limit=1000, answer_policy=runtime.learning.get_answer_policy,
-                )
-                latest = committed[-1]["event_id"] if committed else 0
-                if cursor > latest:
-                    cursor = latest
-                    snapshot = {key: response.get(key) for key in ("response_id", "status", "text", "redacted", "notice", "generation")}
-                    yield f"id: {cursor}\nevent: snapshot\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
-            for event in events:
-                get_platform_user(request, runtime.platform)
-                projected = runtime.companion.list_response_events(
-                    response_id, user.id, after=event["event_id"] - 1, limit=1,
-                    answer_policy=runtime.learning.get_answer_policy,
-                )
-                if not projected:
-                    continue
-                event = projected[0]
+            current_visibility = visibility_state(response)
+            # Every connection replaces any cached prefix before replay,
+            # including idle tail resumes after policy or generation changes.
+            if (generation is None or generation != response["generation"] or cursor > response["last_event_id"]
+                    or visibility is not None and visibility != current_visibility):
+                generation = response["generation"]
+                cursor = response["last_event_id"]
+                visibility = current_visibility
+                yield snapshot(response)
+                if response["status"] in {"completed", "failed", "cancelled"} or once:
+                    return
+                continue
+            visibility = current_visibility
+            changed = False
+            for candidate in candidates:
+                try:
+                    user = get_platform_user(request, runtime.platform)
+                    response, event = response_event_access(runtime, user.id, response_id, candidate["event_id"])
+                except (HTTPException, LookupError, PermissionError):
+                    yield 'event: revoked\ndata: {"code":"access_revoked"}\n\n'
+                    return
+                current_visibility = visibility_state(response)
+                if response["generation"] != generation or event is None or current_visibility != visibility:
+                    generation = response["generation"]
+                    cursor = response["last_event_id"]
+                    visibility = current_visibility
+                    yield snapshot(response)
+                    changed = True
+                    break
                 cursor = event["event_id"]
                 data = {"response_id": response_id, "generation": event["generation"], **event["data"]}
-                yield f"id: {cursor}\nevent: {event['event_type']}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-            if once or response["status"] in {"completed", "failed", "cancelled"}:
+                yield frame(event["event_type"], data, cursor)
+            if changed:
+                continue
+            try:
+                user = get_platform_user(request, runtime.platform)
+                response = response_access(runtime, user.id, response_id)
+            except (HTTPException, LookupError, PermissionError):
+                yield 'event: revoked\ndata: {"code":"access_revoked"}\n\n'
                 return
-            yield ": keepalive\n\n"
-            await asyncio.sleep(0.5)
+            if response["generation"] != generation or visibility_state(response) != visibility:
+                continue
+            terminal = response["status"] in {"completed", "failed", "cancelled"}
+            if cursor >= response["last_event_id"] and (once or terminal):
+                yield snapshot(response)
+                return
+            if once and not terminal:
+                yield snapshot(response)
+                return
+            if not candidates:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(0.5)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -215,43 +263,71 @@ async def response_stream(response_id: str, request: Request, after: int = Query
 def set_budget_limit(payload: BudgetPolicy, request: Request,
                      actor=Depends(require_platform_roles("teacher", "admin"))):
     runtime = get_runtime(request)
-    if actor.role != "admin":
-        if payload.scope_type != "student_daily" or not payload.class_id:
-            raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "教师只能设置所属学生日额度"})
-        classroom = runtime.platform.get_class(payload.class_id)
-        if classroom is None or classroom.get("owner_teacher_id") != actor.id:
-            raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "学生有效日额度由班级负责人确认"})
-        if runtime.platform.get_class_membership(payload.class_id, payload.scope_id) is None:
-            raise HTTPException(status_code=404, detail={"code": "student_not_found", "message": "该学生不属于该班级"})
-    classroom = runtime.platform.get_class(payload.class_id) if payload.class_id else None
-    if payload.class_id and classroom is None:
-        raise HTTPException(status_code=404, detail={"code": "class_not_found", "message": "班级不存在"})
-    result = runtime.queue.budget_ledger.set_limit(
-        payload.scope_type, payload.scope_id, payload.limit_units,
-        emergency_units=payload.emergency_units, period=payload.period,
-        course_id=classroom["course_id"] if classroom else None, class_id=payload.class_id,
-    )
-    runtime.platform.record_audit_event("budget_limit_set", actor.id, resource_type="budget", resource_id=payload.scope_id,
-                                        payload={"scope_type": payload.scope_type, "limit_units": payload.limit_units})
+    # Keep owner/membership authority stable until the queue write completes.
+    with runtime.platform.transaction():
+        current = require_current_actor(runtime.platform, actor.id, "teacher", "admin")
+        classroom = runtime.platform.get_class(payload.class_id) if payload.class_id else None
+        if current["role"] != "admin":
+            if payload.scope_type != "student_daily" or not payload.class_id:
+                raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "教师只能设置所属学生日额度"})
+            if classroom is None or classroom.get("owner_teacher_id") != actor.id:
+                raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "学生有效日额度由班级负责人确认"})
+        if payload.class_id and classroom is None:
+            raise HTTPException(status_code=404, detail={"code": "class_not_found", "message": "班级不存在"})
+        if payload.scope_type == "student_daily":
+            student = runtime.platform.get_user(payload.scope_id)
+            if student is None or student["role"] != "student":
+                raise HTTPException(status_code=404, detail={"code": "student_not_found", "message": "学生账号不存在"})
+            if classroom and runtime.platform.get_class_membership(classroom["id"], payload.scope_id) is None:
+                raise HTTPException(status_code=404, detail={"code": "student_not_found", "message": "该学生不属于该班级"})
+        try:
+            result = runtime.queue.budget_ledger.set_limit(
+                payload.scope_type, payload.scope_id, payload.limit_units,
+                emergency_units=payload.emergency_units, period=payload.period,
+                course_id=classroom["course_id"] if classroom else None, class_id=payload.class_id,
+            )
+        except (ValueError, OverflowError) as error:
+            raise HTTPException(status_code=422, detail={"code": "invalid_budget_policy", "message": "额度、周期或适用范围无效"}) from error
+        runtime.platform.record_audit_event("budget_limit_set", actor.id, resource_type="budget", resource_id=payload.scope_id,
+                                            payload={"scope_type": payload.scope_type, "limit_units": payload.limit_units,
+                                                     "class_id": payload.class_id, "period": payload.period})
     return asdict(result)
 
 
 @router.get("/budgets/limits")
-def list_budget_limits(request: Request, actor=Depends(get_platform_user)):
+def list_budget_limits(request: Request, class_id: str | None = Query(None, min_length=1, max_length=160),
+                       actor=Depends(get_platform_user)):
     runtime = get_runtime(request)
+    current = require_current_actor(runtime.platform, actor.id)
+    classroom = runtime.platform.get_class(class_id) if class_id else None
+    if class_id:
+        if current["role"] == "teacher" and (classroom is None or classroom["owner_teacher_id"] != actor.id):
+            raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "只能查看本人负责班级的学生日额度"})
+        if current["role"] == "student" and (classroom is None or runtime.platform.get_class_membership(class_id, actor.id) is None):
+            raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "无权查看该班级额度"})
+        if classroom is None:
+            raise HTTPException(status_code=404, detail={"code": "class_not_found", "message": "班级不存在"})
     limits = runtime.queue.budget_ledger.list_limits()
-    if actor.role == "admin":
+    if current["role"] == "admin" and class_id is None:
         visible = limits
-    elif actor.role == "student":
-        visible = [item for item in limits if item.scope_type == "student_daily" and item.scope_id == actor.id]
+    elif current["role"] == "student":
+        visible = [item for item in limits if item.scope_type == "student_daily" and item.scope_id == actor.id
+                   and (class_id is None or (item.class_id == class_id and item.course_id == classroom["course_id"]))]
     else:
-        classes = runtime.platform.list_accessible_classes(actor.id)
-        class_ids = {classroom["id"] for classroom in classes}
-        allowed = {member["user_id"] for classroom in classes
-                   for member in runtime.platform.list_class_memberships(classroom["id"])}
-        visible = [item for item in limits if item.scope_type == "student_daily" and item.scope_id in allowed
-                   and (not item.class_id or item.class_id in class_ids)]
-    return {"items": [asdict(item) for item in visible], "currency": runtime.settings.budget_currency}
+        classes = [classroom] if classroom else [
+            row for row in runtime.platform.list_accessible_classes(actor.id) if row["owner_teacher_id"] == actor.id
+        ]
+        # Match each policy to its own current class membership, not a union of
+        # students that could reveal another class's policy for a shared student.
+        allowed = {(row["course_id"], row["id"], member["user_id"])
+                   for row in classes for member in runtime.platform.list_class_memberships(row["id"])}
+        visible = [item for item in limits if item.scope_type == "student_daily"
+                   and (item.course_id, item.class_id, item.scope_id) in allowed]
+    return {
+        "items": [asdict(item) for item in visible], "currency": runtime.settings.budget_currency,
+        "unit": "billing_unit", "unit_scale": 1,
+        "unit_description": "额度按原始非负整数计费单位显示和提交，缩放为1。币种取自服务端预算配置；site-credit为名义计费单位，不提供法币兑换比例或供应商现金收费上限保证。",
+    }
 
 
 @router.post("/admin/budgets/fund")

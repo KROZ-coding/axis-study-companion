@@ -165,40 +165,21 @@ class Access:
             raise NotFound("course not found")
 
     def conversation(self, conversation_id: str) -> dict:
+        from ..services.companion_access import require_student
+        require_student(self.runtime, self.user.id)
         row = self.companion.get_conversation(conversation_id, self.user.id)
         self.course(row["course_id"])
         return row
 
     def policy(self, user_id: str, *, task_id: str | None = None, question_version_id: str | None = None) -> Mapping[str, Any]:
-        """Only the learning public interface decides visibility, never request flags."""
+        from ..services.companion_access import answer_policy
         if user_id != self.user.id:
-            return {"allow_assistant_content": False, "allow_generation": False}
-        method = getattr(self.runtime.learning, "get_answer_policy", None)
-        if not callable(method):
-            return {}
-        try:
-            if task_id is not None:
-                self.task(task_id, question_version_id=question_version_id)
-            value = method(user_id, task_id=task_id, question_version_id=question_version_id)
-            if not isinstance(value, Mapping):
-                return {}
-            # An unscoped message can contain any active question. Its policy must
-            # be learning's all-active fallback, never a client-selected task.
-            return value
-        except Exception:
-            return {}
+            raise PermissionError("policy actor changed")
+        return answer_policy(self.runtime, user_id, task_id=task_id, question_version_id=question_version_id)
 
     def task(self, task_id: str, *, question_version_id: str | None = None) -> dict[str, Any]:
-        learning = self.runtime.learning
-        scope = learning.get_task_scope(task_id, self.user.id)
-        if scope.get("student_id") != self.user.id:
-            raise NotFound("task not assigned to actor")
-        self.course(scope.get("course_id"))
-        if scope.get("class_id") and not self.platform.can_access_class(self.user.id, scope["class_id"]):
-            raise NotFound("task class is inaccessible")
-        if question_version_id is not None:
-            self.question(task_id, question_version_id, scope=scope)
-        return scope
+        from ..services.companion_access import task_scope
+        return task_scope(self.runtime, self.user.id, task_id, question_version_id)
 
     @staticmethod
     def question_matches(question: Mapping[str, Any], reference: str) -> bool:
@@ -293,6 +274,18 @@ def get_access(request: Request, user: User = Depends(get_platform_user),
     return Access(user, platform, runtime)
 
 
+@router.get("/companion/answer-policy")
+def companion_answer_policy(task_id: str | None = None, question_version_id: str | None = None,
+                            access: Access = Depends(get_access)):
+    if access.user.role != "student":
+        raise PermissionError("student access required")
+    if question_version_id and not task_id:
+        raise _error(422, "invalid_request", "题目版本需要对应任务")
+    from ..services.companion_access import answer_policy
+    return answer_policy(access.runtime, access.user.id, task_id=task_id,
+                         question_version_id=question_version_id)
+
+
 @router.post("/companion/conversations", status_code=201)
 def create_conversation(payload: ConversationCreate, access: Access = Depends(get_access)):
     access.course(payload.course_id)
@@ -332,24 +325,43 @@ def restore_conversation(conversation_id: str, access: Access = Depends(get_acce
 @router.post("/companion/conversations/{conversation_id}/messages", status_code=202)
 def post_message(conversation_id: str, payload: MessageCreate, access: Access = Depends(get_access)):
     conversation = access.conversation(conversation_id)
+    scope = {"student_id": access.user.id, "project_id": "platform"}
     if payload.task_id:
-        scope = access.task(payload.task_id, question_version_id=payload.question_version_id)
-        if conversation["course_id"] is not None and scope.get("course_id") != conversation["course_id"]:
+        task_scope = access.task(payload.task_id, question_version_id=payload.question_version_id)
+        if conversation["course_id"] is not None and task_scope.get("course_id") != conversation["course_id"]:
             raise NotFound("task is outside conversation course")
+        scope.update({key: task_scope.get(key) for key in ("course_id", "class_id")})
+        scope["task_id"] = payload.task_id
     return access.companion.post_message(conversation_id, access.user.id, payload.text, request_id=payload.request_id,
-                                         task_id=payload.task_id, question_version_id=payload.question_version_id)
+                                         task_id=payload.task_id, question_version_id=payload.question_version_id,
+                                         budget_scope=scope)
 
 
 @router.get("/companion/conversations/{conversation_id}/messages")
-def list_messages(conversation_id: str, after: str | None = None, limit: int = Query(100, ge=1, le=500),
+def list_messages(conversation_id: str, after: str | None = None, before: str | None = None,
+                  latest: bool = False, limit: int = Query(100, ge=1, le=500),
                   access: Access = Depends(get_access)):
     access.conversation(conversation_id)
-    return access.companion.list_messages(conversation_id, access.user.id, after=after, limit=limit, answer_policy=access.policy)
+    rows = access.companion.list_messages(conversation_id, access.user.id, after=after, before=before,
+                                          latest=latest, limit=limit, answer_policy=access.policy)
+    visible = []
+    for row in rows:
+        if row.get("task_id"):
+            try:
+                access.task(row["task_id"], question_version_id=row.get("question_version_id"))
+            except (LookupError, PermissionError):
+                row.update(text="", content="", redacted=True, notice="该任务当前不可访问。")
+                response = row.get("response") or {}
+                if response:
+                    response.update(text="", content="", redacted=True, notice="该任务当前不可访问。")
+        visible.append(row)
+    return visible
 
 
 @router.get("/companion/responses/{response_id}")
 def get_response(response_id: str, access: Access = Depends(get_access)):
-    response = access.companion.get_response(response_id, access.user.id, answer_policy=access.policy)
+    from ..services.companion_access import response_access
+    response = response_access(access.runtime, access.user.id, response_id)
     access.conversation(response["conversation_id"])
     return response
 
@@ -357,9 +369,8 @@ def get_response(response_id: str, access: Access = Depends(get_access)):
 @router.get("/companion/responses/{response_id}/events")
 def response_events(response_id: str, after: int = Query(0, ge=0), limit: int = Query(1000, ge=1, le=1000),
                     access: Access = Depends(get_access)):
-    response = access.companion.get_response(response_id, access.user.id, answer_policy=access.policy)
-    access.conversation(response["conversation_id"])
-    return access.companion.list_response_events(response_id, access.user.id, after=after, limit=limit, answer_policy=access.policy)
+    from ..services.companion_access import response_events as accessible_events
+    return accessible_events(access.runtime, access.user.id, response_id, after=after, limit=limit)
 
 
 @router.post("/companion/collections", status_code=201)

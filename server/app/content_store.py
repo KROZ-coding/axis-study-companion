@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -633,10 +634,89 @@ class ContentStore:
         if kind not in {"material_parse","question_generate","question_edit"}:
             raise ValueError("unknown content job kind")
         job_id, now = job_id or self._id("contentjob"), time.time()
-        stage = "parse" if kind == "material_parse" else ("review" if kind == "question_edit" else "generate")
+        stage = "parse" if kind == "material_parse" else ("review" if kind == "question_edit" or payload.get("candidates") else "generate")
         with self.transaction() as db:
-            db.execute("INSERT INTO content_jobs(id,course_id,class_id,owner_id,kind,stage,status,input_json,created_at,updated_at) VALUES (?,?,?,?,?,?,'pending',?,?,?)",(job_id,course_id,class_id,owner_id,kind,stage,self._json(dict(payload)),now,now))
+            self._insert_job(db,job_id,kind,course_id,owner_id,class_id,stage,payload,now)
         return self.get_job(job_id)  # type: ignore[return-value]
+
+    def create_requested_question_job(self, kind: str, *, operation: str, request_id: str,
+                                      course_id: str, owner_id: str, payload: Mapping[str,Any],
+                                      class_id: str | None = None, before_create: Callable[[],Any] | None = None) -> dict[str,Any]:
+        """Serialize a keyed create/replay without changing the legacy create_job adapter contract.
+
+        The deterministic identity is the durable command record. Input is immutable;
+        state/status may advance independently and replays return that current state.
+        The optional callback is local validation for a NEW job only, never network I/O.
+        """
+        kinds = {"generation":"question_generate","manual_candidate":"question_generate","edit":"question_edit"}
+        if kinds.get(operation)!=kind:
+            raise ValueError("invalid question request operation")
+        if not isinstance(request_id,str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}",request_id) is None:
+            raise ValueError("request_id must contain 1 to 100 letters, digits, underscores, dots, colons or hyphens")
+        identity = self._json(["question-request-v1",owner_id,course_id,operation,request_id])
+        job_id = "contentreq_"+hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        encoded = json.dumps(dict(payload),ensure_ascii=False,sort_keys=True,separators=(",",":"),allow_nan=False)
+        stage = "review" if kind=="question_edit" or payload.get("candidates") else "generate"
+        with self.transaction() as db:
+            row = db.execute("SELECT * FROM content_jobs WHERE id=?",(job_id,)).fetchone()
+            if row is not None:
+                previous = json.dumps(json.loads(row["input_json"]),ensure_ascii=False,sort_keys=True,separators=(",",":"),allow_nan=False)
+                if (row["kind"]!=kind or row["owner_id"]!=owner_id or row["course_id"]!=course_id
+                        or row["class_id"]!=class_id or previous!=encoded):
+                    raise ContentConflict("request_id was already used for a different question request")
+            else:
+                if before_create is not None:
+                    before_create()
+                self._insert_job(db,job_id,kind,course_id,owner_id,class_id,stage,payload,time.time())
+        return self.get_job(job_id)
+
+    def _insert_job(self, db, job_id, kind, course_id, owner_id, class_id, stage, payload, now):
+        db.execute("INSERT INTO content_jobs(id,course_id,class_id,owner_id,kind,stage,status,input_json,created_at,updated_at) VALUES (?,?,?,?,?,?,'pending',?,?,?)",
+                   (job_id,course_id,class_id,owner_id,kind,stage,self._json(dict(payload)),now,now))
+
+    def create_question_import_preview(self, *, course_id: str, owner_id: str, class_id: str | None,
+                                       payload: Mapping[str,Any], preview: Mapping[str,Any]) -> dict[str,Any]:
+        """A local draft in the existing content authority; never a dispatchable model job."""
+        job_id, now = self._id("qimport"), time.time()
+        with self.transaction() as db:
+            self._insert_job(db,job_id,"question_generate",course_id,owner_id,class_id,"import_preview",
+                             {**dict(payload),"origin":"import_preview","external_processing_allowed":False},now)
+            db.execute("UPDATE content_jobs SET state_json=? WHERE id=?",(self._json(dict(preview)),job_id))
+        return self.get_job(job_id)
+
+    def confirm_question_import(self, import_id: str, *, expected_revision: int, row_numbers: Sequence[int],
+                                candidates: Sequence[Mapping[str,Any]], failures: Sequence[Mapping[str,Any]]) -> dict[str,Any]:
+        """Insert per-row review jobs and the confirmation result in one transaction."""
+        with self.transaction() as db:
+            row = db.execute("SELECT * FROM content_jobs WHERE id=?",(import_id,)).fetchone()
+            if row is None or row["stage"]!="import_preview" or row["revision"]!=expected_revision:
+                raise ContentConflict("question import preview changed or was already confirmed")
+            state = json.loads(row["state_json"])
+            jobs, now = [], time.time()
+            for item in candidates:
+                job_id = self._id("contentjob")
+                self._insert_job(db,job_id,"question_generate",row["course_id"],row["owner_id"],row["class_id"],"review",item["payload"],now)
+                jobs.append({"row_number":item["row_number"],"job_id":job_id,"queue_job_id":f"content:{job_id}"})
+            state["confirmation"] = {"row_numbers":sorted(row_numbers),"jobs":jobs,"failures":list(failures),
+                                     "accepted_count":len(jobs),"failed_count":len(failures)}
+            self._write_job_result(db,import_id,expected_revision=expected_revision,stage="import_confirmed",
+                                   status="completed",state_json=self._json(state))
+        return self.get_job(import_id)
+
+    def list_question_jobs(self, course_id: str, *, owner_id: str | None = None, class_id: str | None = None) -> list[dict[str,Any]]:
+        with self.connect() as db:
+            rows = db.execute("""SELECT * FROM content_jobs WHERE course_id=? AND kind IN ('question_generate','question_edit')
+                AND stage NOT IN ('import_preview','import_confirmed') AND (? IS NULL OR owner_id=?)
+                AND (? IS NULL OR class_id IS NULL OR class_id=?) ORDER BY created_at DESC,id""",
+                (course_id,owner_id,owner_id,class_id,class_id))
+            return [self._job_row(row) for row in rows]
+
+    @staticmethod
+    def _job_row(row: sqlite3.Row) -> dict[str,Any]:
+        result = dict(row)
+        result["input"] = json.loads(result.pop("input_json"))
+        result["state"] = json.loads(result.pop("state_json"))
+        return result
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -649,11 +729,11 @@ class ContentStore:
         return result
 
     def list_pending_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
-        """Durable outbox: dispatcher enqueues queue job_id=content job id; pending remains until a result applies."""
+        """Durable outbox: dispatcher enqueues content:{id}; local import previews never leave this store."""
         if isinstance(limit,bool) or not isinstance(limit,int) or not 1 <= limit <= 500:
             raise ValueError("invalid pending job limit")
         with self.connect() as db:
-            ids = [row[0] for row in db.execute("SELECT id FROM content_jobs WHERE status IN ('pending','running') ORDER BY created_at,id LIMIT ?",(limit,))]
+            ids = [row[0] for row in db.execute("SELECT id FROM content_jobs WHERE status IN ('pending','running') AND stage<>'import_preview' ORDER BY created_at,id LIMIT ?",(limit,))]
         return [self.get_job(job_id) for job_id in ids]  # type: ignore[misc]
 
     @contextmanager

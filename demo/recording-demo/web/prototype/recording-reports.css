@@ -1,0 +1,32 @@
+.recording-report-controls { margin: 20px 0; }
+.recording-report-kinds, .recording-report-selection, .recording-report-downloads { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.recording-report-selection { margin-top: 20px; align-items: end; }
+.recording-report-selection .field { flex: 1 1 250px; margin: 0; max-width: 640px; }
+.recording-report-selection select { width: 100%; }
+.recording-report-empty { padding: 36px; max-width: 900px; }
+.recording-report-empty p { max-width: 45em; line-height: 1.9; color: var(--ink-soft); }
+.recording-report-heading { display: flex; gap: 16px; justify-content: space-between; align-items: start; flex-wrap: wrap; }
+.recording-report-heading h2 { margin: 0; }
+.recording-report-disclosure { padding: 12px 16px; border-left: 3px solid var(--accent); background: var(--ice); color: var(--ink-soft); font-size: 13px; line-height: 1.8; }
+.recording-report-metrics { display: flex; flex-wrap: wrap; gap: 24px 36px; padding: 12px 0 22px; margin: 0; }
+.recording-report-metrics dt { color: var(--ink-soft); font-size: 13px; }
+.recording-report-metrics dd { margin: 5px 0 0; font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.recording-report-downloads a { text-decoration: none; text-align: center; min-width: 75px; }
+.recording-report-table { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; }
+.recording-report-table summary, .recording-report-history summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+.recording-report-table summary span { font-size: 12px; font-weight: 400; color: var(--ink-soft); margin-left: 14px; }
+.recording-report-scroll { overflow: auto; max-height: 460px; margin-top: 10px; }
+.recording-report-scroll table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.recording-report-scroll th, .recording-report-scroll td { padding: 12px; text-align: left; border-bottom: 1px solid var(--line); max-width: 360px; overflow-wrap: anywhere; }
+.recording-report-scroll th { background: var(--ice); font-weight: 600; white-space: nowrap; }
+.recording-report-scroll td { min-width: 85px; line-height: 1.6; }
+.recording-report-error { color: var(--bad); background: var(--bad-bg); padding: 12px; border-radius: 8px; }
+.recording-report-history { margin-top: 18px; }
+.recording-report-history > div { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+@media (max-width: 600px) {
+  .recording-report-empty { padding: 20px; }
+  .recording-report-kinds .btn { flex: 1 1 42%; }
+  .recording-report-selection .field { flex-basis: 100%; }
+  .recording-report-heading h2 { font-size: 22px; }
+  .recording-report-metrics { gap: 18px; }
+}
