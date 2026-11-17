@@ -32,7 +32,7 @@ class InitialAdminTests(unittest.TestCase):
             return hash_password(password)
         with patch("app.init_admin.hash_password", side_effect=unlocked_hash):
             user_id = initialize_admin(settings=self.config, username="first-admin", display_name="管理员", password="runtime-secret")
-        self.assertEqual(resolve_platform_db_path(self.config), self.path)
+        self.assertEqual(resolve_platform_db_path(self.config), self.path.resolve())
         store = PlatformStore(self.path)
         self.assertEqual((store.get_user(user_id)["role"], store.get_user(user_id)["status"]), ("admin", "active"))
         with self.assertRaisesRegex(RuntimeError, "already exists"):

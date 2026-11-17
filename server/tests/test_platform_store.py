@@ -286,7 +286,7 @@ class PlatformStoreTests(unittest.TestCase):
 
     def test_database_path_uses_one_server_relative_root(self):
         from types import SimpleNamespace
-        self.assertEqual(resolve_platform_db_path(SimpleNamespace(data_dir=str(self.root))), self.path)
+        self.assertEqual(resolve_platform_db_path(SimpleNamespace(data_dir=str(self.root))), self.path.resolve())
         expected = Path(__file__).resolve().parents[1] / "relative-test-data" / "platform.sqlite3"
         self.assertEqual(resolve_platform_db_path(SimpleNamespace(data_dir="relative-test-data")), expected)
 

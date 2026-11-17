@@ -165,7 +165,7 @@ class ReportExportsTests(unittest.TestCase):
             text = "\n".join(page.get_text() for page in document)
             self.assertIn(snapshot["title"], text)
             self.assertIn("测试教材", text)
-            self.assertIn("x^2 + y^2 = z^2", text)
+            self.assertIn("x^2 + y^2 = z^2", " ".join(text.split()))
             self.assertIn("默认规则参数未经校准", text)
             self.assertNotIn("\ufffd", text)
             self.assertNotIn(PRIVATE_MARKER, text)

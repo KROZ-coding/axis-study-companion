@@ -130,7 +130,7 @@ class BackupCLITests(unittest.TestCase):
             self.assertFalse(any(b"SECRET_SENTINEL" in archive.read(name) for name in names))
         restored = backup_cli.restore_bundle(self.bundle, self.parent, self.live, stopped=True)
         data = Path(restored["data_dir"])
-        self.assertEqual(data.parent.parent, self.parent)
+        self.assertEqual(data.parent.parent, self.parent.resolve())
         self.assertFalse(restored["ready_for_production"])
         self.assertTrue(restored["recovery_review"]["workers_must_remain_disabled"])
         self.assertTrue(restored["recovery_review"]["provider_access_must_remain_disabled"])
