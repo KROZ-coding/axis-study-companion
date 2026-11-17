@@ -487,7 +487,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_heartbeat_cancellation_records_gateway_error_usage_without_adopting_result(self):
         posted = self.posted_job(wallet=True)
-        self.settings.worker_lease_seconds = 0.15
+        self.settings.worker_lease_seconds = 3.0
 
         async def waiting(purpose, messages, **options):
             self.queue.cancel(posted["job_id"])
@@ -513,7 +513,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_lease_loss_records_late_usage_and_keeps_unknown_persistent(self):
         posted = self.posted_job()
-        self.settings.worker_lease_seconds = 0.15
+        self.settings.worker_lease_seconds = 3.0
         heartbeat = self.queue.heartbeat
         revoked = False
 
@@ -544,7 +544,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_operation_returns_after_heartbeat_loss_only_usage_is_recorded(self):
         posted = self.posted_job()
-        self.settings.worker_lease_seconds = 0.15
+        self.settings.worker_lease_seconds = 3.0
 
         async def late_success(purpose, messages, **options):
             self.queue.cancel(posted["job_id"])

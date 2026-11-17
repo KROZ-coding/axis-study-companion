@@ -15,6 +15,8 @@ const apiPath = path.join(root, "web/prototype/api.js");
 const appSource = readFileSync(appPath, "utf8");
 const apiSource = readFileSync(apiPath, "utf8");
 const answerFunctions = ["questionType", "questionBlankCount", "answerMissing", "questionChoiceValue", "questionInputValue", "questionAnswerText", "refreshAnswerProgress"];
+const restrictedHintFunctions = ["hintLevelLabel", "pendingRestrictedHint", "restrictedHintAvailable", "restrictedHintControls", "restrictedHintRequestView", "requestRestrictedHint", "restrictedHintScopeCurrent", "prepareRestrictedHint", "questionQuestionVersion"];
+const studentWriteFunctions = ["studentSnapshot", "studentWrite", "studentWriteOwned", "studentWriteCurrent", "clearStudentSaveTimers", "stopStudentEditing", "resetStudentWrites", "studentAnswerLocked", "studentSaveLabel", "refreshStudentSaveStatus", "scheduleStudentSave", "diagnosticHasInput", "rememberDiagnosticDraft", "studentWorkPending", "studentConfirm", "leaveStudentWork", "beforeStudentUnload", "suspendStudentWork", "resumeStudentWork", "studentWriteFailed", "studentDraftPayload", "studentDeviceId", "recoverStudentDraft", "saveLiveDraft", "taskFinished", "taskTitle", "updateStudentTask", "startLeaseRenewal"];
 
 function functionSource(name) {
   const declaration = new RegExp(`^(?:async )?function ${name}\\([^]*?(?=^(?:async )?function |^// ──|^let scene =|^let revealTimer =|^let drag =|^let touchY =|$(?![^]))`, "m");
@@ -62,12 +64,13 @@ function task(id, overrides = {}) {
 }
 
 function lease(taskId) {
-  return { task_id: taskId, lease_token: "test-lease", fence_token: 7, lease_until: Date.now() / 1000 + 180 };
+  return { task_id: taskId, task_version: 3, lease_token: "test-lease", fence_token: 7, lease_until: Date.now() / 1000 + 180 };
 }
 
 function harness(names, options = {}) {
   const calls = [];
   const intervals = new Map();
+  const timeouts = new Map();
   const frames = new Map();
   const nodes = new Map();
   const mediaListeners = new Map();
@@ -90,7 +93,9 @@ function harness(names, options = {}) {
     chatRenameOpen: false, chatRenameTitle: "", chatRenameError: "", chatRenaming: false, chatArchived: false,
     chatHasMoreConversations: false, chatSending: false,
     studentDrafts: {}, draftDirty: false, savedAt: null, selectedAttemptId: null,
-    diagnostic: null, diagnosticAnswers: [], mode: "tutor", sheet: null,
+    diagnostic: null, diagnosticAnswers: [], diagnosticUnknown: [], diagnosticDrafts: {}, diagnosticCommand: null,
+    studentWrites: {}, studentWriteEpoch: 0, studentComposing: false, studentSubmitBusy: false, studentSuspended: false, hintPreparing: null,
+    mode: "tutor", sheet: null,
     conversations: [], activeChat: 0, railEvents: [],
     ...options.state,
   };
@@ -107,6 +112,7 @@ function harness(names, options = {}) {
   const record = (name) => (...args) => { calls.push([name, ...args]); };
   const window = {
     scrollTo: record("scrollTo"),
+    confirm: (message) => { calls.push(["confirm", message]); return true; },
     setTimeout: (callback) => { calls.push(["timeout", callback]); return ++serial; },
     ...options.window,
   };
@@ -133,6 +139,7 @@ function harness(names, options = {}) {
     teacherManagement: { bind: record("teacherManagement.bind"), reset: record("teacherManagement.reset"), leave: () => { calls.push(["teacherManagement.leave"]); return true; }, load: record("teacherManagement.load"), render: () => '<section data-teacher-management>班级管理</section>' },
     teacherReview: { bind: record("teacherReview.bind"), reset: record("teacherReview.reset"), leave: () => { calls.push(["teacherReview.leave"]); return true; }, load: record("teacherReview.load"), openSelection: async (...args) => { calls.push(["teacherReview.openSelection", ...args]); return true; }, render: () => '<section data-teacher-review>教师复核</section>' },
     teacherReportWorkspace: { bind: record("teacherReportWorkspace.bind"), reset: record("teacherReportWorkspace.reset"), leave: () => { calls.push(["teacherReportWorkspace.leave"]); return true; }, load: record("teacherReportWorkspace.load"), openSelection: async (...args) => { calls.push(["teacherReportWorkspace.openSelection", ...args]); return true; }, render: () => '<section data-teacher-reports>阶段报告</section>' },
+    teacherInsightsWorkspace: { bind: record("teacherInsightsWorkspace.bind"), reset: record("teacherInsightsWorkspace.reset"), leave: () => { calls.push(["teacherInsightsWorkspace.leave"]); return true; }, load: record("teacherInsightsWorkspace.load"), openSelection: async (...args) => { calls.push(["teacherInsightsWorkspace.openSelection", ...args]); return true; }, render: () => '<section data-teacher-insights>教学总结</section>' },
     studentFeedback: { bind: record("studentFeedback.bind"), reset: record("studentFeedback.reset"), leave: () => { calls.push(["studentFeedback.leave"]); return true; }, load: record("studentFeedback.load"), openSelection: async (...args) => { calls.push(["studentFeedback.openSelection", ...args]); return true; }, render: () => '<section data-student-feedback>教师反馈</section>' },
     learningNotifications: { bind: record("learningNotifications.bind"), reset: record("learningNotifications.reset"), load: record("learningNotifications.load"), render: () => '<section data-learning-notifications>通知</section>' },
     resetEvents: record("resetEvents"), mountScene: record("mountScene"),
@@ -144,16 +151,17 @@ function harness(names, options = {}) {
     requestAnimationFrame: (callback) => { const id = ++serial; frames.set(id, callback); return id; },
     clearInterval: (id) => { intervals.delete(id); calls.push(["clearInterval", id]); },
     setInterval: (callback, delay) => { const id = ++serial; intervals.set(id, callback); calls.push(["setInterval", id, delay]); return id; },
-    setTimeout: (callback) => { calls.push(["timeout", callback]); return ++serial; },
+    setTimeout: (callback, delay) => { const id = ++serial; timeouts.set(id, { callback, delay }); calls.push(["timeout", callback, delay, id]); return id; },
+    clearTimeout: (id) => { timeouts.delete(id); calls.push(["clearTimeout", id]); },
     performance: { now: () => 0 },
     ...options.globals,
   });
-  vm.runInContext([...new Set([...answerFunctions, "chatRoute", "setChatRoute", "closeStudentChatStream", "resetLearningWorkspaces", "leaveTeacherPage", "openTeacherReview", "openTeacherReports", "openStudentFeedback", "openLearningNotification", ...names])].map(functionSource).join("\n"), context, { filename: appPath });
-  return { context, state, calls, intervals, frames, nodes, mediaListeners, reduceQuery };
+  vm.runInContext([...new Set([...answerFunctions, ...[...studentWriteFunctions, ...restrictedHintFunctions].filter((name) => !Object.prototype.hasOwnProperty.call(options.globals || {}, name)), "chatRoute", "setChatRoute", "closeStudentChatStream", "resetLearningWorkspaces", "leaveTeacherPage", "openTeacherReview", "openTeacherReports", "openTeacherInsights", "openStudentFeedback", "openLearningNotification", ...names])].map(functionSource).join("\n"), context, { filename: appPath });
+  return { context, state, calls, intervals, timeouts, frames, nodes, mediaListeners, reduceQuery };
 }
 
 const taskFunctions = ["taskFinished", "taskTitle", "updateStudentTask", "rememberStudentDraft", "startLeaseRenewal", "openLiveTask", "selectLiveTask"];
-const chatFunctions = ["closeChatResponse", "chatResponseById", "chatResponsePaused", "chatResponseStatus", "chatResponseControls", "actOnChatResponse", "updateChatResponse", "connectChatResponse", "renderStudentChatIfActive", "mergeChatMessages", "syncConversationHistory", "loadConversation", "loadConversationList", "loadOlderChatMessages", "refreshCompanionPolicy", "readConversation", "chatConversation", "renameStudentConversation"];
+const chatFunctions = ["hintDeliveryPending", "chatResponseActive", "chatResponseHidden", "projectChatResponse", "chatResponseTitle", "closeChatResponse", "chatResponseById", "chatResponsePaused", "chatResponseStatus", "chatResponseControls", "actOnChatResponse", "updateChatResponse", "connectChatResponse", "renderStudentChatIfActive", "mergeChatMessages", "syncConversationHistory", "loadConversation", "loadConversationList", "loadOlderChatMessages", "refreshCompanionPolicy", "readConversation", "chatConversation", "renameStudentConversation"];
 const chatSendFunctions = [...chatFunctions, "newChatRequest", "prepareChatMessage", "recordChatHelp", "sendStudentMessage", "sendContextChat"];
 
 function chatHarness(names = [], options = {}) {
@@ -161,6 +169,30 @@ function chatHarness(names = [], options = {}) {
     ...options,
     state: { studentPage: "chat", studentTab: "companion", activeConversationId: "chat-a", ...options.state },
   });
+}
+
+function restrictedHintHarness(options = {}) {
+  const current = task("hint-task", { status: "in_progress", questions: [
+    { id: "hint-q", version: 3, type: "single_choice", stem: "PRIVATE QUESTION STEM", options: ["PRIVATE ANSWER", "B"] },
+    { id: "other-q", version: 1, type: "judge", stem: "Other question" },
+  ] });
+  const requests = [];
+  const h = harness([...chatSendFunctions, "escapeHtml", "companionPolicyLabel", "newTaskChat", "submitPaper"], {
+    ...options,
+    state: { liveTask: current, liveTasks: [current], liveLease: lease(current.id), answers: [0, false], draftDirty: true, ...options.state },
+    api: {
+      state: { user: { id: "hint-student" } },
+      saveDraft: async (...args) => { requests.push(["save", ...plain(args)]); return { ...current, version: args[1] + 1, draft_answers: args[3] }; },
+      companionAnswerPolicy: async (scope) => { requests.push(["policy", scope.taskId, scope.questionVersionId]); return { allow_hint_content: true, allowed_hint_levels: [1, 2], allow_generation: false }; },
+      createConversation: async (...args) => { requests.push(["create", ...args]); return { id: "hint-conversation", course_id: current.course_id }; },
+      postMessage: async (...args) => { requests.push(["post", ...plain(args)]); return { message_id: "hint-message", response_id: "hint-response", status: "pending" }; },
+      helpEvent: () => assert.fail("restricted hint evidence must be recorded by the server"),
+      submitTask: () => assert.fail("hint request cannot submit a task"),
+      ...options.api,
+    },
+    globals: { studentHeading: () => "", studentIcon: () => "", ...options.globals },
+  });
+  return { ...h, requests };
 }
 
 function chatMessage(id, response = {}, overrides = {}) {
@@ -263,6 +295,42 @@ function bindQuestion(h, diagnostic = false) {
   return { markup, controls };
 }
 
+test("password masking switches the native field type without replacing the input or its value", () => {
+  const h = harness(["bind"]);
+  const input = controlNode({}, { type: "text", value: "synthetic-input-value" });
+  const classes = new Set();
+  const bar = {
+    querySelector: (selector) => selector === "input" ? input : null,
+    classList: {
+      contains: (name) => classes.has(name),
+      toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name),
+    },
+  };
+  const eye = controlNode({}, { closest: (selector) => selector === ".passbar" ? bar : null });
+  h.nodes.set('[data-action="toggle-peek"]', [eye]);
+  h.context.bind();
+
+  eye.fire("click");
+  assert.equal(input.type, "password");
+  assert.equal(classes.has("masked"), true);
+  assert.equal(eye.getAttribute("aria-label"), "显示口令");
+  assert.equal(eye.getAttribute("aria-pressed"), "true");
+  assert.equal(input.value, "synthetic-input-value");
+
+  eye.fire("click");
+  assert.equal(input.type, "text");
+  assert.equal(classes.has("masked"), false);
+  assert.equal(eye.getAttribute("aria-label"), "隐藏口令");
+  assert.equal(eye.getAttribute("aria-pressed"), "false");
+  assert.equal(input.value, "synthetic-input-value");
+  assert.equal(h.calls.filter(([name]) => name === "render").length, 0);
+
+  input.disabled = true;
+  eye.fire("click");
+  assert.equal(input.type, "text");
+  assert.equal(classes.has("masked"), false);
+});
+
 test("first multiple-choice option (numeric 0) is saved before submit with the server's saved version", async () => {
   const current = task("zero");
   const saved = deferred();
@@ -285,7 +353,7 @@ test("first multiple-choice option (numeric 0) is saved before submit with the s
   assert.equal(requests[1][1], "zero");
   assert.equal(requests[1][2], 9, "submit must use the returned version, not the initial task version");
   assert.equal(h.state.studentPage, "workspace", "show the result only after the server accepts submit");
-  submitted.resolve({ attempt_id: "attempt-1" });
+  submitted.resolve({ ...current, version: 10, status: "submitted", attempts: [{ id: "attempt-1" }] });
   await settle();
   assert.equal(h.state.submitted, true);
   assert.equal(h.state.studentPage, "result");
@@ -356,7 +424,7 @@ test("judge false, first option zero, multiple selections and filled blanks surv
       state: { liveTask: current, liveTasks: [current], liveLease: lease(current.id), answers, draftDirty: true },
       api: {
         saveDraft: async (...args) => { requests.push(["save", ...args]); return { version: 14 }; },
-        submitTask: async (...args) => { requests.push(["submit", ...args]); },
+        submitTask: async (...args) => { requests.push(["submit", ...args]); return { ...current, status: "grading", version: 15 }; },
       },
     });
     await h.context[operation]();
@@ -413,8 +481,8 @@ test("saving omits blank and incomplete answers without stripping zero, false or
   const h = harness([...taskFunctions, "saveLiveDraft"], {
     state: { liveTask: current, liveTasks: [current], liveLease: lease(current.id), answers: [false, 0, [0, 2], [], " \n ", null, ["0", ""], ["0", "x+1"]] },
     api: {
-      saveDraft: async (id, version, token, answers) => { payload = answers; return { version: 6 }; },
-      task: async () => ({ ...current, version: 6, draft_answers: plain(payload) }),
+      saveDraft: async (id, version, token, answers) => { payload = answers; return { version: version + 1 }; },
+      task: async () => ({ ...current, version: h.state.liveTask.version, draft_answers: plain(payload) }),
     },
   });
   await h.context.saveLiveDraft();
@@ -611,7 +679,7 @@ test("fill and textarea input bindings preserve focus by updating only values an
     else {
       assert.equal(title.textContent, "1 / 2 题");
       assert.equal(bar.style.width, "50%");
-      assert.equal(status.textContent, "有未保存的作答");
+      assert.match(status.textContent, /未保存的作答/);
     }
     fields[1].value = " \n ";
     fields[1].fire("input");
@@ -856,7 +924,12 @@ test("selecting a task opens that ID and preserves local dirty drafts when switc
     state: { studentPage: "home", liveTask: a, liveTasks: [a, b] },
     api: {
       task: async (id) => { requests.push(["read", id]); return plain(id === "alpha" ? a : b); },
-      acquireLease: async (id) => { requests.push(["lease", id]); return lease(id); },
+      acquireLease: async (id) => {
+        requests.push(["lease", id]);
+        const selected = id === "alpha" ? a : b;
+        selected.version += 1;
+        return { ...lease(id), task_version: selected.version };
+      },
     },
   });
   await h.context.selectLiveTask("beta");
@@ -994,7 +1067,7 @@ test("retry uses the current task version, clears only that task's draft and pre
     api: {
       retryTask: async (...args) => { requests.push(args); return reopened; },
       task: async () => plain(reopened),
-      acquireLease: async (id) => lease(id),
+      acquireLease: async (id) => ({ ...lease(id), task_version: reopened.version }),
     },
   });
   await h.context.retryLiveTask();
@@ -2411,6 +2484,616 @@ test("teacher authorization refresh clears module records and shared selection w
   const h = harness(["loadTeacher"], { state: { role: "teacher", classId: "old", courseId: "old", reviewSelection: { goalId: "private" } }, api: { teacherClasses: async () => [] } });
   await h.context.loadTeacher(); assert.equal(h.state.reviewSelection, null); assert.equal(h.state.classId, null);
   for (const module of ["teacherReview", "teacherReportWorkspace", "studentFeedback", "learningNotifications"]) assert.ok(h.calls.some(([name]) => name === `${module}.reset`));
+});
+
+test("diagnostic unknown choice and every answer control are mutually exclusive and remain memory-only", () => {
+  const questions = [
+    { id: "choice", type: "single_choice", options: ["A", "B"] },
+    { id: "text", type: "text" },
+  ];
+  const current = task("diagnostic-memory", { diagnostic_required: true });
+  const h = harness(["bind", "questionChoices", "escapeHtml", "diagnosticPage"], {
+    state: { liveTask: current, studentPage: "diagnostic", diagnostic: { id: "diagnostic", task_id: current.id, questions }, diagnosticAnswers: [0, "attempt"] },
+    globals: { studentHeading: (title, text) => text },
+    window: { sessionStorage: { setItem: () => assert.fail("diagnostic input persisted") } },
+    api: { saveDraft: () => assert.fail("diagnostic used formal draft API") },
+  });
+  const unknown = controlNode({ diagnosticUnknown: "" });
+  h.nodes.set("[data-diagnostic-unknown]", [unknown]);
+  bindQuestion(h, true);
+  unknown.fire("click");
+  assert.deepEqual(plain(h.state.diagnosticUnknown), ["choice"]);
+  assert.equal(h.state.diagnosticAnswers[0], "");
+  bindQuestion(h, true).controls.find((node) => node.dataset.diagnosticChoose === "0").fire("click");
+  assert.deepEqual(plain(h.state.diagnosticUnknown), []);
+  assert.equal(h.state.diagnosticAnswers[0], 0);
+  h.state.currentQ = 1;
+  bindQuestion(h, true);
+  unknown.fire("click");
+  assert.equal(h.state.diagnosticAnswers[1], "");
+  const input = bindQuestion(h, true).controls[0];
+  input.value = "my own attempt";
+  input.fire("input");
+  assert.deepEqual(plain(h.state.diagnosticUnknown), []);
+  assert.equal(h.state.diagnosticDrafts[current.id].answers[1], "my own attempt");
+  assert.equal(h.state.draftDirty, false);
+  assert.equal(h.timeouts.size, 0);
+  assert.match(h.context.diagnosticPage(), /短诊不计入任务成绩/);
+  assert.match(h.context.diagnosticPage(), /仅保留在本页内存，尚未保存到服务器/);
+});
+
+test("diagnostic rejects foreign or overlapping unknown IDs and retries the original complete submission", async () => {
+  const questions = [{ id: "a", type: "judge" }, { id: "b", type: "judge" }];
+  const current = task("diagnostic-unknown", { diagnostic_required: true });
+  const requests = [];
+  const h = harness(["submitLiveDiagnostic"], {
+    state: { liveTask: current, diagnostic: { id: "diagnostic", questions }, diagnosticAnswers: [false, ""], diagnosticUnknown: ["foreign"] },
+    api: {
+      submitDiagnostic: async (...args) => { requests.push(plain(args)); if (requests.length === 1) throw new Error("response lost"); return {}; },
+      task: async () => ({ ...current, diagnostic_required: false }),
+    },
+  });
+  await h.context.submitLiveDiagnostic();
+  assert.equal(requests.length, 0);
+  h.state.diagnosticUnknown = ["a", "b"];
+  await h.context.submitLiveDiagnostic();
+  assert.equal(requests.length, 0, "an answer and unknown marker cannot overlap");
+  h.state.diagnosticUnknown = ["b"];
+  await h.context.submitLiveDiagnostic();
+  assert.deepEqual(requests[0][1], { a: false });
+  assert.deepEqual(requests[0][3], ["b"]);
+  assert.equal(h.context.studentAnswerLocked(true), true);
+  assert.equal(h.context.leaveStudentWork(), false);
+  await h.context.submitLiveDiagnostic();
+  assert.deepEqual(requests[1], requests[0]);
+  assert.equal(h.state.diagnostic, null);
+  assert.equal(h.state.diagnosticCommand, null);
+  assert.equal(h.state.liveTask.diagnostic_required, false);
+});
+
+test("API diagnostic submission carries explicit unknown IDs separately from answers", async () => {
+  const requests = [];
+  const api = apiHarness(async (...args) => { requests.push(args); return response(200, {}); });
+  await api.submitDiagnostic("check / one", { a: false }, "diagnostic-id", ["b"]);
+  assert.equal(requests[0][0], "/api/v1/diagnostics/check%20%2F%20one/submit");
+  assert.deepEqual(JSON.parse(requests[0][1].body), { request_id: "diagnostic-id", answers: { a: false }, unknown_question_ids: ["b"] });
+});
+
+test("autosave is bounded and serial while a late receipt preserves newer input without rerendering", async () => {
+  const current = task("save-race"), first = deferred(), second = deferred(), requests = [];
+  const h = harness(["rememberStudentDraft"], {
+    state: { liveTask: current, liveTasks: [current], liveLease: lease(current.id), answers: [0] },
+    api: { saveDraft: (...args) => { requests.push(plain(args)); return requests.length === 1 ? first.promise : second.promise; } },
+  });
+  h.context.rememberStudentDraft();
+  const maxTimer = h.state.studentWrites[current.id].maxTimer;
+  for (let index = 0; index < 20; index += 1) h.context.rememberStudentDraft();
+  assert.equal(h.timeouts.size, 2);
+  assert.equal(h.state.studentWrites[current.id].maxTimer, maxTimer);
+  assert.equal(h.timeouts.get(maxTimer).delay, 4000);
+  const firstSave = h.context.saveLiveDraft({ automatic: true });
+  assert.equal(h.state.loading, false);
+  assert.equal(h.timeouts.size, 0);
+  h.state.answers[0] = 1;
+  h.context.rememberStudentDraft();
+  const joined = h.context.saveLiveDraft({ automatic: true });
+  assert.equal(requests.length, 1);
+  first.resolve({ ...current, version: 4, status: "in_progress", draft_answers: { "save-race-q": 0 } });
+  assert.equal(await firstSave, false);
+  assert.equal(await joined, false);
+  assert.deepEqual(plain(h.state.answers), [1]);
+  assert.equal(h.state.draftDirty, true);
+  assert.deepEqual(plain(h.state.studentDrafts[current.id].answers), [1]);
+  const timer = h.timeouts.get(h.state.studentWrites[current.id].timer);
+  assert.equal(timer.delay, 700);
+  timer.callback();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1][1], 4);
+  assert.deepEqual(requests[1][3], { "save-race-q": 1 });
+  assert.notEqual(requests[1][4], requests[0][4]);
+  second.resolve({ ...current, version: 5, status: "in_progress", draft_answers: { "save-race-q": 1 } });
+  await settle();
+  assert.equal(h.state.draftDirty, false);
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.calls.some(([name]) => name === "render"), false);
+});
+
+test("an uncertain draft retries identical payload and ID at most three times before manual recovery", async () => {
+  const current = task("save-unknown"), requests = [];
+  const h = harness(["rememberStudentDraft"], {
+    state: { liveTask: current, liveTasks: [current], liveLease: lease(current.id), answers: [0] },
+    api: { saveDraft: async (...args) => {
+      requests.push(plain(args));
+      if (requests.length <= 3) throw new Error("network unavailable");
+      return { ...current, version: 4, status: "in_progress", draft_answers: { "save-unknown-q": 0 } };
+    } },
+  });
+  h.context.rememberStudentDraft();
+  assert.equal(await h.context.saveLiveDraft({ automatic: true }), false);
+  h.state.answers[0] = 1;
+  h.context.rememberStudentDraft();
+  for (let index = 0; index < 2; index += 1) {
+    h.timeouts.get(h.state.studentWrites[current.id].timer).callback();
+    await settle();
+  }
+  assert.equal(requests.length, 3);
+  assert.deepEqual(requests[1], requests[0]);
+  assert.deepEqual(requests[2], requests[0]);
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.context.leaveStudentWork(), false);
+  assert.equal(await h.context.saveLiveDraft(), false, "confirmation of the old snapshot does not confirm newer input");
+  assert.deepEqual(requests[3], requests[0]);
+  assert.equal(h.state.studentWrites[current.id].pending, null);
+  assert.deepEqual(plain(h.state.answers), [1]);
+  assert.equal(h.state.draftDirty, true);
+});
+
+test("submit waits for saved input and explicit confirmation, then replays an unknown submit without a new save", async () => {
+  const current = task("submit-unknown"), gate = deferred(), saves = [], submissions = [];
+  let confirmations = 0;
+  const h = harness(["submitPaper"], {
+    state: { liveTask: current, liveTasks: [current], liveLease: lease(current.id), answers: [0], draftDirty: true },
+    window: { confirm: () => { confirmations += 1; assert.equal(h.state.draftDirty, false); return true; } },
+    api: {
+      saveDraft: (...args) => { saves.push(plain(args)); return gate.promise; },
+      submitTask: async (...args) => {
+        submissions.push(plain(args));
+        if (submissions.length === 1) throw new Error("response lost");
+        return { ...current, version: 5, status: "grading", attempts: [{ id: "attempt" }] };
+      },
+    },
+  });
+  const submitting = h.context.submitPaper();
+  assert.equal(confirmations, 0);
+  assert.equal(submissions.length, 0);
+  gate.resolve({ ...current, version: 4, status: "in_progress", draft_answers: { "submit-unknown-q": 0 } });
+  assert.equal(await submitting, false);
+  assert.equal(confirmations, 1);
+  assert.equal(h.context.studentAnswerLocked(), true);
+  assert.equal(await h.context.saveLiveDraft(), false);
+  assert.equal(h.context.leaveStudentWork({ logout: true }), false);
+  assert.equal(await h.context.submitPaper(), true);
+  assert.deepEqual(submissions[1], submissions[0]);
+  assert.equal(submissions[1][1], 4);
+  assert.equal(saves.length, 1);
+  assert.equal(confirmations, 1);
+  assert.equal(h.state.studentWrites[current.id].submit, null);
+  assert.equal(h.state.studentPage, "result");
+});
+
+test("declining submission confirmation keeps the confirmed draft editable without sending submit", async () => {
+  const current = task("submit-declined");
+  const h = harness(["submitPaper"], {
+    state: { liveTask: current, liveLease: lease(current.id), answers: [0], draftDirty: true },
+    window: { confirm: () => false },
+    api: { saveDraft: async () => ({ version: 4 }), submitTask: () => assert.fail("submission was declined") },
+  });
+  assert.equal(await h.context.submitPaper(), false);
+  assert.equal(h.state.draftDirty, false);
+  assert.equal(h.state.studentSubmitBusy, false);
+  assert.equal(h.context.studentAnswerLocked(), false);
+  assert.equal(h.state.studentPage, "workspace");
+});
+
+test("CAS and lease rejection retain local answers and stop automatic writes until explicit recovery", async () => {
+  for (const code of ["version_conflict", "lease_lost"]) {
+    const current = task(code);
+    let saves = 0;
+    const h = harness(["rememberStudentDraft"], {
+      state: { liveTask: current, liveLease: lease(current.id), answers: [0] },
+      api: { saveDraft: async () => { saves += 1; throw Object.assign(new Error(code), { status: 409, code }); },
+        acquireLease: () => assert.fail("conflict automatically took over") },
+    });
+    h.context.rememberStudentDraft();
+    h.context.startLeaseRenewal(current.id, h.state.transitionId);
+    assert.equal(await h.context.saveLiveDraft(), false);
+    assert.equal(h.state.studentWrites[current.id].pending, null);
+    assert.equal(h.state.studentWrites[current.id].blocked, code);
+    assert.equal(h.state.liveLease, null);
+    assert.equal(h.timeouts.size, 0);
+    assert.equal(h.intervals.size, 0);
+    assert.deepEqual(plain(h.state.answers), [0]);
+    assert.deepEqual(plain(h.state.studentDrafts[current.id].answers), [0]);
+    assert.equal(await h.context.saveLiveDraft(), false);
+    assert.equal(saves, 1);
+  }
+});
+
+test("IME postpones autosave and page suspension plus reset cancel save and lease timers", () => {
+  const current = task("ime", { questions: [{ id: "text", type: "text" }] });
+  const h = harness(["bind", "questionChoices", "escapeHtml", "rememberStudentDraft"], {
+    state: { liveTask: current, liveLease: lease(current.id), answers: [""] },
+    api: { saveDraft: () => assert.fail("saved during composition") },
+  });
+  const input = bindQuestion(h).controls[0];
+  input.fire("compositionstart");
+  input.value = "半";
+  input.fire("input", { isComposing: true });
+  assert.equal(h.state.studentComposing, true);
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.context.leaveStudentWork(), false);
+  input.value = "完整输入";
+  input.fire("compositionend");
+  assert.equal(h.state.studentComposing, false);
+  assert.deepEqual(plain(h.state.answers), ["完整输入"]);
+  assert.equal(h.timeouts.size, 2);
+  h.context.startLeaseRenewal(current.id, h.state.transitionId);
+  assert.equal(h.intervals.size, 1);
+  let prevented = 0;
+  const unload = { preventDefault: () => { prevented += 1; } };
+  h.context.beforeStudentUnload(unload);
+  assert.equal(prevented, 1);
+  assert.equal(unload.returnValue, "");
+  h.context.suspendStudentWork();
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.intervals.size, 0);
+  assert.deepEqual(plain(h.state.answers), ["完整输入"]);
+  h.context.resetStudentWrites();
+  assert.deepEqual(plain(h.state.studentWrites), {});
+  assert.deepEqual(plain(h.state.studentDrafts), {});
+  assert.equal(Boolean(h.context.studentWorkPending()), false);
+});
+
+test("late draft and lease receipts cannot update another identity or restart a cleared timer", async () => {
+  const current = task("identity"), saving = deferred(), renewing = deferred();
+  const h = harness(["rememberStudentDraft"], {
+    state: { liveTask: current, liveLease: lease(current.id), answers: [0] },
+    api: { state: { user: { id: "first" } }, saveDraft: () => saving.promise, renewLease: () => renewing.promise },
+  });
+  h.context.rememberStudentDraft();
+  h.context.startLeaseRenewal(current.id, h.state.transitionId);
+  const renewal = [...h.intervals.values()][0]();
+  const save = h.context.saveLiveDraft();
+  h.context.api.state.user = { id: "second" };
+  h.context.stopStudentEditing();
+  saving.resolve({ version: 4 });
+  renewing.resolve({ lease_until: 9999999999 });
+  assert.equal(await save, false);
+  await renewal;
+  assert.equal(h.state.liveTask.version, 3);
+  assert.notEqual(h.state.liveLease.lease_until, 9999999999);
+  assert.equal(h.state.draftDirty, true);
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.intervals.size, 0);
+  const apiGate = deferred();
+  const api = apiHarness(() => apiGate.promise);
+  api.state.user = { id: "old" };
+  const logout = api.logout();
+  api.state.user = { id: "new" };
+  apiGate.resolve(response(204));
+  await logout;
+  assert.equal(api.state.user.id, "new");
+});
+
+test("restricted hint levels wait for the acknowledged current attempt and send only fixed scoped requests", async () => {
+  for (const level of [1, 2]) {
+    const gate = deferred(), saves = [];
+    const h = restrictedHintHarness({ api: { saveDraft: (...args) => { saves.push(plain(args)); return gate.promise; } } });
+    const pending = h.context.requestRestrictedHint(level);
+    assert.equal(saves.length, 1);
+    assert.equal(h.requests.length, 0, "policy, conversation and message wait for draft acknowledgement");
+    assert.equal(h.context.studentAnswerLocked(), true);
+    gate.resolve({ ...h.state.liveTask, version: 4, draft_answers: { "hint-q": 0, "other-q": false } });
+    assert.equal(await pending, true);
+    assert.deepEqual(h.requests.map(([kind]) => kind), ["policy", "create", "post"]);
+    const post = h.requests.find(([kind]) => kind === "post");
+    assert.equal(post[1], "hint-conversation");
+    assert.equal(post[2], level === 1 ? "请提供本题的一级知识提示。" : "请提供本题的二级下一步方向。");
+    assert.deepEqual(post[3], { taskId: "hint-task", questionVersionId: "hint-q:3", requestId: post[3].requestId, intent: "hint", hintLevel: level });
+    assert.match(post[3].requestId, /^hint-/);
+    assert.doesNotMatch(JSON.stringify(post), /PRIVATE QUESTION STEM|PRIVATE ANSWER/);
+    assert.equal(h.state.chatMessages[0].response.hint_level, level);
+    assert.equal(h.state.chatContext.pending, null);
+    assert.equal(h.state.hintPreparing, null);
+    assert.equal(h.state.chatSending, false);
+    assert.doesNotMatch(h.context.chatConversation(), /data-chat-input/);
+    h.state.chatDraft = "arbitrary question";
+    await h.context.sendStudentMessage();
+    assert.equal(h.requests.filter(([kind]) => kind === "post").length, 1);
+  }
+});
+
+test("restricted hints reject diagnostic, missing attempts, composing and unresolved submissions before any write", async () => {
+  for (const blocked of ["diagnostic", "diagnostic-page", "missing", "empty", "composition", "chat-composition", "submit", "submitting", "closed", "lease-lost"]) {
+    const h = restrictedHintHarness();
+    if (blocked === "diagnostic") h.state.liveTask.diagnostic_required = true;
+    if (blocked === "diagnostic-page") h.state.studentPage = "diagnostic";
+    if (blocked === "missing") h.state.answers[0] = "   ";
+    if (blocked === "empty") h.state.answers[0] = [];
+    if (blocked === "composition") h.state.studentComposing = true;
+    if (blocked === "chat-composition") h.context.chatComposing = true;
+    if (blocked === "submit") h.context.studentWrite().submit = { requestId: "unresolved-submit" };
+    if (blocked === "submitting") h.state.studentSubmitBusy = true;
+    if (blocked === "closed") h.state.liveTask.submission_closed = true;
+    if (blocked === "lease-lost") h.state.banner = "takeover";
+    assert.equal(await h.context.requestRestrictedHint(1), false, blocked);
+    assert.equal(h.requests.length, 0, blocked);
+  }
+  const h = restrictedHintHarness({ globals: { saveLiveDraft: async () => false } });
+  assert.equal(await h.context.requestRestrictedHint(1), false);
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.state.chatContext, null);
+  const denied = restrictedHintHarness({ api: { companionAnswerPolicy: async () => ({ allow_hint_content: false, allowed_hint_levels: [] }) } });
+  await denied.context.requestRestrictedHint(1);
+  assert.equal(denied.requests.some(([kind]) => kind === "post" || kind === "create"), false);
+});
+
+test("restricted hint saving rechecks actor, question, task and navigation before opening or sending", async () => {
+  for (const change of ["actor", "task", "question", "transition", "logout", "navigation", "composition"]) {
+    const gate = deferred();
+    const h = restrictedHintHarness({ globals: { saveLiveDraft: () => gate.promise } });
+    const pending = h.context.requestRestrictedHint(2);
+    if (change === "actor") h.context.api.state.user = { id: "another-student" };
+    if (change === "task") h.state.liveTask = task("other");
+    if (change === "question") h.state.currentQ = 1;
+    if (change === "transition") h.state.transitionId += 1;
+    if (change === "logout") h.state.loggingOut = true;
+    if (change === "navigation") h.state.studentTab = "records";
+    if (change === "composition") h.state.studentComposing = true;
+    gate.resolve(true);
+    assert.equal(await pending, false, change);
+    assert.equal(h.requests.length, 0, change);
+    assert.equal(h.state.chatContext, null, change);
+  }
+});
+
+test("unknown restricted hint sends retain the exact level text and request and reuse the created conversation", async () => {
+  const posts = [];
+  const h = restrictedHintHarness({ api: { postMessage: async (...args) => {
+    posts.push(plain(args));
+    if (posts.length === 1) throw new Error("receipt lost");
+    return { message_id: "hint-message", response_id: "hint-response", status: "pending" };
+  } } });
+  await h.context.requestRestrictedHint(1);
+  const pending = h.state.chatContext.pending;
+  assert.equal(Object.isFrozen(pending), true);
+  assert.equal(h.context.studentAnswerLocked(), true);
+  assert.equal(await h.context.submitPaper(), false);
+  assert.equal(await h.context.requestRestrictedHint(2), false);
+  h.state.chatDraft = "replace with arbitrary question";
+  assert.equal(posts.length, 1);
+  const controls = h.context.restrictedHintControls();
+  assert.match(controls, /data-hint-level="1" >重试原提示/);
+  assert.match(controls, /data-hint-level="2" disabled/);
+  assert.equal(await h.context.requestRestrictedHint(1), true);
+  assert.deepEqual(posts[1], posts[0]);
+  assert.equal(h.requests.filter(([kind]) => kind === "create").length, 1);
+  assert.equal(h.requests.filter(([kind]) => kind === "save").length, 2, "retry also confirms saved input through the shared writer");
+  assert.equal(h.context.pendingRestrictedHint(), null);
+  assert.equal(h.context.studentAnswerLocked(), false);
+});
+
+test("late restricted hint POST receipts do not reopen another task, conversation or identity", async () => {
+  for (const change of ["task", "question", "actor", "transition", "logout", "navigation"]) {
+    const gate = deferred();
+    const h = restrictedHintHarness({ api: { postMessage: () => gate.promise } });
+    const pending = h.context.requestRestrictedHint(1);
+    await settle();
+    const original = h.state.chatContext;
+    assert.equal(original.hintSent, true);
+    if (change === "task") h.state.liveTask = task("different-task");
+    if (change === "question") h.state.currentQ = 1;
+    if (change === "actor") h.context.api.state.user = { id: "next-student" };
+    if (change === "transition") h.state.transitionId += 1;
+    if (change === "logout") { h.state.loggingOut = true; h.context.resetStudentWrites(); h.context.closeStudentChatStream(); }
+    if (change === "navigation") { h.context.closeStudentChatStream(); h.state.chatContext = null; h.state.studentTab = "records"; }
+    const renders = h.calls.filter(([kind]) => kind === "render").length;
+    gate.resolve({ message_id: "late-message", response_id: "late-response", status: "pending" });
+    await pending;
+    assert.equal(h.state.activeConversationId, null, change);
+    assert.equal(h.state.chatMessages.length, 0, change);
+    assert.equal(original.pending?.requestId.startsWith("hint-"), true, change);
+    assert.equal(h.calls.filter(([kind]) => kind === "render").length, renders, change);
+  }
+});
+
+test("hint history restores level metadata and reconnects completed responses still awaiting delivery", async () => {
+  const streams = [], message = chatMessage("hint-history", {
+    intent: "hint", hint_level: 2, task_id: "hint-task", question_version_id: "hint-q:3",
+    status: "completed", text: "not yet delivered", last_event_id: 7, redacted: true,
+    job: { status: "running" }, hint_metadata: { status: "validated" },
+  });
+  const h = restrictedHintHarness({ api: {
+    conversationMessages: async () => [message],
+    getConversation: async () => ({ id: "history-chat", course_id: "course-1" }),
+    openResponseStream: (id, handlers, options) => { streams.push({ id, handlers, options }); return () => {}; },
+  } });
+  await h.context.loadConversation("history-chat");
+  assert.equal(h.state.chatContext.intent, "hint");
+  assert.equal(h.state.chatContext.hintLevel, 2);
+  assert.equal(h.state.chatMessages[0].response.text, "");
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0].options.after, 7);
+  assert.match(h.context.chatConversation(), /二级 · 下一步方向/);
+  assert.doesNotMatch(h.context.chatConversation(), /not yet delivered|data-chat-input/);
+  streams[0].handlers.snapshot({ ...message.response, redacted: false, text: "fixed template", job: { status: "succeeded" }, hint_metadata: { status: "validated_delivered", evidence_id: "evidence" } }, { id: 7 });
+  assert.equal(h.state.chatMessages[0].response.text, "fixed template");
+  assert.equal(h.state.chatMessages[0].response.hint_metadata.evidence_id, "evidence");
+  assert.match(h.context.chatConversation(), /固定模板提示 · 已确认交付/);
+});
+
+test("hint projection clears previously visible text for redaction, revocation, cost and unfinished jobs", () => {
+  const visible = { intent: "hint", hint_level: 1, status: "completed", text: "PRIVATE HINT", content: "PRIVATE HINT",
+    hint_metadata: { status: "validated_delivered", evidence_id: "evidence" }, job: { status: "succeeded" } };
+  for (const patch of [
+    { redacted: true }, { status: "revoked" }, { status: "cancelled" }, { status: "failed" },
+    { job: { status: "running" } }, { job: { status: "retry_wait" } },
+    { job: { status: "failed" } }, { job: { status: "cancelled" } },
+    { job: { status: "succeeded", cost_pending: true } },
+    { job: { status: "awaiting_confirmation" } }, { job: { status: "reconciling", reconciliation_required: true } },
+    { job: { status: "running", cancel_requested: true } },
+  ]) {
+    const h = restrictedHintHarness({ state: { chatMessages: [chatMessage("visible", visible)] } });
+    h.context.updateChatResponse("response-visible", patch);
+    const projected = h.state.chatMessages[0].response;
+    assert.equal(projected.text, "");
+    assert.equal(projected.content, "");
+    assert.equal(projected.hint_metadata, null);
+    assert.doesNotMatch(h.context.chatConversation(), /PRIVATE HINT/);
+    assert.doesNotMatch(h.context.chatResponseStatus(projected), /已确认交付/);
+    h.context.mergeChatMessages([chatMessage("visible", { ...visible, ...patch })]);
+    assert.equal(h.state.chatMessages[0].response.text, "");
+  }
+  const h = restrictedHintHarness();
+  assert.match(h.context.chatResponseStatus({ ...visible, content_type: "safe_guidance", hint_metadata: { status: "fallback" } }), /安全引导/);
+  assert.match(h.context.chatResponseStatus({ ...visible, job: { status: "running" } }), /确认交付/);
+});
+
+test("hint cancellation and paid recovery require confirmation and keep using the original job", async () => {
+  const requests = [], original = { intent: "hint", hint_level: 1, status: "pending", job_id: "original-job", job: { status: "queued" } };
+  let confirmed = false, snapshot = { ...original, response_id: "response-action", status: "cancelled", text: "", job: { status: "cancelled" } };
+  const h = restrictedHintHarness({ state: { activeConversationId: "hint-chat", studentTab: "companion", studentPage: "chat", chatMessages: [chatMessage("action", original)] },
+    window: { confirm: () => confirmed },
+    api: { cancelCompanionJob: async (id) => requests.push(["cancel", id]), resumeCompanionJob: async (id) => requests.push(["resume", id]), getResponse: async () => snapshot } });
+  await h.context.actOnChatResponse("response-action", "cancel-chat-response");
+  assert.equal(requests.length, 0);
+  confirmed = true;
+  await h.context.actOnChatResponse("response-action", "cancel-chat-response");
+  assert.deepEqual(requests, [["cancel", "original-job"]]);
+  h.context.updateChatResponse("response-action", { ...original, job: { status: "awaiting_confirmation", cost_pending: true } });
+  await h.context.actOnChatResponse("response-action", "resume-chat-response");
+  assert.equal(requests.length, 1);
+  h.context.updateChatResponse("response-action", { job: { status: "awaiting_confirmation", cost_pending: false } });
+  confirmed = false;
+  await h.context.actOnChatResponse("response-action", "resume-chat-response");
+  assert.equal(requests.length, 1);
+  confirmed = true;
+  snapshot = { ...original, response_id: "response-action", text: "" };
+  await h.context.actOnChatResponse("response-action", "resume-chat-response");
+  assert.deepEqual(requests, [["cancel", "original-job"], ["resume", "original-job"]]);
+});
+
+test("failed hint delivery can resume only the original recoverable response after confirmation and settlement", async () => {
+  for (const status of ["streaming", "completed"]) {
+    const requests = [], original = { intent: "hint", hint_level: 1, status, text: "UNCONFIRMED HINT",
+      job_id: "original-job", job: { status: "failed" } };
+    let confirmed = false;
+    const h = restrictedHintHarness({
+      state: { activeConversationId: "hint-chat", studentTab: "companion", studentPage: "chat", chatMessages: [chatMessage("recoverable", original)] },
+      window: { confirm: () => confirmed },
+      api: {
+        resumeCompanionJob: async (id) => requests.push(["resume", id]),
+        getResponse: async (id) => { requests.push(["read", id]); return { ...original, response_id: id, text: "", job: { status: "awaiting_confirmation" } }; },
+        postMessage: () => assert.fail("recovery cannot create another hint"),
+      },
+    });
+    const current = () => h.state.chatMessages[0].response;
+    h.context.updateChatResponse("response-recoverable", original);
+    assert.equal(current().text, "");
+    assert.equal(h.context.chatResponsePaused(current()), true);
+    assert.match(h.context.chatResponseControls(current()), /确认恢复（可能产生费用）/);
+    await h.context.actOnChatResponse("response-recoverable", "resume-chat-response");
+    assert.equal(requests.length, 0, "recovery needs explicit confirmation");
+    confirmed = true;
+    for (const flag of ["cost_pending", "reconciliation_required", "cancel_requested"]) {
+      h.context.updateChatResponse("response-recoverable", { ...original, job: { status: "failed", [flag]: true } });
+      assert.doesNotMatch(h.context.chatResponseControls(current()), /确认恢复/);
+      await h.context.actOnChatResponse("response-recoverable", "resume-chat-response");
+      assert.equal(requests.length, 0, flag);
+    }
+    for (const terminal of ["failed", "cancelled", "revoked"]) {
+      h.context.updateChatResponse("response-recoverable", { ...original, status: terminal });
+      assert.doesNotMatch(h.context.chatResponseControls(current()), /确认恢复/);
+      await h.context.actOnChatResponse("response-recoverable", "resume-chat-response");
+      assert.equal(requests.length, 0, terminal);
+    }
+    h.context.updateChatResponse("response-recoverable", original);
+    await h.context.actOnChatResponse("response-recoverable", "resume-chat-response");
+    assert.deepEqual(requests, [["resume", "original-job"], ["read", "response-recoverable"]]);
+  }
+});
+
+test("API restricted hint messages retain explicit intent and level without adding them to free chat", async () => {
+  const requests = [], api = apiHarness(async (...args) => { requests.push(args); return response(202, {}); });
+  await api.postMessage("chat / hint", "fixed text", { taskId: "task", questionVersionId: "q:3", requestId: "stable-id", intent: "hint", hintLevel: 2 });
+  await api.postMessage("chat / hint", "ordinary", { requestId: "chat-id" });
+  assert.equal(requests[0][0], "/api/v1/companion/conversations/chat%20%2F%20hint/messages");
+  assert.deepEqual(JSON.parse(requests[0][1].body), { text: "fixed text", request_id: "stable-id", task_id: "task", question_version_id: "q:3", intent: "hint", hint_level: 2 });
+  assert.deepEqual(JSON.parse(requests[1][1].body), { text: "ordinary", request_id: "chat-id" });
+});
+
+test("insight notification authorization failures preserve current teacher input and selection", async () => {
+  for (const failure of ["read", "wrong-id", "incomplete", "classes", "revoked"]) {
+    const gate = deferred(), insight = { id: "insight/1", origin_goal_id: "goal-2", class_id: "class-2", course_id: "course-2" };
+    const h = harness(["selectTeacherClass"], { state: { role: "teacher", teacherView: "reports", courseId: "course-1", classId: "class-1", reviewSelection: { goalId: "original" } },
+      api: { state: { user: { id: "teacher" } }, call: (method, url) => { assert.equal(method, "GET"); assert.equal(url, "/teaching-insights/insight%2F1"); return gate.promise; },
+        teacherClasses: async () => { if (failure === "classes") throw new Error("classes unavailable"); return failure === "revoked" ? [] : [{ course: { id: "course-2" }, classes: [{ id: "class-2" }] }]; } } });
+    let input = "unsent report";
+    h.context.teacherReportWorkspace.leave = () => { input = ""; return true; };
+    const pending = h.context.openLearningNotification({ payload: { insight_id: "insight/1" } });
+    assert.equal(input, "unsent report");
+    if (failure === "read") gate.reject(new Error("unavailable"));
+    else gate.resolve({ ...insight, ...(failure === "wrong-id" ? { id: "other" } : failure === "incomplete" ? { origin_goal_id: null } : {}) });
+    assert.equal(await pending, false);
+    assert.equal(input, "unsent report", failure);
+    assert.equal(h.state.teacherView, "reports");
+    assert.deepEqual(plain(h.state.reviewSelection), { goalId: "original" });
+    assert.equal(h.calls.some(([kind]) => kind === "teacherInsightsWorkspace.openSelection"), false);
+  }
+});
+
+test("insight notifications authorize before leaving, switch exact class and mark only successful opens", async () => {
+  for (const canLeave of [false, true]) {
+    for (const opened of [false, true]) {
+      const gate = deferred(), insight = { id: "insight", origin_goal_id: "authorized-goal", class_id: "class-2", course_id: "course-2" };
+      const h = harness(["selectTeacherClass"], { state: { role: "teacher", teacherView: "review", courseId: "course-1", classId: "class-1" },
+        api: { state: { user: { id: "teacher" } }, call: async () => insight, teacherClasses: () => gate.promise } });
+      let leaves = 0, selection;
+      h.context.teacherReview.leave = () => { leaves += 1; return canLeave; };
+      h.context.teacherInsightsWorkspace.openSelection = async (value) => { selection = plain(value); return opened; };
+      const pending = h.context.openLearningNotification({ payload: { insight_id: "insight", goal_id: "forged-goal", class_id: "forged-class", draft_id: "draft" } });
+      await settle(); assert.equal(leaves, 0);
+      gate.resolve([{ course: { id: "course-2", name: "课程" }, classes: [{ id: "class-2", name: "班级" }] }]);
+      assert.equal(await pending, canLeave && opened);
+      if (canLeave) {
+        assert.equal(h.state.courseId, "course-2"); assert.equal(h.state.classId, "class-2");
+        assert.deepEqual(selection, { goalId: "authorized-goal", insightId: "insight", draftId: "draft" });
+        assert.equal(h.calls.some(([kind]) => kind === "learningNotifications.reset"), false);
+      } else {
+        assert.equal(h.state.teacherView, "review"); assert.equal(h.state.classId, "class-1"); assert.equal(selection, undefined);
+      }
+    }
+  }
+});
+
+test("late insight authorization and open receipts cannot override newer navigation or another teacher", async () => {
+  for (const phase of ["read", "class-refresh", "opened"]) {
+    const gate = deferred(), insight = { id: "insight", origin_goal_id: "goal", class_id: "class-2", course_id: "course-2" };
+    const h = harness(["selectTeacherClass"], { state: { role: "teacher", classId: "class-1", courseId: "course-1" },
+      api: { state: { user: { id: "teacher" } }, call: () => phase === "read" ? gate.promise : Promise.resolve(insight),
+        teacherClasses: async () => [{ course: { id: "course-2" }, classes: [{ id: "class-2" }] }] },
+      globals: phase === "class-refresh" ? { loadWorkspace: () => gate.promise } : {} });
+    let opens = 0;
+    h.context.teacherInsightsWorkspace.openSelection = () => { opens += 1; return phase === "opened" ? gate.promise : Promise.resolve(true); };
+    const pending = h.context.openLearningNotification({ payload: { insight_id: "insight" } });
+    await settle();
+    await h.context.openTeacherReports({ goalId: "new-selection" });
+    gate.resolve(phase === "read" ? insight : true);
+    assert.equal(await pending, false, phase);
+    assert.equal(h.state.teacherView, "reports", phase);
+    assert.equal(opens, phase === "opened" ? 1 : 0);
+  }
+  const gate = deferred(), h = harness([], { state: { role: "teacher" }, api: { state: { user: { id: "first" } }, call: () => gate.promise } });
+  const pending = h.context.openLearningNotification({ payload: { insight_id: "insight" } });
+  h.context.api.state.user = { id: "second" };
+  gate.resolve({ id: "insight", origin_goal_id: "goal", course_id: "course", class_id: "class" });
+  assert.equal(await pending, false);
+});
+
+test("teacher insights navigation uses the shared goal and honors both incoming and outgoing leave vetoes", async () => {
+  const h = harness([], { state: { role: "teacher", teacherView: "review", reviewSelection: { goalId: "shared-goal", studentId: "student", taskId: "task", attemptId: "attempt" } } });
+  h.context.teacherReview.leave = () => false;
+  assert.equal(await h.context.openTeacherInsights(), false);
+  h.context.teacherReview.leave = () => true;
+  assert.equal(await h.context.openTeacherInsights(), true);
+  assert.deepEqual(plain(h.calls.find(([kind]) => kind === "teacherInsightsWorkspace.openSelection")[1]), { goalId: "shared-goal" });
+  h.context.teacherInsightsWorkspace.leave = () => false;
+  assert.equal(await h.context.openTeacherReports(), false);
+  assert.equal(await h.context.openTeacherReview(), false);
+  assert.equal(h.state.teacherView, "insights");
+  h.context.resetLearningWorkspaces();
+  assert.equal(h.state.reviewSelection, null);
+  assert.ok(h.calls.some(([kind]) => kind === "teacherInsightsWorkspace.reset"));
 });
 
 test("mountScene reuses an existing renderer and does not retry a known WebGL fallback", () => {

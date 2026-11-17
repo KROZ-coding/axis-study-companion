@@ -53,7 +53,7 @@ class CompanionStoreTests(unittest.TestCase):
                                        task_id=task_id, question_version_id=question_version_id)
 
     def test_database_identity_wal_foreign_keys_constraints_and_foreign_file_rejection(self):
-        self.assertEqual(self.store.schema_version, 1)
+        self.assertEqual(self.store.schema_version, 2)
         self.assertEqual(self.store.journal_mode, "wal")
         with self.store.connect() as db:
             self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
@@ -74,7 +74,7 @@ class CompanionStoreTests(unittest.TestCase):
         newer = Path(self.directory.name) / "newer.sqlite3"
         with closing(sqlite3.connect(newer)) as db:
             db.execute("PRAGMA application_id=0x41584350")
-            db.execute("PRAGMA user_version=2")
+            db.execute("PRAGMA user_version=3")
         with self.assertRaisesRegex(RuntimeError, "identity or schema"):
             CompanionStore(newer)
 

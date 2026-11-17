@@ -6,6 +6,9 @@ from fastapi import HTTPException
 def can_access_job(runtime, actor, job, *, write: bool = False) -> bool:
     scope = job.payload
     purpose = scope.get("purpose")
+    if scope.get("resource_type") == "teaching_insight":
+        from .teaching_insights import teaching_insight_job_access
+        return teaching_insight_job_access(runtime, actor.id, job, write=write)
     if actor.role == "admin":
         # Job/call views contain operational metadata only. Student response
         # text remains behind the separate owner-only companion access gate.

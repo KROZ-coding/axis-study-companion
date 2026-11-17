@@ -13,8 +13,10 @@ const EVENT_LABELS = {
   discussion_teacher_message: "教师发来了短评", discussion_student_reply: "学生回复了讨论",
   appeal_received: "收到评分异议", appeal_review_ready: "评分异议有处理结果",
   teacher_judgment_recorded: "教师更新了学习记录", question_status_changed: "题目状态有变化",
+  teaching_insight_ready: "学情总结已生成", teaching_insight_failed: "学情总结未完成",
+  teaching_insight_cancelled: "学情总结已取消",
 };
-const LOCATORS = ["task_id", "attempt_id", "thread_id", "question_version_id", "question_id", "class_id", "course_id", "goal_id", "student_id", "appeal_id", "message_id"];
+const LOCATORS = ["task_id", "attempt_id", "thread_id", "question_version_id", "question_id", "class_id", "course_id", "goal_id", "student_id", "appeal_id", "message_id", "insight_id", "draft_id"];
 const confirmedRead = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0) || (typeof value === "string" && value.trim().length > 0);
 function makeState() {
   return {
@@ -81,6 +83,7 @@ export function createLearningNotifications({ api, state, render: renderApp = ()
       if (!payload.question_version_id && hasId(source.question_version)) payload.question_version_id = source.question_version;
       if (!payload.task_id && item.resource_type === "task" && hasId(item.resource_id)) payload.task_id = item.resource_id;
       if (!payload.thread_id && ["thread", "discussion_thread"].includes(item.resource_type) && hasId(item.resource_id)) payload.thread_id = item.resource_id;
+      if (!payload.insight_id && item.resource_type === "teaching_insight" && hasId(item.resource_id)) payload.insight_id = item.resource_id;
     }
     // Keep routing locators only. A notification is never a second copy of answers or messages.
     return {

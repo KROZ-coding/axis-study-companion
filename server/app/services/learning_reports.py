@@ -160,15 +160,37 @@ def _sources(question: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def _events(db: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
-    return db.execute(
-        "SELECT event_type,question_id,occurred_at FROM task_events "
+def _events(db: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
+    from .restricted_hints import hint_evidence_id
+
+    events = []
+    for row in db.execute(
+        "SELECT id,event_type,question_id,payload_json,occurred_at FROM task_events "
         "WHERE task_id=? AND event_type IN ('help','exposure') ORDER BY occurred_at,id", (task_id,),
-    ).fetchall()
+    ):
+        cycle = None
+        if row["event_type"] == "help":
+            payload = _object(row["payload_json"])
+            # Legacy help has no delivery state and keeps its conservative
+            # meaning. New events require the server writer's source and stable
+            # event identity, not a client-supplied claim of successful help.
+            if "status" in payload:
+                response_id = payload.get("response_id")
+                cycle = _integer(payload.get("attempt_cycle"), minimum=1)
+                if (payload.get("status") != "validated_delivered"
+                        or payload.get("source") != "restricted_hint" or cycle is None
+                        or not isinstance(response_id, str) or not response_id
+                        or row["id"] != hint_evidence_id(response_id, "validated_delivered")):
+                    continue
+        # Payloads can contain private chat/attempt data. Keep only structural
+        # facts needed for time-, question- and attempt-bounded assistance.
+        events.append({"attempt_cycle": cycle,
+                       **{key: row[key] for key in ("event_type", "question_id", "occurred_at")}})
+    return events
 
 
 def _evidence(
-    task: Mapping[str, Any], item: Mapping[str, Any], question: Mapping[str, Any], events: list[sqlite3.Row],
+    task: Mapping[str, Any], item: Mapping[str, Any], question: Mapping[str, Any], events: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     maximum = question["points_units"]
     grading = _object(item.get("grading_json"))
@@ -179,7 +201,8 @@ def _evidence(
     if maximum is None or earned is None or earned > maximum or occurred is None:
         return None
     prior = [event for event in events if event["occurred_at"] <= occurred
-             and event["question_id"] in (None, item["question_id"])]
+             and event["question_id"] in (None, item["question_id"])
+             and event["attempt_cycle"] in (None, item["attempt_no"])]
     assisted = any(event["event_type"] == "help" for event in prior)
     retry = item["kind"] == "retry" or item["attempt_no"] > 1
     exposed = retry or any(event["event_type"] == "exposure" for event in prior)

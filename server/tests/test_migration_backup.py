@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 import zlib
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -25,9 +26,21 @@ from app.migration import (
     dry_run_migration,
     require_explicit_mappings,
 )
-from app.report_store import SNAPSHOT_SCHEMA_VERSION
-from app.report_store import SNAPSHOT_SCHEMA_VERSION
+from app.learning_store import LearningStore
 from app.runtime import Runtime
+
+
+class FakeGateway:
+    """Backup and restore never need an upstream call."""
+
+    def describe(self, *args, **kwargs):
+        raise AssertionError("backup tests must not select an upstream model")
+
+    async def complete(self, *args, **kwargs):
+        raise AssertionError("backup tests must not call an upstream model")
+
+
+PLANNING_TABLES = frozenset({"teacher_plan_drafts", "teacher_plan_previews", "teacher_next_round_drafts"})
 
 
 _USER_VERSION_PRAGMAS = {
@@ -160,6 +173,11 @@ class MigrationTests(unittest.TestCase):
 
 class BackupTests(unittest.TestCase):
     def setUp(self) -> None:
+        for target in ("socket.getaddrinfo", "socket.create_connection", "httpx.HTTPTransport.handle_request",
+                       "httpx.AsyncHTTPTransport.handle_async_request"):
+            guard = patch(target, side_effect=AssertionError("external network is forbidden"))
+            guard.start()
+            self.addCleanup(guard.stop)
         self.temp = tempfile.TemporaryDirectory(prefix="backup-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -212,7 +230,8 @@ class BackupTests(unittest.TestCase):
                                     "grading_outbox", "idempotency", "task_events", "deadline_extensions",
                                     "grading_corrections", "report_revisions", "learning_revision", "goal_commands",
                                     "round_policies", "task_policies", "teacher_judgments", "diagnostic_sessions",
-                                    "diagnostic_items", "question_family_index", "question_metadata", "learning_outbox", "appeals", "goal_plans"}))
+                                    "diagnostic_items", "question_family_index", "question_metadata", "learning_outbox", "appeals", "goal_plans",
+                                    "teacher_plan_drafts", "teacher_plan_previews", "teacher_next_round_drafts"}))
         self.assertEqual(DEFAULT_DATABASE_CONTRACTS["jobs"].user_version, 2)
         self.assertEqual(DEFAULT_DATABASE_CONTRACTS["jobs"].application_id, application_id_from_text("AIQ2"))
         self.assertEqual(DEFAULT_DATABASE_CONTRACTS["jobs"].tables,
@@ -220,8 +239,85 @@ class BackupTests(unittest.TestCase):
                                     "call_charges", "funding_transactions", "budget_limits",
                                     "call_budget_reservations", "budget_ledger_entries"}))
         self.assertEqual(DEFAULT_DATABASE_CONTRACTS["content"].user_version, 1)
-        self.assertEqual(DEFAULT_DATABASE_CONTRACTS["reports"].user_version, 1)
+        self.assertEqual(DEFAULT_DATABASE_CONTRACTS["reports"].user_version, 2)
+        self.assertEqual(DEFAULT_DATABASE_CONTRACTS["reports"].tables,
+                         frozenset({"reports", "report_snapshots", "report_revisions", "report_idempotency",
+                                    "teaching_insights", "teaching_insight_outbox"}))
+        self.assertEqual(DEFAULT_DATABASE_CONTRACTS["companion"].user_version, 2)
         self.assertEqual(DEFAULT_DATABASE_CONTRACTS["companion"].application_id, application_id_from_text("AXCP"))
+        self.assertEqual(DEFAULT_DATABASE_CONTRACTS["companion"].tables,
+                         frozenset({"conversations", "messages", "responses", "response_outbox", "events", "collections",
+                                    "collection_items", "notes", "memories", "discussion_threads", "discussion_messages",
+                                    "notifications", "retention_policies", "legal_holds", "audit_events", "hint_checkpoints"}))
+
+    def _runtime(self, root):
+        settings = type("RuntimeSettings", (), {"data_dir": str(root), "worker_enabled": False})()
+        runtime = Runtime(settings)
+        runtime.install("gateway", FakeGateway())
+        self.addCleanup(runtime.stop)
+        runtime.initialize()
+        return runtime
+
+    def _assert_runtime_contracts(self, root):
+        for name, contract in DEFAULT_DATABASE_CONTRACTS.items():
+            with self.subTest(database=name), closing(sqlite3.connect(root / f"{name}.sqlite3")) as db:
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], contract.user_version)
+                self.assertEqual(db.execute("PRAGMA application_id").fetchone()[0], contract.application_id)
+                tables = {row[0] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+                self.assertEqual(tables, contract.tables)
+
+    def test_runtime_initializes_exact_contract_before_first_planning_request(self):
+        from app.services.teacher_planning import TeacherPlanning
+
+        root = self.root / "fresh-runtime"
+        runtime = self._runtime(root)
+        self._assert_runtime_contracts(root)
+        manager = BackupManager({name: root / f"{name}.sqlite3" for name in REQUIRED_DATABASES}, root)
+        initial = manager.inspect(manager.export_bytes())
+        TeacherPlanning(runtime.learning, runtime.platform, runtime.content)
+        self._assert_runtime_contracts(root)
+        after = manager.inspect(manager.export_bytes())
+        self.assertEqual(initial["databases"]["learning"]["tables"], after["databases"]["learning"]["tables"])
+
+    def test_existing_v2_without_lazy_planning_tables_is_stabilized_on_reopen(self):
+        path = self.root / "older-learning.sqlite3"
+        store = LearningStore(path)
+        goal = store.create_goal("teacher", "Existing goal")
+        with closing(sqlite3.connect(path)) as db:
+            db.execute("DROP TABLE IF EXISTS teacher_next_round_drafts")
+            db.execute("DROP TABLE IF EXISTS teacher_plan_previews")
+            db.execute("DROP TABLE IF EXISTS teacher_plan_drafts")
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+        reopened = LearningStore(path)
+        with reopened.connect() as db:
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            self.assertEqual(tables, DEFAULT_DATABASE_CONTRACTS["learning"].tables)
+            self.assertEqual(db.execute("SELECT title FROM learning_goals WHERE id=?", (goal["id"],)).fetchone()[0],
+                             "Existing goal")
+        LearningStore(path)
+
+    def test_runtime_contract_rejects_missing_and_extra_tables_without_mutating_databases(self):
+        root = self.root / "contract-runtime"
+        self._runtime(root)
+        paths = {name: root / f"{name}.sqlite3" for name in REQUIRED_DATABASES}
+        for domain, table in (("learning", "teacher_plan_previews"), ("reports", "teaching_insight_outbox"),
+                              ("companion", "hint_checkpoints")):
+            for mutation in ("missing", "extra"):
+                with self.subTest(domain=domain, mutation=mutation):
+                    target = self.root / f"{domain}-{mutation}.sqlite3"
+                    with closing(sqlite3.connect(paths[domain])) as source, closing(sqlite3.connect(target)) as db:
+                        source.backup(db)
+                        if mutation == "missing":
+                            db.execute(f'DROP TABLE "{table}"')
+                        else:
+                            db.execute("CREATE TABLE unexpected_stage_four_data(value TEXT)")
+                    before = target.read_bytes()
+                    manager = BackupManager({**paths, domain: target}, root)
+                    with self.assertRaisesRegex(BackupError, f"unexpected {domain} database table set"):
+                        manager.export_bytes()
+                    self.assertEqual(target.read_bytes(), before)
 
     def test_bundle_round_trip_to_isolated_staging_and_manifest_hashes(self) -> None:
         before = {name: path.read_bytes() for name, path in self.database_paths.items()}
@@ -315,22 +411,26 @@ class BackupTests(unittest.TestCase):
 
     def test_runtime_six_real_databases_export_and_restore(self) -> None:
         from app.services.report_exports import build_report_snapshot
+        from app.services.teacher_planning import TeacherPlanning
+        from app.services.teaching_insights import TeachingInsights
 
         source_root = self.root / "runtime-source"
-        settings = type("RuntimeSettings", (), {"data_dir": str(source_root), "worker_enabled": False})()
-        runtime = Runtime(settings)
+        runtime = self._runtime(source_root)
         try:
-            runtime.initialize()
+            self._assert_runtime_contracts(source_root)
             teacher = runtime.platform.create_user("teacher", "Teacher", "hash", "teacher", user_id="teacher")
             student = runtime.platform.create_user("student", "Student", "hash", "student", user_id="student")
             course = runtime.platform.create_course("Course", "2026", teacher["id"], course_id="course")
+            runtime.platform.create_class("course", "Class", owner_teacher_id="teacher", class_id="class")
             runtime.platform.create_course_membership(course["id"], student["id"])
+            runtime.platform.create_class_membership("class", "student")
 
             learning = runtime.learning
-            goal = learning.create_goal("teacher", "Goal", course_id="course")
+            goal = learning.create_goal("teacher", "Goal", course_id="course", class_id="class")
             round_row = learning.create_round("teacher", goal["id"], 1)
             learning.create_question_version("teacher", "question", 1,
-                {"stem": "2+2", "options": [], "type": "text", "answer": "4"}, status="approved")
+                {"stem": "2+2", "options": [], "type": "fill", "answer": "4", "points": 1,
+                 "family_id": "addition"}, status="approved", course_id="course")
             task = learning.create_task("teacher", "student", goal["id"], round_row["id"],
                 [{"question_id": "question", "version": 1}])
             lease = learning.acquire_draft_lease(task["id"], "student", "device-1")
@@ -344,12 +444,46 @@ class BackupTests(unittest.TestCase):
                 course_id="course", owner_id="teacher", filename="note.txt", content=b"lesson",
                 parsed={"status": "parsed", "format": "txt", "blocks": [{"anchor": "line:1", "kind": "text", "text": "lesson"}], "issues": []},
             )
-            scope = {"kind": "student", "student_id": "student", "class_id": "class"}
-            frozen = build_report_snapshot({"source_revision": 1, "students": [{"id": "student", "name": "Student"}],
-                                            "goals": [{"id": "goal", "title": "Goal", "class_id": "class"}],
-                                            "evidence": []}, scope)
-            report = runtime.reports.create_snapshot(scope, 1, frozen, created_by="teacher")
+            scope = {"kind": "goal", "goal_id": goal["id"], "class_id": "class", "course_id": "course"}
+            canonical = learning.report_input(scope=scope, actor_id="teacher")
+            frozen = build_report_snapshot(canonical, scope)
+            report = runtime.reports.create_snapshot(scope, canonical["source_revision"], frozen, created_by="teacher")
+            revision = runtime.reports.create_revision(report["id"])
             conversation = runtime.companion.create_conversation("student", "Study", request_id="conversation-1")
+
+            # Exercise the real planning APIs: all three formerly lazy tables
+            # must already exist, and their persisted rows must survive restore.
+            planning = TeacherPlanning(learning, runtime.platform, runtime.content)
+            config = {"course_id": "course", "class_id": "class", "title": "Next learning round",
+                      "student_ids": ["student"], "question_count": 1,
+                      "question_types": {"single_choice": 0, "fill": 1, "judge": 0, "text": 0}}
+            draft = planning.save_draft("teacher", config, request_id="backup-plan")
+            preview = planning.preview("teacher", config)
+            self.assertTrue(preview["ready"], preview)
+            insight_service = TeachingInsights(runtime)
+            insight = insight_service.create("teacher", report_id=revision["report_id"],
+                                             source_report_revision=revision["id"], request_id="backup-insight")
+            runtime.insights.bind_generation(insight["id"], 1)
+            output = {"schema_version": "teaching.insight.selection.v1", "summary_code": "needs_more_evidence",
+                      "evidence_refs": ["report:scope", "report:rule", "report:students"],
+                      "findings": [{"student_code": "S001", "status": "insufficient_evidence", "percent": None,
+                                    "independent_families": 0, "evidence_refs": ["mastery:S001"],
+                                    "explanation_code": "collect_independent_evidence"}],
+                      "limitations": ["goal_level_only", "uncalibrated_rule", "insufficient_evidence"]}
+            completed = insight_service.apply(insight["id"], output, generation=1)
+            self.assertEqual(completed["status"], "completed")
+            next_draft = insight_service.create_next_round("teacher", insight["id"],
+                                                          request_id="backup-next-round", config=config)
+            insight_row = runtime.insights.get(insight["id"])
+            with learning.connect() as db:
+                planning_rows = {table: [dict(row) for row in db.execute(f'SELECT * FROM "{table}"')]
+                                 for table in sorted(PLANNING_TABLES)}
+            self.assertTrue(all(planning_rows.values()))
+            self.assertEqual(planning_rows["teacher_plan_drafts"][0]["id"], draft["id"])
+            with runtime.reports.connect() as db:
+                insight_outbox = dict(db.execute("SELECT * FROM teaching_insight_outbox WHERE insight_id=?",
+                                                (insight["id"],)).fetchone())
+            self._assert_runtime_contracts(source_root)
 
             data_root = source_root
             backup = BackupManager(
@@ -377,8 +511,10 @@ class BackupTests(unittest.TestCase):
                 "data_dir": str(restored / "databases"), "worker_enabled": False,
             })()
             recovered = Runtime(restored_settings)
+            recovered.install("gateway", FakeGateway())
             try:
                 recovered.initialize()
+                self._assert_runtime_contracts(restored / "databases")
                 self.assertEqual(recovered.platform.get_user("teacher"), teacher)
                 self.assertEqual(recovered.platform.get_user("student"), student)
                 self.assertEqual(recovered.platform.get_course("course"), course)
@@ -395,6 +531,17 @@ class BackupTests(unittest.TestCase):
                 self.assertEqual(recovered.content.original_bytes(material["id"]), b"lesson")
                 self.assertEqual(recovered.reports.get_snapshot(report["id"]), report)
                 self.assertEqual(recovered.reports.get_snapshot(report["id"])["snapshot"], frozen)
+                self.assertEqual(recovered.reports.get_revision(revision["id"]), revision)
+                self.assertEqual(recovered.insights.get(insight["id"]), insight_row)
+                with recovered.reports.connect() as db:
+                    self.assertEqual(dict(db.execute("SELECT * FROM teaching_insight_outbox WHERE insight_id=?",
+                                                     (insight["id"],)).fetchone()), insight_outbox)
+                recovered_planning = TeacherPlanning(recovered.learning, recovered.platform, recovered.content)
+                self.assertEqual(recovered_planning.get_next_round_draft("teacher", next_draft["id"]), next_draft)
+                with recovered.learning.connect() as db:
+                    restored_rows = {table: [dict(row) for row in db.execute(f'SELECT * FROM "{table}"')]
+                                     for table in sorted(PLANNING_TABLES)}
+                self.assertEqual(restored_rows, planning_rows)
                 self.assertEqual(recovered.companion.get_conversation(conversation["id"], "student"), conversation)
             finally:
                 recovered.stop()

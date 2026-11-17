@@ -1190,7 +1190,9 @@ class JobQueue:
         with self._transaction() as db:
             current = _now(now)
             row = self._job_row(db, job_id)
-            if row["status"] in _TERMINAL:
+            # Failed work can still be explicitly resumed. Record cancellation
+            # so the public recovery gate can distinguish abandoning that work.
+            if row["status"] in {"succeeded", "cancelled"}:
                 return self._job(row)
             if row["status"] in {"running", "reconciling"}:
                 db.execute("UPDATE jobs SET cancel_requested=1,updated_at=? WHERE job_id=?", (current, job_id))

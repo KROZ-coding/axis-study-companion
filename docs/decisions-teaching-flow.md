@@ -1,8 +1,8 @@
 # 教学流程后端决策与接入说明
 
-> 本文件记录已完成的演示教学后端接口及约束。2026-11-11 的后续产品目标另见[产品与前后端技术总方案](智慧学伴产品与前后端技术总方案.md)；新方案不代表本文件的API已经升级为正式账号和完整AI业务。
+> 本文件主体保留 **2026-11-09 演示教学后端** 的接口及约束，`/api/teaching`、演示身份头和 `teaching_state.schema_version=1` 均为历史实现，不改写为正式 `/api/v1` 或 schema2。2026-11-11 的后续产品目标见[产品与前后端技术总方案](智慧学伴产品与前后端技术总方案.md)；2026-11-16 第四阶段正式实现单列于文末，当前接口见[正式后端接入说明](decisions-backend-platform.md)。
 
-日期：2026-11-09。用户指定先执行后端重构；`web/` 仍运行旧样例页面，新任务界面尚未接入。
+历史日期：2026-11-09。以下至“验证与限制”的“本轮／当前／新接口”均指该次演示重构：用户指定先执行后端重构；当时 `web/` 仍运行旧样例页面，新任务界面尚未接入。
 
 ## 实现范围与状态
 
@@ -147,8 +147,23 @@ Invoke-RestMethod "$base/followups/$($followup.id)/report.json" -Headers $teache
 
 运行 `server/.venv/Scripts/python.exe -I server/tests/run_tests.py`。测试入口在导入应用前隔离临时目录、关闭模块级默认持久化并清空模型配置；持久化用例各自创建临时库。实际测试结果见本地部署说明。
 
-本轮未改造前端，没有新任务页浏览器验收或桌面/手机截图。正式登录、通知、课表、赛事数据导入、外部模型和独立教学效果评测不在本次实现范围。
+2026-11-09 当次未改造前端，没有新任务页浏览器验收或桌面/手机截图。正式登录、通知、课表、赛事数据导入、外部模型和独立教学效果评测不在当次演示实现范围；此历史限制不代表后续正式平台的当前状态。
 
 历史模型选择（2026-11-10）：当时教师回复、出题和审题使用 Poke API 的 `gpt-5.6-sol`（`high`），学生侧 AI 功能使用 `gpt-5.6-terra`（`high`）。此处保留当时决策，不作为当前学生模型配置。
 
-2026-11-15 变更：按用户明确要求，学生学伴 `student`、`hint` 用途改为 `gpt-5.6-sol/high`，教师仍使用 Sol/high；评分 `grading`、摘要 `summary` 保留 Terra/high，必须显式配置各自通道，不再回落到 `student`。本轮通过隔离测试，未执行真实供应商联调；配置与验证边界见[模型分工与接入约定](模型分工与接入约定.md)。
+2026-11-15 变更：按用户明确要求，学生学伴 `student`、`hint` 用途改为 `gpt-5.6-sol/high`，教师仍使用 Sol/high；评分 `grading`、摘要 `summary` 保留 Terra/high，必须显式配置各自通道，不再回落到 `student`。该次通过隔离测试，未执行真实供应商联调；配置与验证边界见[模型分工与接入约定](模型分工与接入约定.md)。
+
+## 2026-11-16 第四阶段正式教学链路
+
+本节记录2026-11-16落盘、2026-11-17收尾核对的正式 `/api/v1` 实现，与上述演示接口分开。生产代码通过 Python **564/564**、Node **406/406**；验收器收尾专项 **8/8** 通过，最终独立 HTTP **8/8** 阶段、**330** 次请求通过。上述全量为提示取消读取门禁修复后的重跑。详细证据、GUI 范围和未覆盖项见[验证记录与边界](验证记录与边界.md)，历史演示验证不计入当前验收。
+
+1. **冻结目标报告总结**：教师选择包含全体学生、全轮次证据的目标报告冻结修订，程序按原规则复算 `facts`；Terra/high 的 `summary` 只选择有限解释码。未知／改写数字、遗漏／新增学生、未知或跨学生证据、低证据强断言均拒绝，服务器固定模板生成可见文字。目前只能解释目标级证据，未定位具体知识点，不称自由 AI 诊断。总结为独立 `teaching_insight` 领域，不复用学伴 `response`；幂等、`generation` 与当前权限重查约束创建、重放和结果采用，状态与通知 outbox 同事务保存。总结领域仅 `failed` 可恢复，并须通过费用／结果核对和明确确认，取消不复活；active 管理员经完整资源绑定校验仅能访问 jobs 元数据与对账，不获得正文权限。
+2. **教师确认下一轮**：从已审核题库确定性配卷，教师编辑按 CAS 保存，核对完整预览并 `confirm` 后发布到原目标 `max(round_no)+1`。排除已使用题族，前轮完成且评分齐备才推进。有限持续计划由教师确认题池、轮数、间隔和截止；缺题、未完成、待评分或撤权则暂停，不自动造题，也不把模型解释当作自动发布授权。
+3. **正式题两级受限提示**：Sol/high 使用独立 `hint` purpose，只对服务端已保存合法尝试、当前 cycle／draft hash 绑定一致的正式当前题开放。模型仅返回单字段 `action_id` JSON，可见内容来自服务器固定模板，无 raw 输出或 `delta` 公开；无外发许可、坏输出、预算／配置不可用等回退固定引导。首诊仍独立，`unknown` 与实际答案互斥，自由聊天权限不扩大。
+4. **帮助证据与恢复**：只计服务端 `source: restricted_hint`、`status: validated_delivered` 且确定事件 ID／作答 cycle 匹配的帮助；`requested`、`validated`、`fallback` 不计，旧无 `status` help 保守兼容。未知调用与 `cost_pending` 保留待核对，核对完成后仍须明确确认恢复。hint 在已付费的成功 call 或安全 checkpoint 持久化后，后续交付写入发生 `sqlite3.OperationalError` 时，队列可为 `failed`，领域回答保留 `streaming`／`completed`；确认恢复原作业只复用原成功 call 的结果或 checkpoint，不新建付费调用、不重复扣费。已 `completed` 的提示沿用原回答绑定补齐交付记录；恢复重查权限及作答绑定，交付确认前隐藏提示，取消／撤权阻断采用。此存储错误保留规则限于该 hint 路径，不推广为所有异常均可恢复。
+5. **正式作答保存**：草稿700ms防抖、4s最长等待，串行写入且未决操作使用同一请求重放；租约／CAS、IME 组合输入和交卷结果未知保护已落盘。本地草稿缓存仅在内存中，服务端已保存事实仍为权威。
+6. **学生恢复入口与取消**：`web/prototype/app.js` 允许 `intent: hint`、回答为 `streaming`／`completed` 且 `job.status: failed` 时显示确认恢复；`cost_pending`、`reconciliation_required`、`cancel_requested` 任一为真，或回答自身为 `failed`／`cancelled`／`revoked` 时不显示也不执行。非 hint 保持原有暂停条件和 `awaiting_confirmation` 恢复规则。用户明确确认后以 `confirm_paid: true` 恢复原作业，再读取原回答，不新发消息。明确取消 `failed` 作业会设置 `cancel_requested: true`／队列 `cancelled`，公共 resume 返回 HTTP 409（`cancelled_job`）；已发生费用保留。已 `completed` 的领域结果保留，取消仍阻断提示投影与交付采用；公共取消后禁止恢复的规则不代表底层 `JobQueue.retry` 禁止所有取消态重试。
+
+正式平台仍为六库：reports schema2 保存 `teaching_insights`／outbox；companion schema2 包含真实 v1 迁移和 `hint_checkpoints`；learning 仍为 v2，在初始化时 eager ensure 三张 planning 表。以上版本不改变历史 `StudyStore` 的 `teaching_state.schema_version=1`。
+
+第五阶段真实供应商、价格、质量、账单、实机和部署尚未验收；受限解释和固定模板提示不代表开放式辅导、课程检索、长期记忆或真实教学效果完成。

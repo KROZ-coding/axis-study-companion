@@ -118,8 +118,16 @@ const state = {
   chatArchived: false,
   chatHasMoreConversations: false,
   chatSending: false,
+  hintPreparing: null,
   diagnostic: null,
   diagnosticAnswers: [],
+  diagnosticUnknown: [],
+  diagnosticDrafts: {},
+  diagnosticCommand: null,
+  studentWrites: {},
+  studentWriteEpoch: 0,
+  studentComposing: false,
+  studentSubmitBusy: false,
   draftDirty: false,
   savedAt: null,
   studentDrafts: {},
@@ -183,6 +191,10 @@ const teacherReview = window.createTeacherReview({
   onReports: (selection) => openTeacherReports(selection),
 });
 const teacherReportWorkspace = window.createTeacherReports({ api, state, render, toast });
+const teacherInsightsWorkspace = window.createTeacherInsights({
+  api, state, render, toast,
+  onChanged: () => learningNotifications.load(),
+});
 const studentFeedback = window.createStudentFeedback({
   api, state, render, toast,
   onChanged: () => learningNotifications.load(),
@@ -198,6 +210,7 @@ function resetLearningWorkspaces({ preserveNotifications = false } = {}) {
   state.reviewSelection = null;
   teacherReview.reset();
   teacherReportWorkspace.reset();
+  teacherInsightsWorkspace.reset();
   studentFeedback.reset();
   if (!preserveNotifications) learningNotifications.reset();
 }
@@ -207,6 +220,7 @@ function leaveTeacherPage(nextView) {
   if (state.teacherView === "management") return teacherManagement.leave();
   if (state.teacherView === "review") return teacherReview.leave();
   if (state.teacherView === "reports") return teacherReportWorkspace.leave();
+  if (state.teacherView === "insights") return teacherInsightsWorkspace.leave();
   return true;
 }
 
@@ -229,8 +243,19 @@ async function openTeacherReports(selection = state.reviewSelection || {}) {
   return teacherReportWorkspace.openSelection({ goalId: selection.goalId, studentId: selection.studentId });
 }
 
+async function openTeacherInsights(selection = state.reviewSelection || {}, { notificationSequence } = {}) {
+  if (state.role !== "teacher" || state.loggingOut || state.transition || state.loading || state.drawer) return false;
+  if (!leaveTeacherPage("insights")) return false;
+  if (notificationSequence === undefined) notificationOpenSequence += 1;
+  else if (notificationSequence !== notificationOpenSequence) return false;
+  state.teacherView = "insights";
+  render();
+  return teacherInsightsWorkspace.openSelection({ goalId: selection.goalId, insightId: selection.insightId, draftId: selection.draftId });
+}
+
 async function openStudentFeedback(selection = {}, { notificationSequence } = {}) {
   if (state.role !== "student" || state.loggingOut || state.transition || state.loading) return false;
+  if ((state.studentPage === "workspace" || state.studentPage === "diagnostic") && !leaveStudentWork()) return false;
   if (state.studentTab === "feedback" && !studentFeedback.leave()) return false;
   if (notificationSequence === undefined) notificationOpenSequence += 1;
   else if (notificationSequence !== notificationOpenSequence) return false;
@@ -246,8 +271,8 @@ async function openStudentFeedback(selection = {}, { notificationSequence } = {}
 async function openLearningNotification(notification) {
   if (!state.live || state.loggingOut || state.transition || state.loading || state.drawer) return false;
   const payload = notification?.payload || notification || {};
-  const taskId = payload.task_id;
-  if (!taskId || notification?.redacted || payload.redacted) {
+  const taskId = payload.task_id, insightId = payload.insight_id;
+  if ((!taskId && !insightId) || notification?.redacted || payload.redacted) {
     toast("这条通知没有可打开的学习记录，请刷新通知");
     return false;
   }
@@ -258,6 +283,26 @@ async function openLearningNotification(notification) {
   const current = () => sequence === notificationOpenSequence && generation === state.transitionId
     && role === state.role && actorId === api.state.user?.id && !state.loggingOut;
   try {
+    if (insightId) {
+      if (role !== "teacher") return false;
+      const insight = await api.call("GET", `/teaching-insights/${encodeURIComponent(insightId)}`);
+      if (!current()) return false;
+      if (insight.id !== insightId || !insight.origin_goal_id || !insight.class_id || !insight.course_id) {
+        toast("通知对应的总结暂时不可用");
+        return false;
+      }
+      const entries = await api.teacherClasses();
+      if (!current()) return false;
+      const entry = entries.find((item) => item.course.id === insight.course_id && item.classes.some((classroom) => classroom.id === insight.class_id));
+      if (!entry) { toast("当前账号已无权查看通知对应的班级或总结"); return false; }
+      state.teacherCourses = entries;
+      if (state.classId !== insight.class_id || state.courseId !== insight.course_id) {
+        const changed = await selectTeacherClass(insight.class_id, { notificationSequence: sequence });
+        if (!changed || !current()) return false;
+      }
+      const opened = await openTeacherInsights({ goalId: insight.origin_goal_id, insightId, draftId: payload.draft_id }, { notificationSequence: sequence });
+      return current() && opened === true;
+    }
     if (role === "student") {
       const opened = await openStudentFeedback({ taskId, attemptId: payload.attempt_id, threadId: payload.thread_id, questionVersionId: payload.question_version_id }, { notificationSequence: sequence });
       return current() && opened === true;
@@ -623,13 +668,14 @@ function renderTeacher() {
     review: () => teacherReview.render(),
     materials: teacherMaterials,
     reports: teacherReports,
+    insights: () => teacherInsightsWorkspace.render(),
     management: () => teacherManagement.render(),
   }[state.teacherView] || teacherHome;
   view.innerHTML = `
     <div class="app teacher-app" ${state.drawer ? "inert" : ""}>
       <aside class="side">
         <div class="brand">伴星导学</div>
-        ${nav("home", "班级学情")}${nav("review", "批改与反馈")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("reports", "阶段成果")}${nav("management", "课程与班级")}
+        ${nav("home", "班级学情")}${nav("review", "批改与反馈")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("reports", "阶段成果")}${nav("insights", "总结与下一轮")}${nav("management", "课程与班级")}
         <div class="spacer"></div>
         <p class="who muted">${escapeHtml(state.who)} · ${escapeHtml(state.className || "教师工作区")}</p>
         <button class="nav-btn" data-action="logout">退出</button>
@@ -937,7 +983,7 @@ function studentContext() {
   const questions = task?.questions || [];
   const answered = workspace ? questions.filter((question, index) => !answerMissing(state.answers[index], question)).length : 0;
   return `<section class="student-context-block"><p class="student-context-label">${workspace ? "作答进度" : "学习概况"}</p><h2${workspace ? " data-answer-progress" : ""}>${workspace ? `${answered} / ${questions.length} 题` : "让进步看得见"}</h2>
-      ${workspace ? `<div class="student-progress-line"><span data-answer-progress-bar style="width:${questions.length ? answered / questions.length * 100 : 0}%"></span></div><div class="q-nav" aria-label="题目导航">${questions.map((question, index) => `<button class="chip" data-q="${index}" aria-label="第 ${index + 1} 题${answerMissing(state.answers[index], question) ? "，未作答" : "，已作答"}" aria-pressed="${state.currentQ === index}">${index + 1}</button>`).join("")}</div><p class="student-draft-state" role="status">${state.draftDirty ? "有未同步的作答，请保存进度。" : state.savedAt ? `上次保存于 ${new Date(state.savedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "作答后，点击保存进度。"}</p>`
+      ${workspace ? `<div class="student-progress-line"><span data-answer-progress-bar style="width:${questions.length ? answered / questions.length * 100 : 0}%"></span></div><div class="q-nav" aria-label="题目导航">${questions.map((question, index) => `<button class="chip" data-q="${index}" aria-label="第 ${index + 1} 题${answerMissing(state.answers[index], question) ? "，未作答" : "，已作答"}" aria-pressed="${state.currentQ === index}">${index + 1}</button>`).join("")}</div><p class="student-draft-state" role="status">${escapeHtml(studentSaveLabel())}</p>`
         : `<div class="student-stat-pair"><div><strong>${state.liveTasks.length}</strong><small>已分配任务</small></div><div><strong>${completed}</strong><small>已完成任务</small></div></div>`}
     </section>
     <section class="student-context-block"><p class="student-context-label">${task ? "当前学习目标" : "学习提示"}</p><h2>${escapeHtml(task ? taskTitle(task) : "从一个任务开始")}</h2>${goal?.description ? `<p class="student-context-note">${escapeHtml(goal.description)}</p>` : ""}
@@ -967,6 +1013,7 @@ function companion() {
 
 function newTaskChat() {
   const context = state.chatContext;
+  if (context?.intent === "hint") return restrictedHintRequestView(context);
   const task = state.liveTasks.find((item) => item.id === context.taskId) || state.liveTask;
   const question = task?.questions?.find((item) => questionQuestionVersion(item) === context.questionVersionId);
   const text = context.prompt || state.chatDraft || "";
@@ -988,8 +1035,11 @@ function newTaskChat() {
 function companionPolicyLabel(policy = state.chatPolicy) {
   if (state.chatPolicyLoading) return "正在核验当前学习范围…";
   if (!policy) return "暂时无法核验学习范围，请稍后重试。";
-  if (policy.allow_generation) return "当前所有任务均已开放，可自由提问。";
   if (policy.diagnostic) return "首诊期间仅提供独立尝试引导，不提供解题提示。";
+  if (state.chatContext?.intent === "hint") return policy.allow_hint_content
+    ? "本题尝试已保存，可查看知识提示或下一步方向；不提供答案。"
+    : "当前题目提示暂未开放，可查看经服务器核验的已有记录。";
+  if (policy.allow_generation) return "当前所有任务均已开放，可自由提问。";
   if (!policy.attempted) return "先独立尝试并保存作答；当前仅提供安全引导。";
   return "仍有任务未完成；当前仅提供安全引导，不生成题目解答。";
 }
@@ -998,19 +1048,19 @@ function chatConversation() {
   const conversation = state.liveConversations.find((item) => item.id === state.activeConversationId) || state.activeConversation;
   const task = state.chatContext?.taskId ? state.liveTasks.find((item) => item.id === state.chatContext.taskId) || state.liveTask : null;
   const messages = state.chatMessages.filter((item) => item.role === "user").map((item) => {
-    const response = item.response;
-    const userText = item.text ?? item.content ?? "";
+    const response = item.response ? projectChatResponse(item.response) : null;
+    const userText = item.redacted ? item.notice || "当前内容不可查看。" : item.text ?? item.content ?? "";
     const rows = [`<article class="student-message user" data-message-id="${escapeHtml(item.id || item.localId || "")}"><strong>我</strong><p>${escapeHtml(userText)}</p></article>`];
     if (!response && item.role === "user") rows.push('<article class="student-message assistant pending"><strong>学伴</strong><p>正在等待服务确认…</p></article>');
     if (response) {
       const body = response.redacted ? response.notice || "内容暂未开放。" : response.text || "";
       const status = chatResponseStatus(response);
-      rows.push(`<article class="student-message assistant${["failed", "cancelled", "revoked"].includes(response.status) ? " failed" : ""}" data-response-id="${escapeHtml(response.response_id || "")}" data-response-status="${escapeHtml(response.status)}"><strong>学伴</strong><p data-response-text>${escapeHtml(body)}</p><small data-response-status role="status">${escapeHtml(status)}</small>${response.redacted ? '<p class="student-policy-notice">回答范围已按当前任务规则收起。</p>' : ""}${chatResponseControls(response)}</article>`);
+      rows.push(`<article class="student-message assistant${["failed", "cancelled", "revoked"].includes(response.status) ? " failed" : ""}" data-response-id="${escapeHtml(response.response_id || "")}" data-response-status="${escapeHtml(response.status)}"><strong data-response-title>${escapeHtml(chatResponseTitle(response))}</strong><p data-response-text>${escapeHtml(body)}</p><small data-response-status role="status">${escapeHtml(status)}</small>${response.redacted ? '<p class="student-policy-notice">回答范围已按当前任务规则收起。</p>' : ""}${chatResponseControls(response)}</article>`);
     }
     return rows.join("");
   }).join("");
   const pending = state.chatPendingSends?.[state.activeConversationId];
-  const responding = state.chatMessages.some((item) => item.response?.response_id && ["pending", "streaming"].includes(item.response.status));
+  const responding = state.chatMessages.some((item) => item.response?.response_id && chatResponseActive(item.response));
   const paused = state.chatMessages.some((item) => item.response && chatResponsePaused(item.response));
   return `${studentHeading(conversation?.title || "学习对话", "对话记录会保存在当前账号。")}
     <section class="student-chat">
@@ -1024,10 +1074,10 @@ function chatConversation() {
         ${state.chatHasOlder ? '<button type="button" class="btn student-load-older" data-action="load-older-messages" data-loading="' + String(state.chatLoadingOlder) + '" ' + (state.chatLoadingOlder ? "disabled" : "") + '>加载更早的消息</button>' : ""}
         ${messages || '<p class="student-empty-chat">这段对话还没有消息。写下你正在思考的问题。</p>'}
       </div>
-      <form class="student-compose" data-action="send" data-conversation-form="${escapeHtml(state.activeConversationId)}">
+      ${state.chatContext?.intent === "hint" ? '<p class="student-compose-note">这是本题的受限提示记录。返回作答修改尝试或请求另一级提示；自由聊天仍遵循原学习范围。</p>' : `<form class="student-compose" data-action="send" data-conversation-form="${escapeHtml(state.activeConversationId)}">
         <label class="sr-only" for="student-chat-input">发送给学伴</label><textarea id="student-chat-input" name="text" rows="2" maxlength="20000" placeholder="写下你的问题或想法…" data-chat-input ${pending ? "readonly" : ""}>${escapeHtml(pending?.text || state.chatDraft)}</textarea>
         <button type="submit" class="btn primary" ${state.chatSending || responding ? "disabled" : ""}>${studentIcon("arrow")}${state.chatSending ? "发送中…" : pending ? "重试" : paused ? "回答已暂停" : responding ? "回答中…" : "发送"}</button>
-      </form>
+      </form>`}
       ${state.chatPendingSends?.[state.activeConversationId] ? '<p class="student-compose-note">发送结果未确认。重试会沿用同一请求与内容，不会重复创建消息。</p>' : ""}
     </section>`;
 }
@@ -1198,9 +1248,10 @@ function refreshAnswerProgress(diagnostic = false) {
   if (!diagnostic && progress) progress.style.width = `${questions.length ? answered / questions.length * 100 : 0}%`;
   view.querySelectorAll(diagnostic ? '[aria-label="短诊题目"] [data-q]' : '[aria-label="题目导航"] [data-q]').forEach((node) => {
     const index = Number(node.dataset.q);
+    const unknown = diagnostic && state.diagnosticUnknown?.includes(questions[index]?.id);
     const complete = !answerMissing(answers[index], questions[index]);
-    node.setAttribute("aria-label", `第 ${index + 1} 题${complete ? "，已作答" : "，未作答"}`);
-    if (diagnostic) node.textContent = `${index + 1}${complete ? " · 已答" : ""}`;
+    node.setAttribute("aria-label", `第 ${index + 1} 题${unknown ? "，暂时不会" : complete ? "，已作答" : "，未作答"}`);
+    if (diagnostic) node.textContent = `${index + 1}${unknown ? " · 暂时不会" : complete ? " · 已答" : ""}`;
   });
 }
 
@@ -1228,7 +1279,8 @@ function workspaceLive() {
   const questions = task?.questions || [];
   if (!questions.length) return `${studentHeading("任务作答", "正式卷还没有开放。")}
     <div class="state-banner warn">${escapeHtml(task?.notice || "没有可作答的题目，请返回任务列表。")}</div><button class="btn" data-tab="tasks">返回任务</button>`;
-  const locked = state.banner === "takeover" || state.loading || state.loggingOut || Boolean(task.submission_closed);
+  const locked = studentAnswerLocked();
+  const write = state.studentWrites?.[task.id];
   const current = Math.min(state.currentQ, questions.length - 1);
   const question = questions[current];
   return `<div class="student-workspace">
@@ -1236,13 +1288,12 @@ function workspaceLive() {
       ${studentHeading(taskTitle(task), "按自己的节奏作答，保存后可以下次继续。")}
       ${task.submission_closed ? '<div class="state-banner warn">老师已关闭提交，当前作答只读。已保存的记录仍可查看。</div>' : ""}
       <section class="student-question-card" aria-label="第 ${current + 1} 题"><div class="student-question-meta"><span>第 ${current + 1} 题 / 共 ${questions.length} 题</span><span>${question.points ?? "—"} 分</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>
-        ${state.banner === "takeover" ? '<div class="state-banner bad" role="alert">另一台设备正在作答，当前为只读。已输入的选择仍保留在这里。</div>' : ""}
-        ${state.banner === "save-fail" ? '<div class="state-banner bad" role="alert">没有保存成功，当前答案仍在页面上，请重新保存。</div>' : ""}
+        <div class="state-banner warn" data-draft-recovery ${write?.blocked ? "" : "hidden"}><p>版本或编辑权限已变化。本页输入仍保留，选择恢复方式后才能继续保存。</p><button class="btn" data-action="recover-draft">保留本页作答并接管</button><button class="btn" data-action="reload-server-draft">放弃本页作答，读取服务器草稿</button></div>
         ${questionChoices(question, state.answers[current], locked)}
-        <div class="student-question-footer"><div class="row"><button class="btn" data-q="${current - 1}" ${current === 0 || state.loading ? "disabled" : ""}>上一题</button><button class="btn" data-q="${current + 1}" ${current === questions.length - 1 || state.loading ? "disabled" : ""}>下一题</button></div><span class="student-draft-state">${state.draftDirty ? "有未保存的选择" : "当前进度已同步"}</span></div>
+        <div class="student-question-footer"><div class="row"><button class="btn" data-q="${current - 1}" ${current === 0 || state.loading ? "disabled" : ""}>上一题</button><button class="btn" data-q="${current + 1}" ${current === questions.length - 1 || state.loading ? "disabled" : ""}>下一题</button></div><span class="student-draft-state">${escapeHtml(studentSaveLabel())}</span></div>
       </section>
-      ${state.mode === "tutor" ? '<p class="student-compose-note">先完成自己能确定的步骤。交卷并完成评分后，可以逐题回看反馈与解析。</p>' : ""}
-        <div class="student-focus-actions"><button class="btn" data-action="save-draft" ${locked ? "disabled" : ""}>${state.loading ? "正在处理" : "保存进度"}</button><button class="btn" data-action="ask-companion" ${locked ? "disabled" : ""}>${studentIcon("companion")}问学伴</button><button class="btn primary" data-action="submit" ${locked ? "disabled" : ""}>确认交卷</button></div>
+      ${state.mode === "tutor" ? restrictedHintControls() : ""}
+        <div class="student-focus-actions"><button class="btn" data-action="save-draft" ${locked ? "disabled" : ""}>保存进度</button><button class="btn" data-action="ask-companion" ${locked ? "disabled" : ""}>${studentIcon("companion")}问学伴</button><button class="btn primary" data-action="submit" ${locked ? "disabled" : ""}>确认交卷</button></div>
 
     </div>`;
 }
@@ -1251,9 +1302,11 @@ function diagnosticPage() {
   const diagnostic = state.diagnostic;
   const questions = diagnostic?.questions || [];
   const current = Math.min(state.currentQ, Math.max(0, questions.length - 1));
-  const question = questions[current];
-  return `${studentHeading("先做一次独立短诊", "不计入任务成绩，也不会自动替你选择答案。完成后开放正式卷。")}
-    ${question ? `<div class="q-nav" aria-label="短诊题目">${questions.map((item, index) => `<button class="chip" data-q="${index}" aria-pressed="${current === index}">${index + 1}${!answerMissing(state.diagnosticAnswers[index], item) ? " · 已答" : ""}</button>`).join("")}</div><section class="student-question-card"><div class="student-question-meta"><span>第 ${current + 1} / ${questions.length} 题</span><span>独立短诊</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>${questionChoices(question, state.diagnosticAnswers[current], state.loading, true)}</section><div class="student-focus-actions"><button class="btn" data-tab="tasks">返回任务</button><button class="btn primary" data-action="submit-diagnostic" ${state.loading ? "disabled" : ""}>${state.loading ? "正在提交" : "提交短诊"}</button></div>` : '<div class="state-banner warn">暂时没有短诊题目，请返回任务后重试。</div><button class="btn" data-tab="tasks">返回任务</button>'}`;
+  const question = questions[current], unknown = state.diagnosticUnknown || [];
+  return `${studentHeading("先做一次独立短诊", "每题作答或明确选择“暂时不会”。短诊不计入任务成绩，完成后开放正式卷。")}
+    <p class="state-banner warn" role="status">短诊未提交内容仅保留在本页内存，尚未保存到服务器；刷新、关闭页面或退出会丢失。</p>
+    ${state.diagnosticCommand ? '<p class="state-banner warn" role="status">短诊结果待确认，作答已锁定；重试沿用原请求与内容。</p>' : ""}
+    ${question ? `<div class="q-nav" aria-label="短诊题目">${questions.map((item, index) => `<button class="chip" data-q="${index}" aria-pressed="${current === index}">${index + 1}${unknown.includes(item.id) ? " · 暂时不会" : !answerMissing(state.diagnosticAnswers[index], item) ? " · 已答" : ""}</button>`).join("")}</div><section class="student-question-card"><div class="student-question-meta"><span>第 ${current + 1} / ${questions.length} 题</span><span>独立短诊</span></div><h2 class="formula">${escapeHtml(question.stem)}</h2>${questionChoices(question, state.diagnosticAnswers[current], studentAnswerLocked(true), true)}<button type="button" class="btn" data-diagnostic-unknown aria-pressed="${unknown.includes(question.id)}" ${studentAnswerLocked(true) ? "disabled" : ""}>暂时不会</button><p class="student-compose-note">选择“暂时不会”会清空本题作答；重新作答会取消该标记。</p></section><div class="student-focus-actions"><button class="btn" data-tab="tasks">返回任务</button><button class="btn primary" data-action="submit-diagnostic" ${state.loading || state.studentComposing ? "disabled" : ""}>${state.loading ? "正在提交" : state.diagnosticCommand ? "重试原短诊请求" : "提交短诊"}</button></div>` : '<div class="state-banner warn">暂时没有短诊题目，请返回任务后重试。</div><button class="btn" data-tab="tasks">返回任务</button>'}`;
 }
 
 /** 连上后端时的结果页：分数与逐题对错都来自真实评卷。 */
@@ -1317,6 +1370,9 @@ function bind() {
   view.querySelectorAll("[data-tab]").forEach((node) => node.addEventListener("click", () => {
     if (state.role === "student") {
       if (state.loading || state.loggingOut || state.transition) return;
+      if (state.studentPage === "workspace" || state.studentPage === "diagnostic") {
+        if (!leaveStudentWork()) return;
+      }
       if (state.studentTab === "feedback" && !studentFeedback.leave()) return;
       notificationOpenSequence += 1;
       state.sheet = null;
@@ -1362,6 +1418,7 @@ function bind() {
     if (state.teacherView === "management") teacherManagement.load();
     if (state.teacherView === "review") teacherReview.load();
     if (state.teacherView === "reports") teacherReportWorkspace.load();
+    if (state.teacherView === "insights") teacherInsightsWorkspace.load();
   }));
   view.querySelectorAll("[data-teacher-class]").forEach((node) => node.addEventListener("change", () => selectTeacherClass(node.value)));
   view.querySelectorAll("[data-open-student]").forEach((node) => node.addEventListener("click", () => {
@@ -1372,7 +1429,7 @@ function bind() {
     render();
   }));
   view.querySelectorAll("[data-q]").forEach((node) => node.addEventListener("click", () => {
-    if (state.loading || node.disabled) return;
+    if (state.loading || state.studentComposing || state.studentSubmitBusy || state.hintPreparing || node.disabled) return;
     state.currentQ = Math.max(0, Number(node.dataset.q));
     render();
   }));
@@ -1385,7 +1442,7 @@ function bind() {
   }));
   // 选中先保留在本页，保存和交卷仍由正式接口确认。
   view.querySelectorAll("[data-choose]").forEach((node) => node.addEventListener("click", () => {
-    if (state.loading || state.banner === "takeover" || node.disabled) return;
+    if (studentAnswerLocked() || node.disabled) return;
     const question = state.liveTask?.questions?.[state.currentQ];
     const value = questionChoiceValue(question, state.answers[state.currentQ], node.dataset.choose);
     if (value === undefined) return;
@@ -1394,27 +1451,70 @@ function bind() {
     render();
   }));
   view.querySelectorAll("[data-diagnostic-choose]").forEach((node) => node.addEventListener("click", () => {
-    if (state.loading || node.disabled) return;
+    if (studentAnswerLocked(true) || node.disabled) return;
     const question = state.diagnostic?.questions?.[state.currentQ];
     const value = questionChoiceValue(question, state.diagnosticAnswers[state.currentQ], node.dataset.diagnosticChoose);
     if (value === undefined) return;
+    state.diagnosticUnknown = (state.diagnosticUnknown || []).filter((id) => id !== question.id);
     state.diagnosticAnswers[state.currentQ] = value;
+    rememberDiagnosticDraft();
+    render();
+  }));
+  view.querySelectorAll("[data-diagnostic-unknown]").forEach((node) => node.addEventListener("click", () => {
+    if (studentAnswerLocked(true) || node.disabled || !state.diagnostic) return;
+    const question = state.diagnostic.questions[state.currentQ];
+    const unknown = new Set(state.diagnosticUnknown || []);
+    if (unknown.has(question.id)) unknown.delete(question.id);
+    else { unknown.add(question.id); state.diagnosticAnswers[state.currentQ] = ""; }
+    state.diagnosticUnknown = [...unknown];
+    rememberDiagnosticDraft();
     render();
   }));
   view.querySelectorAll("[data-answer-input]").forEach((node) => node.addEventListener("input", () => {
     const diagnostic = node.dataset.answerInput === "diagnostic";
-    if (state.loading || node.disabled || node.readOnly || !diagnostic && state.banner === "takeover") return;
+    if (studentAnswerLocked(diagnostic) || node.disabled || node.readOnly) return;
     const questions = (diagnostic ? state.diagnostic : state.liveTask)?.questions || [];
     const answers = diagnostic ? state.diagnosticAnswers : state.answers;
     const value = questionInputValue(questions[state.currentQ], answers[state.currentQ], node.value, node.dataset.answerBlank);
     if (value === undefined) return;
     answers[state.currentQ] = value;
-    if (!diagnostic) {
-      rememberStudentDraft();
-      view.querySelectorAll(".student-draft-state").forEach((status) => { status.textContent = "有未保存的作答"; });
-    }
+    if (diagnostic) {
+      state.diagnosticUnknown = (state.diagnosticUnknown || []).filter((id) => id !== questions[state.currentQ]?.id);
+      rememberDiagnosticDraft();
+    } else rememberStudentDraft();
     refreshAnswerProgress(diagnostic);
+    if (!diagnostic) refreshStudentSaveStatus();
   }));
+  view.querySelectorAll("[data-answer-input]").forEach((node) => {
+    const taskId = state.liveTask?.id, diagnosticId = state.diagnostic?.id, generation = state.transitionId;
+    const diagnostic = node.dataset.answerInput === "diagnostic", index = state.currentQ;
+    const current = () => generation === state.transitionId && state.liveTask?.id === taskId
+      && state.currentQ === index && (!diagnostic || state.diagnostic?.id === diagnosticId);
+    node.addEventListener("compositionstart", () => {
+      if (!current() || studentAnswerLocked(diagnostic) || node.disabled || node.readOnly) return;
+      state.studentComposing = true;
+      clearStudentSaveTimers(state.studentWrites?.[taskId]);
+      refreshStudentSaveStatus();
+    });
+    node.addEventListener("compositionend", () => {
+      if (!current()) return;
+      state.studentComposing = false;
+      if (!studentAnswerLocked(diagnostic) && !node.disabled && !node.readOnly) {
+        const answers = diagnostic ? state.diagnosticAnswers : state.answers;
+        const question = (diagnostic ? state.diagnostic : state.liveTask)?.questions?.[index];
+        const value = questionInputValue(question, answers[index], node.value, node.dataset.answerBlank);
+        if (value !== undefined) {
+          answers[index] = value;
+          if (diagnostic) {
+            state.diagnosticUnknown = (state.diagnosticUnknown || []).filter((id) => id !== question.id);
+            rememberDiagnosticDraft();
+          } else rememberStudentDraft();
+        }
+      }
+      refreshAnswerProgress(diagnostic);
+      refreshStudentSaveStatus();
+    });
+  });
   view.querySelectorAll("[data-state]").forEach((node) => node.addEventListener("click", () => {
     state.banner = node.dataset.state;
     if (state.banner === "save-fail" || state.banner === "takeover") state.studentPage = "workspace";
@@ -1465,12 +1565,13 @@ function bind() {
       }
     });
   });
-  // 眼睛按钮：明文与方块遮蔽之间切换。只改类名与图标，不重渲染，输入不会丢。
+  // 眼睛按钮：原生密码字段配合方块遮蔽，不重渲染，输入不会丢。
   view.querySelectorAll('[data-action="toggle-peek"]').forEach((node) => node.addEventListener("click", () => {
     const bar = node.closest(".passbar");
     const input = bar ? bar.querySelector("input") : null;
     if (!input || input.disabled) return;
     const masked = !bar.classList.contains("masked");
+    input.type = masked ? "password" : "text";
     bar.classList.toggle("masked", masked);
     node.setAttribute("aria-pressed", String(masked));
     node.setAttribute("aria-label", masked ? "显示口令" : "隐藏口令");
@@ -1482,8 +1583,10 @@ function bind() {
   teacherManagement.bind(view);
   teacherReview.bind(view);
   teacherReportWorkspace.bind(view);
+  teacherInsightsWorkspace.bind(view);
   studentFeedback.bind(view);
   learningNotifications.bind(view);
+  if (state.live && state.role === "student") refreshStudentSaveStatus();
 }
 
 async function finishLogout() {
@@ -1494,8 +1597,7 @@ async function finishLogout() {
   adminWorkspace.reset();
   teacherManagement.reset();
   resetLearningWorkspaces();
-  clearInterval(leaseTimer);
-  leaseTimer = 0;
+  resetStudentWrites();
   closeStudentChatStream();
   setChatRoute(null);
   cancelAnimationFrame(revealTimer);
@@ -1552,12 +1654,17 @@ function onAction(event) {
     return;
   }
   if (action === "logout") {
-    if (state.loggingOut || state.transition) return;
+    if (state.loggingOut || state.transition || !leaveStudentWork({ logout: true })) return;
+    const generation = state.transitionId;
     state.loggingOut = true;
     render();
     if (state.live) {
-      api.logout().then(() => finishLogout()).catch((error) => {
+      api.logout().then(() => {
+        if (generation === state.transitionId && state.loggingOut) finishLogout();
+      }).catch((error) => {
+        if (generation !== state.transitionId) return;
         state.loggingOut = false;
+        resumeStudentWork();
         toast(error && error.message ? error.message : "未能结束服务端会话，请重试");
         render();
       });
@@ -1581,9 +1688,12 @@ function onAction(event) {
   }
   if (action === "close-drawer") { teacherComposer.close(); return; }
   if (action === "reload") {
+    if (state.role === "student" && !leaveStudentWork()) return;
     loadWorkspace();
     return;
   }
+  if (action === "recover-draft") { recoverStudentDraft(); return; }
+  if (action === "reload-server-draft") { recoverStudentDraft({ server: true }); return; }
   if (action === "new-conversation") {
     closeStudentChatStream();
     state.chatContext = null;
@@ -1660,6 +1770,8 @@ function onAction(event) {
   if (action === "reload-conversations") { loadConversationList(); refreshCompanionPolicy(); return; }
   if (action === "load-older-messages") { loadOlderChatMessages(); return; }
   if (action === "ask-companion") { openChatFromTask(); return; }
+  if (action === "request-hint") { requestRestrictedHint(Number(event.currentTarget.dataset.hintLevel)); return; }
+  if (action === "retry-hint") { sendContextChat(); return; }
   if (action === "banner") state.banner = event.currentTarget.dataset.banner;
   if (action === "clear-banner") state.banner = "";
   if (action === "export") {
@@ -1764,6 +1876,7 @@ function onSubmit(event) {
 
 async function enterWorkspace(role, displayName, { live, message }) {
   const generation = ++state.transitionId;
+  resetStudentWrites();
   adminWorkspace.reset();
   teacherManagement.reset();
   resetLearningWorkspaces();
@@ -1918,6 +2031,7 @@ async function loadWorkspace() {
       if (state.teacherView === "management") await teacherManagement.load();
       if (state.teacherView === "review") await teacherReview.load();
       if (state.teacherView === "reports") await teacherReportWorkspace.load();
+      if (state.teacherView === "insights") await teacherInsightsWorkspace.load();
     } else if (state.studentTab === "feedback") await studentFeedback.load();
     if (current() && !state.loggingOut) await learningNotifications.load();
   } catch (error) {
@@ -2031,10 +2145,10 @@ async function loadTeacher() {
 }
 
 async function loadStudent() {
-  const generation = state.transitionId, epoch = chatEpoch, context = state.chatContext;
+  const generation = state.transitionId, epoch = chatEpoch, context = state.chatContext, actorId = api.state.user?.id;
   const archived = state.chatArchived, sequence = ++chatListSequence;
   const [tasks, goals, courses] = await Promise.all([api.myTasks(), api.goals(), api.courses()]);
-  if (generation !== state.transitionId || state.role !== "student") return;
+  if (generation !== state.transitionId || state.role !== "student" || state.loggingOut || actorId !== api.state.user?.id) return;
   state.liveTasks = tasks;
   state.liveGoals = goals;
   const selected = tasks.find((item) => item.id === state.liveTask?.id)
@@ -2043,7 +2157,7 @@ async function loadStudent() {
     state.liveLease = null;
     state.draftDirty = false;
     state.answers = [];
-    clearInterval(leaseTimer);
+    stopStudentEditing();
   }
   state.liveTask = selected;
   const course = courses.find((item) => item.id === selected?.course_id) || courses[0];
@@ -2054,7 +2168,8 @@ async function loadStudent() {
   const controller = new AbortController();
   chatReadControllers.add(controller);
   const current = () => generation === state.transitionId && epoch === chatEpoch && sequence === chatListSequence
-    && archived === state.chatArchived && context === state.chatContext && state.role === "student";
+    && archived === state.chatArchived && context === state.chatContext && state.role === "student"
+    && actorId === api.state.user?.id && !state.loggingOut;
   try {
     const [conversations, policy] = await Promise.all([
       api.conversations({ archived, limit: 100, signal: controller.signal }),
@@ -2077,10 +2192,270 @@ async function loadStudent() {
   } finally { chatReadControllers.delete(controller); }
 }
 
+function studentSnapshot(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function studentWrite(task = state.liveTask) {
+  if (!task) return null;
+  state.studentWrites ||= {};
+  let write = state.studentWrites[task.id];
+  if (!write || !studentWriteOwned(write)) {
+    write = { taskId: task.id, actorId: api.state.user?.id, generation: state.transitionId,
+      epoch: state.studentWriteEpoch || 0, version: task.version, pending: null, submit: null,
+      flight: null, timer: null, maxTimer: null, blocked: "", error: "", savedInput: null };
+    state.studentWrites[task.id] = write;
+  }
+  return write;
+}
+
+function studentWriteOwned(write) {
+  return write && write.actorId === api.state.user?.id && write.generation === state.transitionId
+    && write.epoch === (state.studentWriteEpoch || 0) && state.role === "student";
+}
+
+function studentWriteCurrent(write) {
+  return studentWriteOwned(write) && state.studentWrites?.[write.taskId] === write
+    && state.liveTask?.id === write.taskId && !state.loggingOut && !state.studentSuspended;
+}
+
+function clearStudentSaveTimers(write) {
+  if (!write) return;
+  if (write.timer !== null) clearTimeout(write.timer);
+  if (write.maxTimer !== null) clearTimeout(write.maxTimer);
+  write.timer = null;
+  write.maxTimer = null;
+}
+
+function stopStudentEditing() {
+  clearInterval(leaseTimer);
+  leaseTimer = 0;
+  for (const write of Object.values(state.studentWrites || {})) clearStudentSaveTimers(write);
+}
+
+function resetStudentWrites() {
+  stopStudentEditing();
+  state.studentWriteEpoch = (state.studentWriteEpoch || 0) + 1;
+  state.studentWrites = {};
+  state.studentComposing = false;
+  state.studentSubmitBusy = false;
+  state.hintPreparing = null;
+  state.studentSuspended = false;
+  state.diagnosticUnknown = [];
+  state.diagnosticDrafts = {};
+  state.diagnosticCommand = null;
+  state.diagnostic = null;
+  state.diagnosticAnswers = [];
+  state.studentDrafts = {};
+  state.answers = [];
+  state.draftDirty = false;
+  state.savedAt = null;
+  state.liveLease = null;
+}
+
+function studentAnswerLocked(diagnostic = false) {
+  const write = state.studentWrites?.[state.liveTask?.id];
+  return state.loading || state.loggingOut || state.studentSuspended || state.studentSubmitBusy || Boolean(state.hintPreparing)
+    || (diagnostic ? Boolean(state.diagnosticCommand) : state.banner === "takeover" || Boolean(write?.blocked || write?.submit)
+      || Boolean(pendingRestrictedHint()?.hintSent) || state.chatSending && state.chatContext?.intent === "hint"
+      || Boolean(state.liveTask?.submission_closed));
+}
+
+function studentSaveLabel() {
+  const write = state.studentWrites?.[state.liveTask?.id];
+  if (write?.submit) return write.flight ? "正在确认交卷结果…" : "交卷结果未确认，请重试原交卷请求；当前不能开始新的保存或交卷。";
+  if (write?.blocked) return `${write.error || "版本或编辑权限已变化。"} 本页作答仍保留，请选择恢复方式。`;
+  if (write?.flight) return "正在保存到服务器，仍可继续作答…";
+  if (write?.pending) return "保存结果未确认，本页输入仍保留；重试会使用同一请求和原作答。";
+  if (write?.error) return `${write.error} 本页输入仍保留，请重试保存。`;
+  if (state.studentComposing) return "正在输入，完成输入后自动保存。";
+  if (state.draftDirty) return "有尚未保存的作答；完整作答会自动保存，未填完的题目仅保留在本页。";
+  return state.savedAt ? `服务器已确认保存于 ${new Date(state.savedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+    : "当前显示服务器草稿；作答后自动保存。";
+}
+
+function refreshStudentSaveStatus() {
+  const write = state.studentWrites?.[state.liveTask?.id];
+  view.querySelectorAll(".student-draft-state").forEach((node) => { node.textContent = studentSaveLabel(); });
+  view.querySelectorAll('[data-action="save-draft"]').forEach((node) => {
+    node.disabled = Boolean((studentAnswerLocked() && !write?.pending) || write?.flight || state.studentComposing || state.loggingOut || state.studentSubmitBusy);
+    node.textContent = write?.pending ? "重试原保存请求" : "保存进度";
+  });
+  view.querySelectorAll('[data-action="submit"]').forEach((node) => {
+    node.disabled = Boolean(state.loading || state.studentSubmitBusy || state.hintPreparing || pendingRestrictedHint() || write?.flight || write?.blocked && !write?.submit || state.loggingOut || state.studentComposing || state.liveTask?.submission_closed);
+    node.textContent = write?.submit ? "重试原交卷请求" : state.studentSubmitBusy ? "正在确认保存…" : "确认交卷";
+  });
+  view.querySelectorAll("[data-draft-recovery]").forEach((node) => { node.hidden = !write?.blocked; });
+  view.querySelectorAll("[data-choose]").forEach((node) => { node.disabled = Boolean(studentAnswerLocked()); });
+  view.querySelectorAll('[data-answer-input="task"]').forEach((node) => { node.readOnly = Boolean(studentAnswerLocked()); });
+  const hint = pendingRestrictedHint();
+  view.querySelectorAll('[data-action="request-hint"]').forEach((node) => {
+    const level = Number(node.dataset.hintLevel);
+    node.disabled = hint ? !restrictedHintScopeCurrent(hint) || hint.pending.hintLevel !== level || state.chatSending || state.chatCreating
+      : !restrictedHintAvailable() || state.chatSending || state.chatCreating;
+  });
+  view.querySelectorAll("[data-hint-status]").forEach((node) => {
+    node.textContent = state.hintPreparing ? "正在确认本题作答已保存…" : hint ? "提示请求结果待确认，只能使用原级别与原请求重试。"
+      : "提示使用服务器上已保存的本题尝试，结果与交付记录由服务器确认。";
+  });
+}
+
 function rememberStudentDraft() {
   if (!state.liveTask) return;
   state.draftDirty = true;
-  state.studentDrafts[state.liveTask.id] = { answers: [...state.answers], dirty: true };
+  state.studentDrafts[state.liveTask.id] = { answers: studentSnapshot(state.answers), dirty: true };
+  studentWrite();
+  scheduleStudentSave();
+}
+
+function scheduleStudentSave() {
+  const write = studentWrite();
+  if (!write || !studentWriteCurrent(write) || state.studentComposing || state.studentSubmitBusy
+      || state.liveTask.diagnostic_required || state.liveTask.submission_closed || !state.liveLease
+      || write.blocked || write.submit || write.flight || !state.draftDirty && !write.pending
+      || write.pending?.attempts >= 3 || !write.pending && (write.error || write.savedInput === JSON.stringify(state.answers))) return;
+  if (write.timer !== null) clearTimeout(write.timer);
+  const run = () => {
+    clearStudentSaveTimers(write);
+    if (studentWriteCurrent(write)) saveLiveDraft({ automatic: true });
+  };
+  write.timer = setTimeout(run, write.pending ? 1000 * write.pending.attempts : 700);
+  // 连续输入最多等四秒；任何时刻至多一个请求和两个等待计时器。
+  if (write.maxTimer === null) write.maxTimer = setTimeout(run, 4000);
+}
+
+function diagnosticHasInput() {
+  return Boolean(state.diagnostic && ((state.diagnosticUnknown || []).length
+    || state.diagnosticAnswers.some((value) => Array.isArray(value) ? value.some((item) => String(item ?? "").length) : value !== "" && value != null)));
+}
+
+function rememberDiagnosticDraft() {
+  if (!state.diagnostic || !state.liveTask) return;
+  state.diagnosticDrafts ||= {};
+  const taskId = state.diagnostic.task_id || state.liveTask.id;
+  state.diagnosticDrafts[taskId] = { diagnostic: state.diagnostic,
+    answers: studentSnapshot(state.diagnosticAnswers), unknown: [...(state.diagnosticUnknown || [])] };
+}
+
+function studentWorkPending() {
+  return state.studentComposing || state.studentSubmitBusy || state.draftDirty || diagnosticHasInput()
+    || Boolean(state.diagnosticCommand) || Object.values(state.studentDrafts || {}).some((draft) => draft.dirty)
+    || Object.values(state.diagnosticDrafts || {}).some((draft) => draft.unknown.length || draft.answers.some((value) => value !== "" && value != null))
+    || Object.values(state.studentWrites || {}).some((write) => write.flight || write.pending || write.submit);
+}
+
+function studentConfirm(message) {
+  return typeof window.confirm === "function" ? window.confirm(message) : true;
+}
+
+function leaveStudentWork({ logout = false } = {}) {
+  if (!state.live || state.role !== "student") return true;
+  if (state.studentComposing) { toast("请先完成当前输入，再离开作答页"); return false; }
+  if (state.studentSubmitBusy || state.diagnosticCommand || Object.values(state.studentWrites || {}).some((write) => write.flight || write.pending || write.submit)) {
+    toast("保存或提交结果尚未确认，请先重试原请求，确认结果后再离开");
+    return false;
+  }
+  if (studentWorkPending() && !studentConfirm(logout
+    ? "仍有仅保留在本页的作答，退出成功后会丢失。确认退出登录？"
+    : "仍有未提交或未保存的作答，仅保留在本页内存；刷新或关闭页面会丢失。确认暂时离开？")) return false;
+  rememberDiagnosticDraft();
+  stopStudentEditing();
+  return true;
+}
+
+function beforeStudentUnload(event) {
+  if (!studentWorkPending()) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+function suspendStudentWork() {
+  state.studentSuspended = true;
+  stopStudentEditing();
+}
+
+function resumeStudentWork() {
+  state.studentSuspended = false;
+  state.studentSubmitBusy = false;
+  if (!state.live || state.role !== "student" || state.loggingOut || state.screen !== "app") return;
+  if (state.liveLease && !state.liveTask?.diagnostic_required && !state.liveTask?.submission_closed) startLeaseRenewal(state.liveTask.id, state.transitionId);
+  scheduleStudentSave();
+  refreshStudentSaveStatus();
+}
+
+function studentWriteFailed(write, error) {
+  write.error = error?.message || "请求结果未确认";
+  const status = error?.status;
+  if ([401, 403, 404, 409].includes(status)) {
+    write.blocked = error.code || "conflict";
+    stopStudentEditing();
+    state.liveLease = null;
+    state.banner = "takeover";
+  } else state.banner = "save-fail";
+  // 只有明确拒绝的 4xx 才能结束未决命令；网络、5xx 与无效回执均保留原载荷。
+  return Number.isInteger(status) && status >= 400 && status < 500 && ![408, 429].includes(status);
+}
+
+function studentDraftPayload(task, answers) {
+  const payload = {};
+  let incomplete = false;
+  (task.questions || []).forEach((question, index) => {
+    const value = answers[index];
+    if (!answerMissing(value, question)) payload[question.id] = value;
+    else if (questionBlankCount(question) > 1 && Array.isArray(value) && value.some((item) => !answerMissing(item))) incomplete = true;
+  });
+  return { answers: studentSnapshot(payload), incomplete };
+}
+
+function studentDeviceId() {
+  let deviceId = window.__studentDeviceId;
+  if (!deviceId) {
+    try {
+      deviceId = window.sessionStorage.getItem("axis-student-device-id") || `student-${crypto.randomUUID()}`;
+      window.sessionStorage.setItem("axis-student-device-id", deviceId);
+    } catch { deviceId ||= `student-${crypto.randomUUID()}`; }
+    window.__studentDeviceId = deviceId;
+  }
+  return deviceId;
+}
+
+async function recoverStudentDraft({ server = false } = {}) {
+  const write = studentWrite(), taskId = state.liveTask?.id;
+  if (!write || !write.blocked || write.pending || write.submit || write.flight || state.loading || state.loggingOut) return false;
+  if (!studentConfirm(server ? "确认放弃本页未保存的作答，重新读取服务器草稿？"
+    : "确认保留本页作答并接管编辑？另一页将失去编辑权，本页作答会覆盖服务器草稿。")) return false;
+  const answers = studentSnapshot(state.answers);
+  state.loading = true;
+  render();
+  try {
+    const full = await api.task(taskId);
+    if (!studentWriteCurrent(write)) return false;
+    if (taskFinished(full) || full.diagnostic_required) throw new Error("任务当前不能继续编辑，本页作答仍保留");
+    const lease = await api.acquireLease(taskId, studentDeviceId(), { takeover: !server });
+    if (!studentWriteCurrent(write)) return false;
+    const latest = await api.task(taskId);
+    if (!studentWriteCurrent(write)) return false;
+    if (taskFinished(latest) || latest.diagnostic_required || lease.task_version !== latest.version) throw new Error("恢复期间任务再次变化，请检查后重试");
+    updateStudentTask(latest);
+    state.liveLease = lease;
+    write.version = latest.version;
+    write.blocked = "";
+    write.error = "";
+    write.savedInput = null;
+    state.answers = server ? latest.questions.map((question) => latest.draft_answers?.[question.id] ?? "") : answers;
+    state.banner = "";
+    state.savedAt = null;
+    state.draftDirty = !server;
+    if (server) delete state.studentDrafts[taskId];
+    else rememberStudentDraft();
+    startLeaseRenewal(taskId, state.transitionId);
+    return true;
+  } catch (error) {
+    if (studentWriteCurrent(write)) { write.error = error?.message || "恢复没有完成，本页作答仍保留"; toast(write.error); }
+    return false;
+  } finally {
+    if (studentWriteCurrent(write)) { state.loading = false; render(); }
+  }
 }
 
 function updateStudentTask(task) {
@@ -2093,24 +2468,30 @@ function updateStudentTask(task) {
 
 async function selectLiveTask(taskId, attemptId = null) {
   if (state.loading || state.loggingOut || !taskId) return;
+  if (!leaveStudentWork()) return;
   if (state.studentTab === "feedback" && !studentFeedback.leave()) return;
   notificationOpenSequence += 1;
-  const generation = state.transitionId;
+  const generation = state.transitionId, actorId = api.state.user?.id;
+  const current = () => generation === state.transitionId && actorId === api.state.user?.id && state.role === "student" && !state.loggingOut;
   try {
     state.loading = true;
     render();
     const full = await api.task(taskId);
-    if (generation !== state.transitionId) return;
+    if (!current()) return;
     if (attemptId && !(full.attempts || []).some((item) => item.id === attemptId)) {
       toast("这次作答记录暂时不可用，请刷新后重试");
       return;
     }
     const sameTask = state.liveTask?.id === full.id;
     if (!sameTask) {
-      clearInterval(leaseTimer);
+      stopStudentEditing();
       state.liveLease = null;
       state.draftDirty = false;
       state.savedAt = null;
+      state.answers = [];
+      state.diagnostic = null;
+      state.diagnosticAnswers = [];
+      state.diagnosticUnknown = [];
     }
     updateStudentTask(full);
     state.sheet = null;
@@ -2124,9 +2505,9 @@ async function selectLiveTask(taskId, attemptId = null) {
     else if (full.scheduled_at && full.scheduled_at * 1000 > Date.now()) toast("尚未到任务开放时间");
     else await openLiveTask();
   } catch (error) {
-    if (generation === state.transitionId) toast(error?.message || "任务读取失败，请重试");
+    if (current()) toast(error?.message || "任务读取失败，请重试");
   } finally {
-    if (generation === state.transitionId) {
+    if (current()) {
       state.loading = false;
       render();
       window.scrollTo(0, 0);
@@ -2192,38 +2573,85 @@ function chatResponseById(responseId) {
   return state.chatMessages.find((message) => message.response?.response_id === responseId)?.response || null;
 }
 
+function hintDeliveryPending(response) {
+  return response?.intent === "hint" && response.status === "completed"
+    && ["queued", "leased", "running", "retry_wait"].includes(response.job?.status);
+}
+
+function chatResponseActive(response) {
+  return ["pending", "streaming"].includes(response?.status) || hintDeliveryPending(response);
+}
+
 function chatResponsePaused(response) {
-  return ["pending", "streaming"].includes(response.status)
-    && ["reconciling", "awaiting_confirmation"].includes(response.job?.status);
+  return (chatResponseActive(response) || response.intent === "hint" && response.status === "completed")
+    && (["reconciling", "awaiting_confirmation"].includes(response.job?.status)
+      || response.intent === "hint" && response.job?.status === "failed");
+}
+
+function chatResponseHidden(response) {
+  return response.redacted || ["failed", "cancelled", "revoked"].includes(response.status)
+    || response.intent === "hint" && (response.status !== "completed" || hintDeliveryPending(response)
+      || response.job?.cancel_requested || response.job?.cost_pending || response.job?.reconciliation_required
+      || ["reconciling", "awaiting_confirmation", "failed", "cancelled"].includes(response.job?.status));
+}
+
+function projectChatResponse(response) {
+  const projected = { ...response };
+  if (chatResponseHidden(projected)) {
+    projected.text = "";
+    if (Object.prototype.hasOwnProperty.call(projected, "content")) projected.content = "";
+    if (projected.intent === "hint") projected.hint_metadata = null;
+  }
+  return projected;
+}
+
+function chatResponseTitle(response) {
+  return response.intent === "hint" ? hintLevelLabel(response.hint_level) : "学伴";
 }
 
 function chatResponseStatus(response) {
-  if (response.status === "completed") return response.content_type === "safe_guidance" ? "学习范围引导" : "";
-  if (response.status === "failed") return "本次回答未完成";
-  if (response.status === "cancelled") return "本次回答已取消";
   if (response.status === "revoked") return "访问权限已变化";
+  if (response.status === "failed" || response.intent === "hint" && response.job?.status === "failed") return "本次回答未完成";
+  if (response.status === "cancelled" || response.intent === "hint" && response.job?.status === "cancelled") return "本次回答已取消";
   if (response.job?.cancel_requested) return "正在取消本次回答…";
-  if (response.job?.status === "reconciling") return "回答已暂停，正在核对调用结果；不会自动重复发送。";
-  if (response.job?.status === "awaiting_confirmation") return response.job.cost_pending
-    ? "回答已暂停，等待费用核对后可确认恢复。" : "回答已暂停，请确认恢复或取消。";
-  return response.status === "streaming" ? "正在回答…" : "正在排队…";
+  if (response.job?.status === "reconciling" || response.job?.reconciliation_required) return "回答已暂停，正在核对调用结果；不会自动重复发送。";
+  if (response.job?.cost_pending) return "回答已暂停，等待费用核对后可确认恢复。";
+  if (response.job?.status === "awaiting_confirmation") return "回答已暂停，请确认恢复或取消。";
+  if (hintDeliveryPending(response)) return "提示已生成，正在确认交付记录…";
+  if (response.status === "completed") {
+    if (response.intent === "hint") {
+      if (response.redacted) return "提示当前不可查看，请返回作答或刷新状态。";
+      return response.content_type === "safe_guidance" || response.hint_metadata?.status === "fallback"
+        ? "安全引导 · 本次未提供题目提示" : "固定模板提示 · 已确认交付";
+    }
+    return response.content_type === "safe_guidance" ? "学习范围引导" : "";
+  }
+  if (response.job?.status === "retry_wait") return "正在等待重试原作业…";
+  return response.status === "streaming" || response.job?.status === "running" ? "正在回答…" : "正在排队…";
 }
 
 function chatResponseControls(response) {
-  if (!chatResponsePaused(response) || !response.job_id) return "";
+  const hintActive = response.intent === "hint" && chatResponseActive(response);
+  if ((!chatResponsePaused(response) && !hintActive) || !response.job_id) return "";
   const id = escapeHtml(response.response_id), disabled = response.acting ? "disabled" : "";
-  const canResume = response.job.status === "awaiting_confirmation" && !response.job.cost_pending
-    && !response.job.reconciliation_required && !response.job.cancel_requested;
-  return `<div class="student-chat-toolbar-actions">${response.acting ? '<span role="status">正在处理…</span>' : ""}<button type="button" class="btn" data-action="refresh-chat-response" data-response-id="${id}" ${disabled}>刷新状态</button>${!response.job.cancel_requested ? `<button type="button" class="btn" data-action="cancel-chat-response" data-response-id="${id}" ${disabled}>取消本次回答</button>` : ""}${canResume ? `<button type="button" class="btn" data-action="resume-chat-response" data-response-id="${id}" ${disabled}>确认恢复（可能产生费用）</button>` : ""}</div>`;
+  const canResume = (response.job?.status === "awaiting_confirmation"
+    || response.intent === "hint" && response.job?.status === "failed" && chatResponsePaused(response))
+    && !response.job.cost_pending && !response.job.reconciliation_required && !response.job.cancel_requested;
+  return `<div class="student-chat-toolbar-actions">${response.acting ? '<span role="status">正在处理…</span>' : ""}<button type="button" class="btn" data-action="refresh-chat-response" data-response-id="${id}" ${disabled}>刷新状态</button>${!response.job?.cancel_requested ? `<button type="button" class="btn" data-action="cancel-chat-response" data-response-id="${id}" ${disabled}>取消本次回答</button>` : ""}${canResume ? `<button type="button" class="btn" data-action="resume-chat-response" data-response-id="${id}" ${disabled}>确认恢复（可能产生费用）</button>` : ""}</div>`;
 }
 
 async function actOnChatResponse(responseId, action) {
   const response = chatResponseById(responseId);
-  if (!response || response.acting || !response.job_id || !chatResponsePaused(response)) return;
-  if (action === "resume-chat-response" && (response.job.status !== "awaiting_confirmation"
+  if (!response || response.acting || !response.job_id
+      || !chatResponsePaused(response) && !(response.intent === "hint" && chatResponseActive(response))) return;
+  if (action === "resume-chat-response" && (!(response.job.status === "awaiting_confirmation"
+      || response.intent === "hint" && response.job.status === "failed" && chatResponsePaused(response))
       || response.job.cost_pending || response.job.reconciliation_required || response.job.cancel_requested)) return;
-  const epoch = chatEpoch, conversationId = state.activeConversationId;
-  const current = () => epoch === chatEpoch && conversationId === state.activeConversationId && state.role === "student";
+  if (action === "resume-chat-response" && !studentConfirm("确认恢复本次回答？恢复可能产生费用，将沿用原作业。")) return;
+  if (response.intent === "hint" && action === "cancel-chat-response" && !studentConfirm("确认取消本次提示？已发生的调用仍需完成费用核对。")) return;
+  const epoch = chatEpoch, conversationId = state.activeConversationId, actorId = api.state.user?.id, generation = state.transitionId;
+  const current = () => epoch === chatEpoch && conversationId === state.activeConversationId && state.role === "student"
+    && actorId === api.state.user?.id && generation === state.transitionId && !state.loggingOut;
   const controller = new AbortController();
   chatReadControllers.add(controller);
   updateChatResponse(responseId, { acting: true });
@@ -2236,7 +2664,7 @@ async function actOnChatResponse(responseId, action) {
     const snapshot = await api.getResponse(responseId, { signal: controller.signal });
     if (!current()) return;
     updateChatResponse(responseId, { ...snapshot, acting: false });
-    if (!chatResponsePaused(snapshot) && ["pending", "streaming"].includes(snapshot.status)) {
+    if (!chatResponsePaused(snapshot) && chatResponseActive(snapshot)) {
       connectChatResponse(responseId, snapshot.last_event_id || 0);
     }
   } catch (error) {
@@ -2256,14 +2684,15 @@ async function actOnChatResponse(responseId, action) {
 function updateChatResponse(responseId, patch) {
   const message = state.chatMessages.find((item) => item.response?.response_id === responseId);
   if (!message) return;
-  message.response = { ...message.response, ...patch };
-  if (message.response.redacted) message.response.text = "";
+  message.response = projectChatResponse({ ...message.response, ...patch });
   const root = Array.from(view.querySelectorAll("[data-response-id]")).find((node) => node.dataset.responseId === responseId);
   if (!root) return;
   const thread = view.querySelector("[data-chat-thread]");
   const nearBottom = thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight < 64;
   const body = root.querySelector("[data-response-text]");
   const status = root.querySelector("[data-response-status]");
+  const title = root.querySelector("[data-response-title]");
+  if (title) title.textContent = chatResponseTitle(message.response);
   if (body) body.textContent = message.response.redacted ? message.response.notice || "内容暂未开放。" : message.response.text || "";
   if (status) status.textContent = chatResponseStatus(message.response);
   root.dataset.responseStatus = message.response.status;
@@ -2274,7 +2703,7 @@ function updateChatResponse(responseId, patch) {
 function connectChatResponse(responseId, after = 0) {
   if (!responseId || !state.activeConversationId || !state.live || typeof api.openResponseStream !== "function"
       || chatStreamClosers.has(responseId)) return;
-  const epoch = chatEpoch, conversationId = state.activeConversationId;
+  const epoch = chatEpoch, conversationId = state.activeConversationId, actorId = api.state.user?.id, generation = state.transitionId;
   let transportClose = null, closed = false;
   const close = () => {
     if (closed) return;
@@ -2283,7 +2712,8 @@ function connectChatResponse(responseId, after = 0) {
     transportClose?.();
   };
   const current = () => !closed && epoch === chatEpoch && conversationId === state.activeConversationId
-    && state.studentTab === "companion" && state.role === "student";
+    && state.studentTab === "companion" && state.role === "student" && actorId === api.state.user?.id
+    && generation === state.transitionId && !state.loggingOut;
   chatStreamClosers.set(responseId, close);
   try {
     transportClose = api.openResponseStream(responseId, {
@@ -2308,6 +2738,7 @@ function connectChatResponse(responseId, after = 0) {
       end(data, meta) {
         if (!current()) return;
         updateChatResponse(responseId, { ...data, last_event_id: data.last_event_id ?? meta.id });
+        if (hintDeliveryPending(chatResponseById(responseId))) return;
         close();
         renderStudentChatIfActive(epoch);
         syncConversationHistory(conversationId, epoch);
@@ -2374,11 +2805,12 @@ function mergeChatMessages(messages) {
       || message.client_request_id && (item.localId || item.client_request_id) === message.client_request_id);
     const previous = index >= 0 ? rows[index] : null;
     const incoming = { ...previous, ...message };
-    if (previous?.response && message.response && !message.response.redacted) {
+    if (previous?.response && message.response && !chatResponseHidden(message.response)) {
       const old = previous.response, next = message.response;
       if ((old.generation || 0) > (next.generation || 0)
           || old.generation === next.generation && (old.last_event_id || 0) > (next.last_event_id || 0)) incoming.response = old;
     }
+    if (incoming.response) incoming.response = projectChatResponse(incoming.response);
     delete incoming.localId;
     if (index >= 0) rows[index] = incoming;
     else rows.push(incoming);
@@ -2398,19 +2830,22 @@ function mergeChatMessages(messages) {
 }
 
 async function syncConversationHistory(id, epoch = chatEpoch) {
+  const actorId = api.state.user?.id, generation = state.transitionId;
+  const current = () => epoch === chatEpoch && id === state.activeConversationId && actorId === api.state.user?.id
+    && generation === state.transitionId && state.role === "student" && !state.loggingOut;
   const controller = new AbortController();
   chatReadControllers.add(controller);
   try {
     const messages = await api.conversationMessages(id, { latest: true, limit: 100, signal: controller.signal });
-    if (epoch !== chatEpoch || id !== state.activeConversationId) return;
+    if (!current()) return;
     mergeChatMessages(messages);
     for (const message of state.chatMessages) {
       const response = message.response;
-      if (response && ["pending", "streaming"].includes(response.status)) connectChatResponse(response.response_id, response.last_event_id || 0);
+      if (response && chatResponseActive(response)) connectChatResponse(response.response_id, response.last_event_id || 0);
     }
     renderStudentChatIfActive(epoch);
   } catch (error) {
-    if (epoch === chatEpoch && error?.name !== "AbortError") {
+    if (current() && error?.name !== "AbortError") {
       state.chatResponseError = error?.message || "对话记录暂时没有读到。";
       renderStudentChatIfActive(epoch);
     }
@@ -2420,8 +2855,9 @@ async function syncConversationHistory(id, epoch = chatEpoch) {
 async function loadConversation(id, { archived = false } = {}) {
   if (!state.live || !id) return;
   closeStudentChatStream();
-  const epoch = chatEpoch, transition = state.transitionId;
-  const current = () => epoch === chatEpoch && transition === state.transitionId && id === state.activeConversationId;
+  const epoch = chatEpoch, transition = state.transitionId, actorId = api.state.user?.id;
+  const current = () => epoch === chatEpoch && transition === state.transitionId && id === state.activeConversationId
+    && actorId === api.state.user?.id && state.role === "student" && !state.loggingOut;
   const controller = new AbortController();
   chatReadControllers.add(controller);
   state.activeConversationId = id;
@@ -2464,14 +2900,15 @@ async function loadConversation(id, { archived = false } = {}) {
     if (!state.chatContext) {
       const latest = [...messages].reverse().find((item) => item.role === "user" && item.response?.task_id);
       if (latest) {
-        state.chatContext = { taskId: latest.response.task_id, questionVersionId: latest.response.question_version_id, courseId: conversation.course_id };
+        state.chatContext = { taskId: latest.response.task_id, questionVersionId: latest.response.question_version_id, courseId: conversation.course_id,
+          ...(latest.response.intent === "hint" ? { intent: "hint", hintLevel: latest.response.hint_level } : {}) };
         state.chatContexts[id] = state.chatContext;
       }
     }
     renderStudentChatIfActive(epoch);
     for (const message of state.chatMessages) {
       const response = message.response;
-      if (response && ["pending", "streaming"].includes(response.status)) connectChatResponse(response.response_id, response.last_event_id || 0);
+      if (response && chatResponseActive(response)) connectChatResponse(response.response_id, response.last_event_id || 0);
     }
     const thread = view.querySelector("[data-chat-thread]");
     if (thread) thread.scrollTop = thread.scrollHeight;
@@ -2640,6 +3077,121 @@ async function loadOlderChatMessages() {
   }
 }
 
+function hintLevelLabel(level) {
+  return level === 1 ? "一级 · 知识提示" : level === 2 ? "二级 · 下一步方向" : "受限学习提示";
+}
+
+function pendingRestrictedHint(taskId = state.liveTask?.id) {
+  return Object.values(state.chatContexts || {}).find((context) => context.intent === "hint" && context.taskId === taskId
+    && context.pending && context.actorId === api.state.user?.id && context.transitionId === state.transitionId) || null;
+}
+
+function restrictedHintAvailable() {
+  const task = state.liveTask, question = task?.questions?.[state.currentQ];
+  return Boolean(state.live && state.role === "student" && state.screen === "app" && !state.transition
+    && task && question && !task.diagnostic_required && state.studentPage !== "diagnostic" && !taskFinished(task)
+    && !studentAnswerLocked() && !state.studentComposing && !chatComposing && !state.hintPreparing
+    && questionQuestionVersion(question) && !answerMissing(state.answers[state.currentQ], question));
+}
+
+function restrictedHintControls() {
+  const task = state.liveTask;
+  if (!task || task.diagnostic_required || taskFinished(task)) return "";
+  const pending = pendingRestrictedHint(task.id);
+  const disabled = (pending ? !restrictedHintScopeCurrent(pending) : !restrictedHintAvailable())
+    || state.chatSending || state.chatCreating || state.hintPreparing;
+  return `<section class="student-context-block" aria-label="受限学习提示"><h2>先尝试，再看一步提示</h2><p class="student-compose-note">先独立作答。请求前会确认保存，提示只提供知识回忆或下一步方向，不给出答案；首诊不提供提示。</p><div class="student-focus-actions">${[1, 2].map((level) => `<button type="button" class="btn" data-action="request-hint" data-hint-level="${level}" ${disabled || pending && pending.pending.hintLevel !== level ? "disabled" : ""}>${pending?.pending.hintLevel === level ? "重试原提示 · " : ""}${hintLevelLabel(level)}</button>`).join("")}</div><p class="student-compose-note" role="status" data-hint-status>${state.hintPreparing ? "正在确认本题作答已保存…" : pending ? "提示请求结果待确认，只能使用原级别与原请求重试。" : "提示使用服务器上已保存的本题尝试，结果与交付记录由服务器确认。"}</p></section>`;
+}
+
+function restrictedHintRequestView(context) {
+  const pending = context.pending;
+  return `${studentHeading("受限学习提示", hintLevelLabel(pending?.hintLevel || context.hintLevel))}
+    <section class="student-chat-context-form"><p class="student-policy-banner guided">仅请求已保存当前题的提示，不开放任意解答。提示不会替你判断答案。</p>
+      <p>${escapeHtml(pending?.text || "当前没有待重试的提示请求，请返回作答后重新选择提示级别。")}</p>
+      ${state.chatResponseError ? `<div class="state-banner warn" role="alert">${escapeHtml(state.chatResponseError)}</div>` : ""}
+      <p class="student-compose-note">${context.hintSent ? "发送结果待确认。重试使用相同任务、题目、级别和请求；当前不能修改本题尝试。" : "发送前需要确认本题尝试已保存。"}</p>
+      <div class="student-focus-actions"><button type="button" class="btn" data-action="back-to-task">返回作答</button><button type="button" class="btn primary" data-action="retry-hint" ${state.chatSending || state.chatCreating || !pending ? "disabled" : ""}>${state.chatSending || state.chatCreating ? "正在确认请求…" : "重试原提示请求"}</button></div></section>`;
+}
+
+async function requestRestrictedHint(level) {
+  if (![1, 2].includes(level) || state.chatSending || state.chatCreating || state.hintPreparing) return false;
+  const task = state.liveTask, question = task?.questions?.[state.currentQ];
+  const previous = pendingRestrictedHint(task?.id);
+  if (previous) {
+    if (previous.pending.hintLevel !== level || previous.questionVersionId !== questionQuestionVersion(question)) {
+      toast("请返回原题并重试原级别的提示请求"); return false;
+    }
+    if (!restrictedHintScopeCurrent(previous)) return false;
+    closeStudentChatStream();
+    state.chatContext = previous;
+    state.studentTab = "companion";
+    state.studentPage = "home";
+    state.activeConversationId = null;
+    return sendContextChat();
+  }
+  if (!restrictedHintAvailable()) { toast("请先完成并保存本题尝试，首诊或提交结果待确认时不能请求提示"); return false; }
+  const guard = { actorId: api.state.user?.id, transitionId: state.transitionId, taskId: task.id,
+    questionVersionId: questionQuestionVersion(question), questionId: question.id, questionIndex: state.currentQ };
+  const page = state.studentPage, tab = state.studentTab, epoch = chatEpoch;
+  state.hintPreparing = guard;
+  refreshStudentSaveStatus();
+  try {
+    const saved = await saveLiveDraft();
+    if (!restrictedHintScopeCurrent(guard) || page !== state.studentPage || tab !== state.studentTab || epoch !== chatEpoch) return false;
+    if (saved !== true) { toast("作答尚未确认保存，提示未发送"); return false; }
+    if (state.chatContexts.__new?.pending) { toast("请先确认上一条消息的发送结果"); return false; }
+    const context = { ...guard, intent: "hint", hintLevel: level, courseId: task.course_id,
+      savedAttempt: JSON.stringify(state.answers[guard.questionIndex]), hintSent: false };
+    context.pending = Object.freeze({ requestId: `hint-${crypto.randomUUID()}`, conversationId: null,
+      text: level === 1 ? "请提供本题的一级知识提示。" : "请提供本题的二级下一步方向。",
+      intent: "hint", hintLevel: level, taskId: task.id, questionVersionId: guard.questionVersionId,
+      questionId: question.id, createdAt: Date.now() / 1000 });
+    closeStudentChatStream();
+    setChatRoute(null);
+    state.chatContext = context;
+    state.chatContexts.__new = context;
+    state.activeConversationId = null;
+    state.chatMessages = [];
+    state.studentPage = "home";
+    state.studentTab = "companion";
+    state.chatResponseError = "";
+    return await sendContextChat({ savedHint: context.pending });
+  } finally {
+    if (state.hintPreparing === guard) { state.hintPreparing = null; refreshStudentSaveStatus(); }
+  }
+}
+
+function restrictedHintScopeCurrent(context) {
+  const task = state.liveTask, question = task?.questions?.[state.currentQ], write = state.studentWrites?.[task?.id];
+  return context.actorId === api.state.user?.id && context.transitionId === state.transitionId && state.role === "student"
+    && state.screen === "app" && !state.loggingOut && !state.transition && !state.loading && !state.studentSuspended
+    && task?.id === context.taskId && questionQuestionVersion(question) === context.questionVersionId
+    && !task.diagnostic_required && state.studentPage !== "diagnostic" && !taskFinished(task)
+    && !state.studentComposing && !chatComposing && !state.studentSubmitBusy && !write?.submit && !write?.blocked
+    && state.banner !== "takeover" && !answerMissing(state.answers[state.currentQ], question);
+}
+
+async function prepareRestrictedHint(context, current, alreadySaved = false) {
+  if (!current() || !restrictedHintScopeCurrent(context)) return false;
+  if (context.hintSent && JSON.stringify(state.answers[state.currentQ]) !== context.savedAttempt) {
+    throw new Error("本题尝试已变化，请先恢复原提示请求的对话记录，不能替换请求内容。");
+  }
+  if (!alreadySaved && await saveLiveDraft() !== true) throw new Error("作答尚未确认保存，提示未发送。请返回作答后重试。");
+  if (!current() || !restrictedHintScopeCurrent(context) || state.draftDirty) return false;
+  const controller = new AbortController();
+  chatReadControllers.add(controller);
+  try {
+    const policy = await api.companionAnswerPolicy({ taskId: context.taskId, questionVersionId: context.questionVersionId, signal: controller.signal });
+    if (!current() || !restrictedHintScopeCurrent(context) || state.draftDirty) return false;
+    state.chatPolicy = policy;
+    state.chatPolicyLoading = false;
+    if (!policy?.allow_hint_content || !policy.allowed_hint_levels?.includes(context.pending.hintLevel)) {
+      throw new Error("当前题目的受限提示暂未开放，请返回独立作答。");
+    }
+    return true;
+  } finally { chatReadControllers.delete(controller); }
+}
+
 function questionPromptContext(task, question, answer) {
   const options = (question.options || []).map((option, index) => `${String.fromCharCode(65 + index)}. ${option}`).join("\n");
   const choice = (index) => Number.isInteger(index) && question.options?.[index] !== undefined
@@ -2652,7 +3204,8 @@ function questionPromptContext(task, question, answer) {
 
 async function openChatFromTask() {
   const task = state.liveTask, question = task?.questions?.[state.currentQ];
-  if (!task || !question) return;
+  if (!task || !question || !leaveStudentWork()) return;
+  if (pendingRestrictedHint(task.id)) { toast("提示请求结果尚未确认，请先重试原提示请求"); return; }
   closeStudentChatStream();
   setChatRoute(null);
   const attempt = questionPromptContext(task, question, state.answers[state.currentQ]);
@@ -2702,25 +3255,30 @@ async function prepareChatMessage(pending, current) {
   } finally { chatReadControllers.delete(controller); }
 }
 
-async function sendContextChat() {
+async function sendContextChat({ savedHint = null } = {}) {
   if (!state.live || state.chatCreating || state.chatSending || !state.chatContext?.taskId) return;
   const context = state.chatContext;
+  const hint = context.intent === "hint";
+  if (hint && (!context.pending || !restrictedHintScopeCurrent(context))) return false;
   const text = context.pending?.text || state.chatDraft.trim();
   if (!text) return;
   context.pending ||= newChatRequest(text);
   const pending = context.pending, epoch = chatEpoch, sequence = ++chatPostSequence;
-  const current = () => context === state.chatContext && epoch === chatEpoch && sequence === chatPostSequence;
+  const actorId = api.state.user?.id, transition = state.transitionId;
+  const owned = () => context === state.chatContext && epoch === chatEpoch && sequence === chatPostSequence
+    && actorId === api.state.user?.id && transition === state.transitionId && !state.loggingOut && state.role === "student";
+  const current = () => owned() && (!hint || restrictedHintScopeCurrent(context));
   state.chatSending = true;
   state.chatPolicyLoading = true;
   state.chatResponseError = "";
   render();
   try {
-    if (!await prepareChatMessage(pending, current)) return;
+    if (hint ? !await prepareRestrictedHint(context, current, savedHint === pending) : !await prepareChatMessage(pending, current)) return false;
     state.chatCreating = true;
     render();
     let conversation = context.conversation;
     if (!conversation) {
-      context.title ||= `关于${(context.stem || "这道题").slice(0, 36)}`;
+      context.title ||= hint ? "本题学习提示" : `关于${(context.stem || "这道题").slice(0, 36)}`;
       context.createRequestId ||= `chat-${crypto.randomUUID()}`;
       conversation = await api.createConversation(context.title, context.createRequestId, context.courseId || null);
       if (!current()) return;
@@ -2731,9 +3289,13 @@ async function sendContextChat() {
     if (!current()) return;
     state.chatCreating = false;
     render();
+    if (hint && (!restrictedHintScopeCurrent(context) || state.draftDirty || state.studentWrites?.[context.taskId]?.pending)) return false;
+    if (hint) { context.savedAttempt = JSON.stringify(state.answers[state.currentQ]); context.hintSent = true; }
     const receipt = await api.postMessage(conversation.id, pending.text, {
       taskId: pending.taskId, questionVersionId: pending.questionVersionId, requestId: pending.requestId,
+      ...(hint ? { intent: pending.intent, hintLevel: pending.hintLevel } : {}),
     });
+    if (hint && (!receipt?.response_id || !receipt.message_id)) throw new Error("提示请求回执未确认，请重试原请求。");
     if (!current()) return;
     state.activeConversationId = conversation.id;
     setChatRoute(conversation.id);
@@ -2744,19 +3306,25 @@ async function sendContextChat() {
     state.studentTab = "companion";
     state.chatDrafts[conversation.id] = "";
     state.chatMessages = [{ id: receipt.message_id, client_request_id: pending.requestId, role: "user", text: pending.text,
-      created_at: pending.createdAt, response: { response_id: receipt.response_id, status: receipt.status || "pending", text: "", last_event_id: 0 } }];
+      created_at: pending.createdAt, response: { response_id: receipt.response_id, status: receipt.status || "pending", text: "", last_event_id: 0,
+        ...(hint ? { intent: "hint", hint_level: pending.hintLevel, task_id: pending.taskId, question_version_id: pending.questionVersionId } : {}) } }];
     state.chatDraft = "";
     context.pending = null;
     connectChatResponse(receipt.response_id, 0);
+    return true;
   } catch (error) {
     if (!current()) return;
+    if (hint && error?.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
+      context.hintSent = false;
+      context.pending = null;
+    }
     state.chatResponseError = error?.message || "发送结果未确认。重试会沿用同一请求。";
   } finally {
-    if (current()) {
+    if (owned()) {
       state.chatCreating = false;
       state.chatSending = false;
       state.chatPolicyLoading = false;
-      render();
+      if (current()) render();
     }
   }
 }
@@ -2778,11 +3346,11 @@ async function recordChatHelp(pending) {
 
 async function sendStudentMessage() {
   const id = state.activeConversationId;
-  if (!id || !state.live || state.chatSending) return;
+  if (!id || !state.live || state.chatSending || state.chatContext?.intent === "hint") return;
   state.chatPendingSends ||= {};
   let pending = state.chatPendingSends[id];
   if (!pending) {
-    if (state.chatMessages.some((item) => item.response?.response_id && ["pending", "streaming"].includes(item.response.status))) return;
+    if (state.chatMessages.some((item) => item.response?.response_id && chatResponseActive(item.response))) return;
     const text = state.chatDraft.trim();
     if (!text) return;
     pending = newChatRequest(text, id);
@@ -2824,63 +3392,85 @@ async function readConversation(id) {
   await loadConversation(id, { archived: state.chatArchived });
 }
 
-function submitPaper() {
-  if (state.loading || state.loggingOut || state.liveTask?.submission_closed) return;
-  const count = state.liveTask?.questions?.length ?? state.answers.length;
-  const missing = Array.from({ length: count }, (_, index) => state.answers[index])
-    .findIndex((value, index) => answerMissing(value, state.liveTask?.questions?.[index]));
-  if (missing >= 0) {
-    state.currentQ = missing;
-    toast(`第 ${missing + 1} 题还没作答`);
-    render();
-    return;
+async function submitPaper() {
+  if (state.loading || state.loggingOut || state.studentSubmitBusy || state.studentComposing || state.hintPreparing
+      || pendingRestrictedHint() || state.liveTask?.submission_closed) return false;
+  const write = state.live && state.liveTask ? studentWrite() : null;
+  if (!write?.submit) {
+    const count = state.liveTask?.questions?.length ?? state.answers.length;
+    const missing = Array.from({ length: count }, (_, index) => state.answers[index])
+      .findIndex((value, index) => answerMissing(value, state.liveTask?.questions?.[index]));
+    if (missing >= 0) {
+      state.currentQ = missing;
+      toast(`第 ${missing + 1} 题还没作答`);
+      render();
+      return false;
+    }
   }
-  // 连上后端：走真实的交卷接口，等后台评卷
-  if (state.live && state.liveTask) {
-    if (!state.liveLease || state.banner === "takeover") { toast("当前没有编辑权限，请重新打开任务"); return; }
-    const task = state.liveTask;
-    const lease = state.liveLease;
-    const generation = state.transitionId;
-    (async () => {
-      try {
-        state.loading = true;
-        render();
-        const payload = {};
-        (task.questions || []).forEach((question, index) => { payload[question.id] = state.answers[index]; });
-        const saved = await api.saveDraft(task.id, task.version, lease, payload, `pre-submit-${Date.now()}`);
-        if (generation !== state.transitionId) return;
-        updateStudentTask({ ...task, version: saved.version, draft_answers: payload });
-        state.draftDirty = false;
-        state.savedAt = Date.now();
-        delete state.studentDrafts[task.id];
-        await api.submitTask(task.id, saved.version, lease, `submit-${task.id}-${Date.now()}`);
-        if (generation !== state.transitionId) return;
-        clearInterval(leaseTimer);
-        state.liveLease = null;
-        updateStudentTask({ ...state.liveTask, status: "submitted" });
-        state.submitted = true;
-        state.selectedAttemptId = null;
-        state.studentPage = "result";
-        state.banner = "awaiting";
-        state.loading = false;
-        toast("已交卷，正在后台评卷");
-        render();
-        await pollTask(task.id, generation);
-      } catch (error) {
-        if (generation !== state.transitionId) return;
-        state.banner = "save-fail";
-        toast(error?.message || "交卷没有成功，可以再试一次");
-      } finally {
-        if (generation === state.transitionId) { state.loading = false; render(); }
+  if (write) {
+    if (!write.submit && (write.blocked || !state.liveLease || state.banner === "takeover" || state.liveTask.diagnostic_required)) {
+      toast("当前没有编辑权限，请先恢复作答"); return false;
+    }
+    if (write.submit && write.flight) return false;
+    state.studentSubmitBusy = true;
+    clearStudentSaveTimers(write);
+    refreshStudentSaveStatus();
+    try {
+      if (!write.submit) {
+        const input = JSON.stringify(state.answers);
+        // 等已有保存完成，再至多补发一次当前快照；输入在确认交卷期间锁定。
+        if (write.flight) await write.flight;
+        if (!studentWriteCurrent(write) || write.blocked) return false;
+        if (write.pending || state.draftDirty || write.savedInput !== input) await saveLiveDraft();
+        if (!studentWriteCurrent(write) || write.pending || write.blocked || state.draftDirty
+            || write.savedInput !== JSON.stringify(state.answers)) return false;
+        if (!studentConfirm("服务器已确认保存当前作答。确认交卷？交卷后本次作答将固定，并进入评分。")) return false;
+        write.submit = { requestId: `submit-${crypto.randomUUID()}`, version: write.version, lease: { ...state.liveLease } };
       }
-    })();
-    return;
+      const command = write.submit;
+      write.flight = api.submitTask(write.taskId, command.version, command.lease, command.requestId);
+      refreshStudentSaveStatus();
+      const submitted = await write.flight;
+      if (!studentWriteCurrent(write)) return false;
+      if (!submitted || submitted.id !== write.taskId || !Number.isInteger(submitted.version) || submitted.version <= command.version
+          || !["submitted", "grading", "results_ready", "awaiting_manual", "closed"].includes(submitted.status)) {
+        throw new Error("交卷回执不完整，结果待确认，请重试原交卷请求");
+      }
+      write.submit = null;
+      write.error = "";
+      write.version = submitted.version;
+      stopStudentEditing();
+      state.liveLease = null;
+      updateStudentTask(submitted);
+      state.submitted = true;
+      state.selectedAttemptId = null;
+      state.studentPage = "result";
+      state.banner = "awaiting";
+      toast("已交卷，正在后台评卷");
+      render();
+      pollTask(write.taskId, write.generation);
+      return true;
+    } catch (error) {
+      if (studentWriteCurrent(write)) {
+        if (studentWriteFailed(write, error)) write.submit = null;
+        toast(write.submit ? "交卷结果未确认，请重试原交卷请求；不会重复新建提交" : write.error);
+      }
+      return false;
+    } finally {
+      write.flight = null;
+      if (studentWriteCurrent(write)) {
+        state.studentSubmitBusy = false;
+        refreshStudentSaveStatus();
+        scheduleStudentSave();
+      }
+    }
   }
   state.submitted = true;
   state.studentPage = "result";
   state.banner = state.banner === "awaiting" ? "awaiting" : "";
   toast("已交卷，成绩以这次快照为准");
   render();
+  return true;
 }
 
 /** 等后台评卷完成；不假造进度，就是定时问一次。 */
@@ -2903,142 +3493,184 @@ async function pollTask(taskId, generation, tries = 40) {
   }
 }
 
-/** 学生进工作区时先拿编辑租约——后端规定同一任务同时只允许一端作答。 */
+/** 学生进工作区时先拿编辑租约；待确认命令和冲突只能由明确恢复操作处理。 */
 async function openLiveTask() {
-  if (!state.live || !state.liveTask || state.liveTask.submission_closed || state.loggingOut) return false;
-  const taskId = state.liveTask.id;
-  const generation = state.transitionId;
+  if (!state.live || !state.liveTask || state.liveTask.submission_closed || state.liveTask.diagnostic_required || state.loggingOut) return false;
+  const taskId = state.liveTask.id, write = studentWrite();
+  const local = state.studentDrafts[taskId];
+  if (local?.dirty) { state.answers = studentSnapshot(local.answers); state.draftDirty = true; }
+  if (write.pending || write.submit || write.blocked) {
+    state.studentPage = "workspace";
+    state.banner = write.blocked ? "takeover" : "save-fail";
+    render();
+    return false;
+  }
   try {
     state.loading = true;
     render();
-    // 标签页刷新后沿用同一匿名标识，避免被自己的有效租约锁住。
-    let deviceId = window.__studentDeviceId;
-    if (!deviceId) {
-      try {
-        deviceId = window.sessionStorage.getItem("axis-student-device-id") || `student-${crypto.randomUUID()}`;
-        window.sessionStorage.setItem("axis-student-device-id", deviceId);
-      } catch {
-        deviceId ||= `student-${crypto.randomUUID()}`;
-      }
-      window.__studentDeviceId = deviceId;
-    }
-    const lease = state.liveLease?.task_id === taskId && state.liveLease.lease_until * 1000 > Date.now()
-      ? state.liveLease : await api.acquireLease(taskId, deviceId);
+    const reusable = state.liveLease?.task_id === taskId && state.liveLease.lease_until * 1000 > Date.now();
+    const lease = reusable ? state.liveLease : await api.acquireLease(taskId, studentDeviceId());
+    if (!studentWriteCurrent(write)) return false;
     const full = await api.task(taskId);
-    if (generation !== state.transitionId || state.liveTask?.id !== taskId) return;
+    if (!studentWriteCurrent(write)) return false;
     updateStudentTask(full);
-    if (full.submission_closed) {
+    if (taskFinished(full) || full.diagnostic_required) {
       state.liveLease = null;
-      clearInterval(leaseTimer);
-      state.studentPage = "result";
+      stopStudentEditing();
+      state.studentPage = full.diagnostic_required ? "home" : "result";
+      return false;
+    }
+    state.studentPage = "workspace";
+    const expected = reusable ? write.version : lease.task_version;
+    if (full.version !== expected || local?.dirty && !reusable && lease.task_version !== write.version + 1) {
+      studentWriteFailed(write, { status: 409, code: "draft_changed", message: "任务版本已变化，请选择如何恢复作答" });
       return false;
     }
     state.liveLease = lease;
-    const local = state.studentDrafts[taskId];
+    write.version = full.version;
     const draft = full.draft_answers || {};
-    const serverAnswers = (full.questions || []).map((question) => draft[question.id] ?? "");
-    state.answers = local?.dirty ? local.answers : serverAnswers;
+    state.answers = local?.dirty ? studentSnapshot(local.answers) : (full.questions || []).map((question) => draft[question.id] ?? "");
     state.draftDirty = Boolean(local?.dirty);
     state.banner = "";
     state.currentQ = 0;
-    state.studentPage = "workspace";
-    startLeaseRenewal(taskId, generation);
+    startLeaseRenewal(taskId, state.transitionId);
+    scheduleStudentSave();
     return true;
   } catch (error) {
-    if (generation !== state.transitionId) return;
-    state.banner = "takeover";
-    toast(error?.message || "另一端正在作答，稍后再试");
+    if (!studentWriteCurrent(write)) return false;
+    studentWriteFailed(write, { status: 409, code: "lease_unavailable", message: error?.message || "另一端正在作答，稍后再试" });
+    state.studentPage = "workspace";
+    if (!local?.dirty) state.answers = (state.liveTask.questions || []).map((question) => state.liveTask.draft_answers?.[question.id] ?? "");
+    toast(write.error);
+    return false;
   } finally {
-    if (generation === state.transitionId) { state.loading = false; render(); }
+    if (studentWriteCurrent(write)) { state.loading = false; render(); }
   }
 }
 
 function startLeaseRenewal(taskId, generation) {
   clearInterval(leaseTimer);
-  leaseTimer = setInterval(async () => {
-    if (generation !== state.transitionId || !state.liveLease || state.liveTask?.id !== taskId || state.liveTask.submission_closed) {
-      clearInterval(leaseTimer);
+  const write = studentWrite();
+  let renewing = false;
+  const timer = setInterval(async () => {
+    if (timer !== leaseTimer || !studentWriteCurrent(write) || generation !== state.transitionId || !state.liveLease
+        || state.liveTask?.id !== taskId || state.liveTask.submission_closed || state.liveTask.diagnostic_required) {
+      clearInterval(timer);
+      if (leaseTimer === timer) leaseTimer = 0;
       return;
     }
+    if (renewing) return;
     const lease = state.liveLease;
+    renewing = true;
     try {
       const renewed = await api.renewLease(taskId, lease);
-      if (generation === state.transitionId && state.liveLease === lease) state.liveLease = { ...lease, ...renewed };
+      if (timer === leaseTimer && studentWriteCurrent(write) && state.liveLease === lease) state.liveLease = { ...lease, ...renewed };
     } catch (error) {
-      if (generation !== state.transitionId || state.liveLease !== lease) return;
-      clearInterval(leaseTimer);
-      state.liveLease = null;
-      state.banner = "takeover";
-      toast(error?.message || "编辑连接已断开，当前作答仍保留在页面");
-      render();
-    }
+      if (timer !== leaseTimer || !studentWriteCurrent(write) || state.liveLease !== lease) return;
+      studentWriteFailed(write, { status: 409, code: "lease_lost", message: error?.message || "编辑连接已断开" });
+      refreshStudentSaveStatus();
+    } finally { renewing = false; }
   }, 60000);
+  leaseTimer = timer;
 }
 
-/** 首诊独立作答，不自动代答，也不计入正式成绩。 */
+/** 首诊没有草稿接口，未提交作答与暂时不会标记只留在本页内存。 */
 async function runDiagnostic() {
   if (!state.live || !state.liveTask || state.liveTask.submission_closed || state.loggingOut) return;
-  const taskId = state.liveTask.id;
-  const generation = state.transitionId;
+  const taskId = state.liveTask.id, write = studentWrite();
+  stopStudentEditing();
+  state.liveLease = null;
   try {
     state.loading = true;
     render();
-    const diagnostic = await api.startDiagnostic(taskId, state.liveTask.version, `diagnostic-${Date.now()}`);
-    if (generation !== state.transitionId) return;
-    if (state.diagnostic?.id !== diagnostic.id) state.diagnosticAnswers = diagnostic.questions.map(() => "");
+    const diagnostic = await api.startDiagnostic(taskId, state.liveTask.version, `diagnostic-${crypto.randomUUID()}`);
+    if (!studentWriteCurrent(write)) return;
+    const local = state.diagnosticDrafts?.[taskId];
+    if (local?.diagnostic.id === diagnostic.id) {
+      state.diagnosticAnswers = studentSnapshot(local.answers);
+      state.diagnosticUnknown = [...local.unknown];
+    } else if (state.diagnostic?.id !== diagnostic.id) {
+      state.diagnosticAnswers = diagnostic.questions.map(() => "");
+      state.diagnosticUnknown = [];
+    }
     state.diagnostic = diagnostic;
     state.currentQ = 0;
     state.studentPage = "diagnostic";
   } catch (error) {
-    if (generation === state.transitionId) toast(error?.message || "短诊没有打开");
+    if (studentWriteCurrent(write)) toast(error?.message || "短诊没有打开");
   } finally {
-    if (generation === state.transitionId) { state.loading = false; render(); }
+    if (studentWriteCurrent(write)) { state.loading = false; render(); }
   }
 }
 
 async function submitLiveDiagnostic() {
-  if (!state.diagnostic || state.loading || state.loggingOut || state.liveTask?.submission_closed) return;
-  const questions = state.diagnostic.questions || [];
-  const missing = questions.findIndex((question, index) => answerMissing(state.diagnosticAnswers[index], question));
-  if (missing >= 0) {
-    state.currentQ = missing;
-    toast(`第 ${missing + 1} 题还没作答`);
-    render();
-    return;
+  if (!state.diagnostic || !state.liveTask || state.loading || state.loggingOut || state.studentComposing || state.liveTask.submission_closed) return;
+  const questions = state.diagnostic.questions || [], unknown = state.diagnosticUnknown || [];
+  if (!state.diagnosticCommand) {
+    if (unknown.some((id) => !questions.some((question) => question.id === id))
+        || questions.some((question, index) => unknown.includes(question.id) && !answerMissing(state.diagnosticAnswers[index], question))) {
+      toast("暂时不会与作答不能同时选择，请检查短诊作答"); return;
+    }
+    const missing = questions.findIndex((question, index) => !unknown.includes(question.id) && answerMissing(state.diagnosticAnswers[index], question));
+    if (missing >= 0) {
+      state.currentQ = missing;
+      toast(`第 ${missing + 1} 题还没作答`);
+      render();
+      return;
+    }
+    state.diagnosticCommand = { diagnosticId: state.diagnostic.id, taskId: state.liveTask.id,
+      requestId: `diagnostic-submit-${crypto.randomUUID()}`, unknown: [...unknown], accepted: false,
+      answers: studentSnapshot(Object.fromEntries(questions.filter((question) => !unknown.includes(question.id))
+        .map((question) => [question.id, state.diagnosticAnswers[questions.indexOf(question)]]))) };
   }
-  const generation = state.transitionId;
-  const taskId = state.liveTask.id;
+  const command = state.diagnosticCommand, write = studentWrite();
+  const current = () => studentWriteCurrent(write) && state.diagnosticCommand === command && state.diagnostic?.id === command.diagnosticId;
   try {
     state.loading = true;
     render();
-    const answers = Object.fromEntries(questions.map((question, index) => [question.id, state.diagnosticAnswers[index]]));
-    await api.submitDiagnostic(state.diagnostic.id, answers, `diagnostic-submit-${Date.now()}`);
-    if (generation !== state.transitionId) return;
-    const full = await api.task(taskId);
-    if (generation !== state.transitionId) return;
+    if (!command.accepted) {
+      await api.submitDiagnostic(command.diagnosticId, command.answers, command.requestId, command.unknown);
+      if (!current()) return;
+      command.accepted = true;
+    }
+    const full = await api.task(command.taskId);
+    if (!current()) return;
+    if (full.diagnostic_required) throw new Error("短诊状态仍待确认，请重试读取");
     updateStudentTask(full);
+    write.version = full.version;
+    delete state.diagnosticDrafts?.[command.taskId];
     state.diagnostic = null;
+    state.diagnosticAnswers = [];
+    state.diagnosticUnknown = [];
+    state.diagnosticCommand = null;
     state.studentPage = "home";
     state.studentTab = "tasks";
     toast("短诊完成，可以开始正式作答");
   } catch (error) {
-    if (generation === state.transitionId) toast(error?.message || "短诊没有提交成功，作答已保留");
+    if (!current()) return;
+    if (!command.accepted && error?.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) state.diagnosticCommand = null;
+    toast(error?.message || "短诊结果未确认，作答仅保留在本页；请重试原请求");
   } finally {
-    if (generation === state.transitionId) { state.loading = false; render(); }
+    if (studentWriteCurrent(write)) { state.loading = false; render(); }
   }
 }
 
 async function retryLiveTask() {
-  if (state.loading || !state.liveTask || state.loggingOut || state.liveTask.submission_closed) return;
+  if (state.loading || !state.liveTask || state.loggingOut || state.liveTask.submission_closed || state.studentSubmitBusy) return;
   const taskId = state.liveTask.id;
-  const generation = state.transitionId;
+  const write = studentWrite();
+  if (write.pending || write.submit || write.flight) { toast("请先确认原保存或交卷请求的结果"); return; }
+  const generation = state.transitionId, actorId = api.state.user?.id;
+  const current = () => generation === state.transitionId && actorId === api.state.user?.id && state.liveTask?.id === taskId && !state.loggingOut;
   state.loading = true;
   render();
   try {
     const full = await api.retryTask(taskId, state.liveTask.version, `retry-${Date.now()}`);
-    if (generation !== state.transitionId) return;
+    if (!current()) return;
     updateStudentTask(full);
+    stopStudentEditing();
     state.liveLease = null;
+    delete state.studentWrites[taskId];
     delete state.studentDrafts[taskId];
     state.answers = [];
     state.draftDirty = false;
@@ -3046,46 +3678,75 @@ async function retryLiveTask() {
     state.seenSolution = true;
     state.loading = false;
     const opened = await openLiveTask();
-    if (generation === state.transitionId && opened) toast("已开始重做，首次成绩保持不变");
+    if (current()) {
+      if (opened) toast("已开始重做，首次成绩保持不变");
+      else { state.studentPage = "home"; state.studentTab = "tasks"; }
+    }
   } catch (error) {
-    if (generation === state.transitionId) toast(error?.message || "本轮暂时不能重做");
+    if (current()) toast(error?.message || "本轮暂时不能重做");
   } finally {
-    if (generation === state.transitionId) { state.loading = false; render(); }
+    if (current()) { state.loading = false; render(); }
   }
 }
 
-/** 保存草稿：带版本与租约，后端据此拒绝过期写入。 */
-async function saveLiveDraft() {
-  if (state.loading || !state.live || !state.liveTask || !state.liveLease || state.loggingOut || state.liveTask.submission_closed) return false;
-  const task = state.liveTask;
-  const generation = state.transitionId;
-  state.loading = true;
-  render();
-  try {
-    const payload = {};
-    let incomplete = false;
-    (task.questions || []).forEach((question, index) => {
-      const value = state.answers[index];
-      if (!answerMissing(value, question)) payload[question.id] = value;
-      else if (questionBlankCount(question) > 1 && Array.isArray(value) && value.some((item) => !answerMissing(item))) incomplete = true;
-    });
-    const saved = await api.saveDraft(task.id, task.version, state.liveLease, payload, `draft-${Date.now()}`);
-    if (generation !== state.transitionId || state.liveTask?.id !== task.id) return false;
-    updateStudentTask({ ...task, version: saved.version, status: saved.status || "in_progress", draft_answers: payload });
-    if (incomplete) state.studentDrafts[task.id] = { answers: [...state.answers], dirty: true };
-    else delete state.studentDrafts[task.id];
-    state.draftDirty = incomplete;
-    state.savedAt = Date.now();
-    state.banner = "";
-    toast(incomplete ? "完整作答已保存，未填完的题目仍留在本页" : "进度已保存");
-    return true;
-  } catch (error) {
-    if (generation !== state.transitionId) return false;
-    state.banner = "save-fail";
-    toast(error?.message || "没有保存成功，当前作答仍在页面");
-    return false;
-  } finally {
-    if (generation === state.transitionId) { state.loading = false; render(); }
+/** 保存草稿：一次只发送一个冻结载荷；未知结果重放原版本、租约与请求 ID。 */
+async function saveLiveDraft({ automatic = false } = {}) {
+  if (!state.live || !state.liveTask || state.loggingOut || state.studentSuspended || state.studentComposing
+      || state.liveTask.diagnostic_required || state.liveTask.submission_closed) return false;
+  const task = state.liveTask, write = studentWrite(task);
+  if (write.submit || write.blocked && !write.pending) return false;
+  if (write.flight) return write.flight;
+  if (!write.pending && (!state.liveLease || state.banner === "takeover")) return false;
+  clearStudentSaveTimers(write);
+  if (!write.pending) {
+    const input = studentSnapshot(state.answers), payload = studentDraftPayload(task, input);
+    write.pending = { requestId: `draft-${crypto.randomUUID()}`, version: write.version,
+      lease: { ...state.liveLease }, ...payload, input, attempts: 0 };
+  }
+  const command = write.pending;
+  command.attempts += 1;
+  write.error = "";
+  const run = async () => {
+    try {
+      const saved = await api.saveDraft(task.id, command.version, command.lease, command.answers, command.requestId);
+      if (!studentWriteCurrent(write)) return false;
+      if (!saved || !Number.isInteger(saved.version) || saved.version <= command.version || saved.id && saved.id !== task.id) {
+        throw new Error("服务器保存回执不完整，结果待确认，请重试原请求");
+      }
+      // 重放可能返回当前任务而非旧快照；别把其他页面的更新当成本次确认。
+      if (saved.draft_answers && (Object.keys(saved.draft_answers).length !== Object.keys(command.answers).length
+          || Object.keys(command.answers).some((id) => JSON.stringify(saved.draft_answers[id]) !== JSON.stringify(command.answers[id])))
+          || taskFinished(saved) || write.blocked || state.liveLease?.fence_token !== command.lease.fence_token
+          || state.liveLease?.lease_token !== command.lease.lease_token) {
+        write.pending = null;
+        studentWriteFailed(write, { status: 409, code: "draft_changed", message: "服务器草稿或编辑权限已经变化" });
+        return false;
+      }
+      write.pending = null;
+      write.version = saved.version;
+      write.savedInput = JSON.stringify(command.input);
+      updateStudentTask({ ...state.liveTask, version: saved.version, status: saved.status || "in_progress", draft_answers: command.answers });
+      state.draftDirty = command.incomplete || JSON.stringify(state.answers) !== write.savedInput;
+      if (state.draftDirty) state.studentDrafts[task.id] = { answers: studentSnapshot(state.answers), dirty: true };
+      else delete state.studentDrafts[task.id];
+      state.savedAt = Date.now();
+      state.banner = "";
+      if (!automatic) toast(command.incomplete ? "完整作答已保存，未填完的题目仍留在本页" : state.draftDirty ? "先前作答已保存，新输入仍待保存" : "进度已保存");
+      return !state.draftDirty;
+    } catch (error) {
+      if (!studentWriteCurrent(write)) return false;
+      if (studentWriteFailed(write, error)) write.pending = null;
+      if (!automatic) toast(write.error);
+      return false;
+    }
+  };
+  write.flight = run();
+  const flight = write.flight;
+  refreshStudentSaveStatus();
+  try { return await flight; }
+  finally {
+    if (write.flight === flight) write.flight = null;
+    if (studentWriteCurrent(write)) { refreshStudentSaveStatus(); scheduleStudentSave(); }
   }
 }
 
@@ -3283,12 +3944,16 @@ document.addEventListener("touchmove", (event) => {
 }, { passive: true });
 document.addEventListener("touchend", () => { touchY = null; });
 
-window.addEventListener("pagehide", closeStudentChatStream);
-window.addEventListener("pageshow", (event) => { if (event.persisted) resumeStudentChat(); });
+window.addEventListener("beforeunload", beforeStudentUnload);
+window.addEventListener("pagehide", () => { closeStudentChatStream(); suspendStudentWork(); });
+window.addEventListener("pageshow", (event) => { if (event.persisted) { resumeStudentWork(); resumeStudentChat(); } });
 window.addEventListener("hashchange", () => {
   if (!state.live || state.screen !== "app" || state.role !== "student") return;
   const id = chatRoute();
-  if (id) loadConversation(id);
+  if (id) {
+    if ((state.studentPage === "workspace" || state.studentPage === "diagnostic") && !leaveStudentWork()) { setChatRoute(null); return; }
+    loadConversation(id);
+  }
   else if (state.studentTab === "companion" && state.activeConversationId) {
     onAction({ currentTarget: { dataset: { action: "chat-back" } } });
   }

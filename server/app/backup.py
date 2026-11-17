@@ -58,6 +58,8 @@ DEFAULT_DATABASE_CONTRACTS = {
         "grading_corrections", "report_revisions", "learning_revision", "goal_commands",
         "round_policies", "task_policies", "teacher_judgments", "diagnostic_sessions",
         "diagnostic_items", "question_family_index", "question_metadata", "learning_outbox", "appeals", "goal_plans",
+        # LearningStore initializes planning tables before any planning request.
+        "teacher_plan_drafts", "teacher_plan_previews", "teacher_next_round_drafts",
     })),
     "jobs": DatabaseContract(2, 0x41495132, frozenset({
         "queue_meta", "budgets", "jobs", "steps", "events", "upstream_calls", "call_charges",
@@ -68,11 +70,14 @@ DEFAULT_DATABASE_CONTRACTS = {
         "confirmation_blocks", "course_requirements", "requirement_blocks", "knowledge_points",
         "knowledge_sources", "knowledge_prerequisites", "content_jobs",
     })),
-    "reports": DatabaseContract(1, 0, frozenset({"reports", "report_snapshots", "report_revisions", "report_idempotency"})),
-    "companion": DatabaseContract(1, 0x41584350, frozenset({
+    "reports": DatabaseContract(2, 0, frozenset({
+        "reports", "report_snapshots", "report_revisions", "report_idempotency",
+        "teaching_insights", "teaching_insight_outbox",
+    })),
+    "companion": DatabaseContract(2, 0x41584350, frozenset({
         "conversations", "messages", "responses", "response_outbox", "events", "collections",
         "collection_items", "notes", "memories", "discussion_threads", "discussion_messages",
-        "notifications", "retention_policies", "legal_holds", "audit_events",
+        "notifications", "retention_policies", "legal_holds", "audit_events", "hint_checkpoints",
     })),
 }
 

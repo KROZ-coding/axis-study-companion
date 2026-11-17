@@ -32,7 +32,7 @@ class ReportStoreTests(unittest.TestCase):
         return self.store.create_snapshot(SCOPE, revision, snapshot(revision), created_by="teacher", **kwargs)
 
     def test_version_wal_and_reopen(self):
-        self.assertEqual(self.store.schema_version, 1)
+        self.assertEqual(self.store.schema_version, 2)
         self.assertEqual(self.store.journal_mode, "wal")
         frozen = self.freeze()
         revision = self.store.create_revision(frozen["id"])

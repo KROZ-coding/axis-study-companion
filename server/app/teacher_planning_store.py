@@ -21,6 +21,23 @@ SCHEMA = (
     )""",
     """CREATE INDEX IF NOT EXISTS teacher_plan_previews_expiry
         ON teacher_plan_previews(expires_at)""",
+    """CREATE TABLE IF NOT EXISTS teacher_next_round_drafts (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL, class_id TEXT NOT NULL,
+        insight_id TEXT NOT NULL, origin_goal_id TEXT NOT NULL REFERENCES learning_goals(id),
+        source_report_revision TEXT NOT NULL, goal_version INTEGER NOT NULL,
+        next_round INTEGER NOT NULL CHECK(next_round>1), revision INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL CHECK(status IN ('draft','published')),
+        config_json TEXT NOT NULL, overrides_json TEXT NOT NULL, basis_json TEXT NOT NULL,
+        published_result_json TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
+    )""",
+    """CREATE INDEX IF NOT EXISTS teacher_next_round_scope
+        ON teacher_next_round_drafts(class_id,origin_goal_id,updated_at)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS teacher_next_round_published
+        ON teacher_next_round_drafts(origin_goal_id,next_round) WHERE status='published'""",
+    """CREATE TRIGGER IF NOT EXISTS teacher_next_round_frozen BEFORE UPDATE OF
+        id,owner_id,course_id,class_id,insight_id,origin_goal_id,source_report_revision,
+        goal_version,next_round,basis_json,created_at ON teacher_next_round_drafts
+        BEGIN SELECT RAISE(ABORT,'next round origin is immutable'); END""",
 )
 
 

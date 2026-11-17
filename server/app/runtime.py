@@ -84,6 +84,11 @@ class Runtime:
         return self._get("reports", lambda: ReportStore(self.data_dir / "reports.sqlite3"))
 
     @property
+    def insights(self):
+        from .teaching_insight_store import TeachingInsightStore
+        return self._get("insights", lambda: TeachingInsightStore(self.reports))
+
+    @property
     def companion(self):
         from .companion_store import CompanionStore
         return self._get("companion", lambda: CompanionStore(self.data_dir / "companion.sqlite3", answer_policy=self.learning.get_answer_policy))

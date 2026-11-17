@@ -43,17 +43,41 @@ def finalize_domain_job(runtime, job, reason) -> None:
     cancelled = current.cancel_requested or current.status == "cancelled"
     # Keep public failure text stable and free of provider bodies or secrets.
     code = "cancelled" if cancelled else "outcome_unknown" if current.status == "reconciling" else "worker_failed"
-    if purpose in _RESPONSE_PURPOSES:
-        # Unknown outcomes retain their domain checkpoint until verified
-        # reconciliation and explicit queue recovery. A terminal failure here
-        # would make a later succeeded durable call impossible to adopt.
+    if current.payload.get("resource_type") == "teaching_insight":
         if current.status == "reconciling" and not cancelled:
+            return
+        insight = runtime.insights.get(resource_id)
+        if insight is None or insight["job_id"] != current.job_id or insight["status"] == "completed":
+            return
+        generation = max(1, current.generation)
+        if insight["generation"] > generation:
+            return
+        if cancelled:
+            runtime.insights.cancel(resource_id, generation=insight["generation"] or None)
+        else:
+            if runtime.insights.bind_generation(resource_id, generation):
+                runtime.insights.fail(resource_id, generation=generation, code=code,
+                                      message="总结生成已停止，冻结报告保留，可核对任务状态后重试。")
+        return
+    if purpose in _RESPONSE_PURPOSES:
+        # Unresolved outcomes and hint costs retain their domain checkpoint
+        # until reconciliation and explicit recovery. A terminal failure here
+        # would make a succeeded durable call impossible to adopt after settling.
+        if not cancelled and (current.status == "reconciling" or purpose == "hint" and current.cost_pending):
             return
         response = runtime.companion.get_response(resource_id)
         if response["status"] in {"completed", "failed", "cancelled"}:
             return
         generation = response.get("generation") or max(1, current.generation)
         if generation > max(1, current.generation):
+            return
+        # Preserve paid results/checkpoints after a transient delivery write
+        # failure. Confirmed recovery rechecks current permissions and binding.
+        if (not cancelled and purpose == "hint" and reason == "OperationalError"
+                and response.get("intent") == "hint" and response["job_id"] == current.job_id
+                and response["user_id"] == current.payload.get("user_id")
+                and (runtime.companion.get_hint_checkpoint(resource_id) is not None
+                     or any(call.status == "succeeded" for call in runtime.queue.list_calls(current.job_id, step_name="answer")))):
             return
         call_id = response.get("call_id") or f"{current.job_id}:finalize"
         try:
@@ -154,11 +178,15 @@ class Worker:
     async def _execute(self, job) -> None:
         self._current(job)
         purpose = job.payload.get("purpose")
-        if purpose == "grading" and job.payload.get("resource_type") == "appeal":
+        if job.payload.get("resource_type") == "teaching_insight":
+            await self._insight(job)
+        elif purpose == "grading" and job.payload.get("resource_type") == "appeal":
             await self._appeal(job)
         elif purpose == "grading":
             await self._grade(job)
-        elif purpose in {"student", "hint", "summary", "teacher", "suggest"}:
+        elif purpose == "hint":
+            await self._hint(job)
+        elif purpose in {"student", "summary", "teacher", "suggest"}:
             await self._respond(job)
         elif purpose in {"parse", "generate", "review"}:
             await self._content(job)
@@ -283,6 +311,125 @@ class Worker:
             maximum = int(Decimal(str(question.get("points", 1))) * 100)
         return {"status": "graded", "score_units": maximum if value["correct"] else 0,
                 "why": value["why"][:2000], "method": "ai_math"}
+
+    def _insight_access(self, job):
+        from .services.teaching_insights import teaching_insight_job_access
+        owner_id = job.payload.get("owner_id")
+        if not owner_id or not teaching_insight_job_access(self.runtime, owner_id, job, write=True):
+            raise InvalidTransition("teaching insight authorization or binding changed")
+        return self.runtime.insights.get(job.payload["resource_id"])
+
+    async def _insight(self, job):
+        from .services.teaching_insights import TeachingInsights
+        store, service = self.runtime.insights, TeachingInsights(self.runtime)
+        insight = self._insight_access(job)
+        insight_id = insight["id"]
+        if insight["status"] == "completed":
+            step = self._step(job, "summary")
+            if step.status != "succeeded":
+                self._finish_step(job, "summary", {"insight_id": insight_id, "recovered": True})
+            return
+        if insight["status"] == "failed":
+            # A confirmed queue retry may have committed just before the domain
+            # resume write. The new lease repairs that gap; cancelled or invalid
+            # model selections can only be replaced by a new business request.
+            if ((insight.get("error") or {}).get("code") == "invalid_model_output"
+                    or not store.resume(insight_id, generation=job.generation)):
+                raise InvalidTransition("teaching insight cannot resume")
+        if not store.bind_generation(insight_id, job.generation):
+            raise InvalidTransition("teaching insight generation changed")
+        prepared = service.prepare(insight_id, generation=job.generation)
+        step = self._step(job, "summary")
+        if step.status == "succeeded":
+            raise InvalidTransition("summary step has no completed domain result")
+
+        def before_send():
+            self._insight_access(job)
+            current = service.prepare(insight_id, generation=job.generation)
+            if current["input_hash"] != prepared["input_hash"]:
+                raise InvalidTransition("teaching insight input changed")
+
+        result = await self._call(job, step, "summary", prepared["messages"],
+                                  json_mode=True, before_send=before_send)
+        self._current(job)
+        self._insight_access(job)
+        applied = service.apply(insight_id, result.get("text"), generation=job.generation)
+        if applied["status"] != "completed":
+            raise InvalidTransition("teaching insight output failed validation")
+        self._finish_step(job, "summary", {"insight_id": insight_id, "input_hash": prepared["input_hash"]})
+
+    def _response_scope(self, job, response):
+        from .services.companion_access import freeze_response_job_scope
+        if response["job_id"] != job.job_id or response["user_id"] != job.payload.get("user_id"):
+            raise InvalidTransition("response job binding changed")
+        scope = freeze_response_job_scope(self.runtime, response["response_id"], response["user_id"])
+        fields = ("student_id", "course_id", "class_id", "task_id", "project_id")
+        if self.queue.list_calls(job.job_id):
+            if job.payload.get("budget_scope_frozen") and any(job.payload.get(key) != scope.get(key) for key in fields):
+                raise InvalidTransition("response budget scope changed")
+            return job
+        payload = {key: value for key, value in job.payload.items() if key not in fields}
+        payload.update(scope, budget_scope_frozen=True)
+        return self.queue.bind_job_scope(job.job_id, payload, worker_id=self.worker_id, generation=job.generation)
+
+    async def _hint(self, job):
+        from .services.companion_access import response_access
+        from .services.restricted_hints import commit_hint, prepare_hint, same_binding, validate_hint
+        store = self.runtime.companion
+        response = store.get_response(job.payload["resource_id"])
+        if (job.payload.get("resource_type") != "response" or response.get("intent") != "hint"
+                or response["job_id"] != job.job_id or response["user_id"] != job.payload.get("user_id")):
+            raise InvalidTransition("restricted hint job binding changed")
+        response_access(self.runtime, response["user_id"], response["response_id"])
+        prepared = prepare_hint(self.runtime, response)
+        if response["status"] == "completed":
+            # Companion and learning commits are separate. A completed template
+            # can still need its delivery evidence acknowledged before projection.
+            self._current(job)
+            if prepared.get("checkpoint") is not None:
+                commit_hint(self.runtime, response, prepared, prepared["checkpoint"],
+                            call_id=response["call_id"], generation=response["generation"])
+            step = self._step(job, "answer")
+            if step.status != "succeeded":
+                self._finish_step(job, "answer", {"response_id": response["response_id"], "recovered": True})
+            self._notify_response(response["user_id"], response["response_id"])
+            return
+        if response["status"] in {"failed", "cancelled"}:
+            raise InvalidTransition("hint response is terminal")
+        job = self._response_scope(job, response)
+        step = self._step(job, "answer")
+        if step.status == "succeeded":
+            raise InvalidTransition("hint step has no completed domain result")
+        call_id = f"{job.job_id}:answer:{step.attempts}"
+        store.begin_response(response["response_id"], call_id=call_id, generation=job.generation,
+                             expected_generation=response.get("generation") or None)
+        response = store.get_response(response["response_id"])
+        prepared = prepare_hint(self.runtime, response)
+        validated = prepared.get("checkpoint")
+        if validated is None and not prepared["allowed"]:
+            validated = validate_hint(prepared, None)
+        if validated is None:
+            def before_send():
+                fresh = prepare_hint(self.runtime, response)
+                if (not fresh["allowed"] or not same_binding(prepared["metadata"], fresh["metadata"])
+                        or prepared["action_ids"] != fresh["action_ids"]):
+                    raise InvalidTransition("hint policy changed before provider send")
+
+            try:
+                result = await self._call(job, step, "hint", prepared["messages"], call_id=call_id,
+                                          json_mode=True, before_send=before_send)
+            except (PriceUnavailable, InsufficientBudget):
+                validated = validate_hint({**prepared, "allowed": False, "reason": "generation_unavailable"}, None)
+            except GatewayError as error:
+                if error.unknown_outcome:
+                    raise
+                validated = validate_hint({**prepared, "allowed": False, "reason": "generation_failed"}, None)
+            else:
+                validated = validate_hint(prepared, result.get("text"))
+        self._current(job)
+        commit_hint(self.runtime, response, prepared, validated, call_id=call_id, generation=job.generation)
+        self._finish_step(job, "answer", {"response_id": response["response_id"]})
+        self._notify_response(response["user_id"], response["response_id"])
 
     async def _respond(self, job):
         store = self.runtime.companion
@@ -510,7 +657,9 @@ class Worker:
             if call.status == "succeeded":
                 return call.result
         self._current(job)
-        if purpose in _CONTENT_PURPOSES:
+        if job.payload.get("resource_type") == "teaching_insight":
+            self._insight_access(job)
+        elif purpose in _CONTENT_PURPOSES:
             self._content_access(job.payload["resource_id"])
         elif purpose in _RESPONSE_PURPOSES:
             from .services.companion_access import freeze_response_job_scope

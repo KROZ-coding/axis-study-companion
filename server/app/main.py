@@ -23,6 +23,7 @@ from .routers.v1_learning import router as v1_learning_router
 from .routers.v1_materials import router as v1_materials_router
 from .routers.v1_reports import router as v1_reports_router
 from .routers.v1_teacher_planning import router as v1_teacher_planning_router
+from .routers.v1_teaching_insights import router as v1_teaching_insights_router
 from .runtime import Runtime, resolve_data_dir
 from .services.study.content import ScopeNotFoundError
 from .services.study_demo import SAMPLE
@@ -75,7 +76,7 @@ def create_app(config: Settings | None = None, *, study_data: dict | None = None
     else:
         for router in (v1_auth_router, v1_courses_router, v1_learning_router, v1_jobs_router,
                        v1_materials_router, v1_companion_router, v1_reports_router, v1_input_router,
-                       v1_teacher_planning_router):
+                       v1_teacher_planning_router, v1_teaching_insights_router):
             application.include_router(router)
 
     @application.exception_handler(sqlite3.IntegrityError)

@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/prototype/management.css">
   <link rel="stylesheet" href="/prototype/teacher-review.css">
   <link rel="stylesheet" href="/prototype/teacher-reports.css">
+  <link rel="stylesheet" href="/prototype/teacher-insights.css">
   <link rel="stylesheet" href="/prototype/learning-feedback.css">
 </head>
 <body>
@@ -31,6 +32,7 @@
     import { createTeacherManagement } from "/prototype/teacher-management.js";
     import { createTeacherReview } from "/prototype/teacher-review.js";
     import { createTeacherReports } from "/prototype/teacher-reports.js";
+    import { createTeacherInsights } from "/prototype/teacher-insights.js";
     import { createStudentFeedback } from "/prototype/student-feedback.js";
     import { createLearningNotifications } from "/prototype/learning-notifications.js";
     window.createScene = createScene;
@@ -41,6 +43,7 @@
     window.createTeacherManagement = createTeacherManagement;
     window.createTeacherReview = createTeacherReview;
     window.createTeacherReports = createTeacherReports;
+    window.createTeacherInsights = createTeacherInsights;
     window.createStudentFeedback = createStudentFeedback;
     window.createLearningNotifications = createLearningNotifications;
     // 正式服务不可用时暂停认证，不创建本地虚构会话。

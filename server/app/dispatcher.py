@@ -40,15 +40,25 @@ class Dispatcher:
         self.runtime = runtime
 
     def deliver(self) -> int:
-        self.runtime.learning.tick_plans()
+        from .services.teacher_planning import TeacherPlanning
+        planning = self.runtime._get("teacher_planning", lambda: TeacherPlanning(
+            self.runtime.learning, self.runtime.platform, self.runtime.content))
+        self.runtime.learning.tick_plans(teacher_planning=planning)
         self.runtime.learning.refresh_reports(self.runtime.reports)
-        count = self._grading() + self._companion() + self._content() + self._appeals()
+        count = self._grading() + self._companion() + self._content() + self._appeals() + self._insights()
         for event in self.runtime.learning.pending_notifications(limit=100):
             self.runtime.companion.create_notification(
                 event["user_id"], event["event_type"], event["resource_type"], event["resource_id"],
                 business_key=event["id"], payload=json.loads(event["payload_json"]),
             )
             self.runtime.learning.acknowledge_notification(event["id"])
+            count += 1
+        for event in self.runtime.insights.pending_notifications(limit=100):
+            self.runtime.companion.create_notification(
+                event["user_id"], event["event_type"], event["resource_type"], event["resource_id"],
+                business_key=event["business_key"], payload=event["payload"],
+            )
+            self.runtime.insights.acknowledge_notification(event["id"])
             count += 1
         return count
 
@@ -81,12 +91,32 @@ class Dispatcher:
             count += 1
         return count
 
+    def _insights(self) -> int:
+        count = 0
+        for insight in self.runtime.insights.pending_jobs(limit=100):
+            payload = {
+                "purpose": "summary", "step": "summary", "resource_type": "teaching_insight",
+                "resource_id": insight["id"], "owner_id": insight["owner_id"],
+                "class_id": insight["class_id"], "course_id": insight["course_id"],
+                "report_id": insight["report_id"], "source_report_revision": insight["source_report_revision"],
+                "input_hash": insight["input_hash"], "input_revision": insight["source_revision"],
+            }
+            ensure_job(self.runtime, insight["job_id"], "batch", payload, steps=("summary",), paid=True,
+                       budget_day=datetime.fromtimestamp(insight["created_at"], ZoneInfo("Asia/Shanghai")).date().isoformat())
+            self.runtime.insights.mark_dispatched(insight["id"], insight["job_id"])
+            count += 1
+        return count
+
     def _companion(self) -> int:
         count = 0
         from .services.companion_access import freeze_response_job_scope
         for event in self.runtime.companion.pending_outbox(limit=100):
             payload = dict(event.get("payload") or {})
-            payload.update(purpose="student", resource_type="response", resource_id=event["response_id"])
+            response = self.runtime.companion.get_response(event["response_id"])
+            purpose = "hint" if response.get("intent") == "hint" else "student"
+            if response["job_id"] != event["job_id"] or response["user_id"] != payload.get("user_id"):
+                raise IdempotencyConflict("companion outbox binding changed")
+            payload.update(purpose=purpose, resource_type="response", resource_id=event["response_id"])
             try:
                 scope = freeze_response_job_scope(self.runtime, event["response_id"], payload.get("user_id", ""))
             except (LookupError, PermissionError):
@@ -98,7 +128,7 @@ class Dispatcher:
                     payload.pop(key, None)
                 payload.update(scope, budget_scope_frozen=True)
             ensure_job(self.runtime, event["job_id"], "interaction", payload, steps=("answer",), paid=True,
-                       purpose="student", student_id=payload.get("student_id") or payload.get("user_id"),
+                       purpose=purpose, student_id=payload.get("student_id") or payload.get("user_id"),
                        course_id=payload.get("course_id"), class_id=payload.get("class_id"),
                        teaching_scope=payload.get("class_id"), project_id="platform",
                        budget_day=datetime.fromtimestamp(event["created_at"], ZoneInfo("Asia/Shanghai")).date().isoformat())

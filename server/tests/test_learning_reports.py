@@ -94,7 +94,7 @@ class LearningReportsTests(unittest.TestCase):
             self._insert_attempt(db, "task-3", "attempt-other-class", 1, 100)
             self._insert_attempt(db, "task-empty", "attempt-pending", 1, 100, status="grading")
             # A later help event and another question's help cannot taint the
-            # first independent result. Their payloads are never selected.
+            # first independent result. Their private payloads never leave reporting.
             for event_id, kind, question, occurred in (("help-q2", "help", "q2", 90),
                                                         ("future-help-q1", "help", "q1", 150),
                                                         ("future-exposure", "exposure", "q3", 150)):
@@ -143,6 +143,94 @@ class LearningReportsTests(unittest.TestCase):
                 self.assertTrue(row["retry"])
                 self.assertTrue(row["exposed"])
                 self.assertFalse(row["independent_evidence"])
+
+    def _help_event(self, event_id, payload, *, question="q1", occurred=90):
+        with self.store._using_connection(write=True) as db:
+            db.execute("INSERT INTO task_events(id,task_id,actor_id,event_type,question_id,payload_json,occurred_at) "
+                       "VALUES(?,'task-2','student-2','help',?,?,?)",
+                       (event_id, question, json.dumps({"chat": PRIVATE, **payload}), occurred))
+
+    def test_only_server_delivered_help_changes_report_and_bank_usage(self):
+        from app.services.restricted_hints import hint_evidence_id
+
+        scope = {**STUDENT_SCOPE, "student_id": "student-2"}
+        baseline = build_learning_report(self.store, scope, "student-2")
+        baseline_snapshot = build_report_snapshot(baseline, scope)
+        baseline_bank = build_learning_report(self.store, BANK_SCOPE, "course-owner")
+        first = baseline_snapshot["tables"]["mastery"]["rows"][0]
+        self.assertEqual((first["independent_families"], first["percent"], first["status"]), (3, 100.0, "mastered"))
+        for status in ("requested", "validated", "fallback", "failed", "cancelled"):
+            response_id = "response-" + status
+            self._help_event(hint_evidence_id(response_id, status),
+                             {"source": "restricted_hint", "status": status, "response_id": response_id, "attempt_cycle": 1})
+        self._help_event("client-forged-delivery", {"source": "restricted_hint", "status": "validated_delivered",
+                                                  "response_id": "client-forged", "attempt_cycle": 1})
+        self._help_event(hint_evidence_id("client-source", "validated_delivered"),
+                         {"source": "client", "status": "validated_delivered", "response_id": "client-source", "attempt_cycle": 1})
+        self._help_event(hint_evidence_id("missing-source", "validated_delivered"),
+                         {"status": "validated_delivered", "response_id": "missing-source", "attempt_cycle": 1})
+        self._help_event("null-status", {"status": None})
+        failed = build_learning_report(self.store, scope, "student-2")
+        self.assertGreater(failed["source_revision"], baseline["source_revision"])
+        self.assertEqual(failed["evidence"], baseline["evidence"])
+        self.assertEqual(build_report_snapshot(failed, scope)["tables"]["mastery"], baseline_snapshot["tables"]["mastery"])
+        self.assertEqual(build_learning_report(self.store, BANK_SCOPE, "course-owner")["question_usage"],
+                         baseline_bank["question_usage"])
+
+        self._help_event(hint_evidence_id("delivered", "validated_delivered"),
+                         {"source": "restricted_hint", "status": "validated_delivered", "response_id": "delivered", "attempt_cycle": 1})
+        delivered = build_learning_report(self.store, scope, "student-2")
+        evidence = {row["question_id"]: row for row in delivered["evidence"]}
+        self.assertEqual({key: value["independent_evidence"] for key, value in evidence.items()},
+                         {"q1": False, "q2": True, "q3": True})
+        self.assertEqual(evidence["q1"]["exposure"], "hinted")
+        snapshot = build_report_snapshot(delivered, scope)
+        row = snapshot["tables"]["mastery"]["rows"][0]
+        self.assertEqual((row["independent_families"], row["percent"], row["status"], row["hinted_observations"]),
+                         (2, None, "insufficient_evidence", 1))
+        old_usage = {row["question_id"]: row for row in baseline_bank["question_usage"]}
+        new_usage = {row["question_id"]: row for row in build_learning_report(self.store, BANK_SCOPE, "course-owner")["question_usage"]}
+        self.assertEqual(new_usage["q1"], {**old_usage["q1"], "independent_count": old_usage["q1"]["independent_count"] - 1,
+                                         "assisted_count": old_usage["q1"]["assisted_count"] + 1})
+        self.assertEqual(new_usage["q2"], old_usage["q2"])
+        self.assertNotIn(PRIVATE, json.dumps(delivered))
+        self.assertNotIn(PRIVATE, json.dumps(snapshot))
+
+    def test_delivered_help_respects_submission_time_question_and_attempt_cycle(self):
+        from app.services.restricted_hints import hint_evidence_id
+
+        for response_id, question, occurred, cycle in (("future", "q1", 101, 1),
+                                                        ("other-question", "q2", 90, 1),
+                                                        ("other-cycle", "q3", 90, 2)):
+            self._help_event(hint_evidence_id(response_id, "validated_delivered"),
+                             {"source": "restricted_hint", "status": "validated_delivered", "response_id": response_id,
+                              "attempt_cycle": cycle}, question=question, occurred=occurred)
+        report = build_learning_report(self.store, {**STUDENT_SCOPE, "student_id": "student-2"}, "student-2")
+        evidence = {row["question_id"]: row for row in report["evidence"]}
+        self.assertEqual({key: value["independent_evidence"] for key, value in evidence.items()},
+                         {"q1": True, "q2": False, "q3": True})
+
+    def test_repeated_question_families_do_not_manufacture_independent_mastery(self):
+        scope = {**STUDENT_SCOPE, "student_id": "student-2"}
+        with self.store._using_connection(write=True) as db:
+            db.execute("INSERT INTO learning_tasks(id,goal_id,round_id,student_id,status,version,deadline_at,allow_late,allow_retries,created_at,updated_at) "
+                       "VALUES('task-repeat','goal-1','round-2','student-2','results_ready',1,NULL,1,1,1,1)")
+            for number, question in self.questions.items():
+                db.execute("INSERT INTO task_items(task_id,question_id,question_version,position,frozen_json) VALUES('task-repeat',?,1,?,?)",
+                           (f"q{number}", number, json.dumps(question)))
+            self._insert_attempt(db, "task-repeat", "repeat-first-attempt", 1, 400)
+        snapshot = build_report_snapshot(build_learning_report(self.store, scope, "student-2"), scope)
+        row = snapshot["tables"]["mastery"]["rows"][0]
+        self.assertEqual((row["independent_families"], row["observed_families"], row["independent_observations"], row["redo_observations"]),
+                         (3, 3, 3, 3))
+        self.assertEqual(row["percent"], 100.0)
+        # If the first observation in a family was helped, a later task using
+        # that family cannot make it an independent first encounter again.
+        self._help_event("legacy-help", {"help_type": "hint"})
+        helped = build_report_snapshot(build_learning_report(self.store, scope, "student-2"), scope)
+        row = helped["tables"]["mastery"]["rows"][0]
+        self.assertEqual((row["independent_families"], row["hinted_observations"], row["redo_observations"]), (2, 1, 3))
+        self.assertIsNone(row["percent"])
 
     def test_personal_history_never_contains_another_students_evidence_or_judgment(self):
         result = build_learning_report(self.store, STUDENT_SCOPE, "student-1")

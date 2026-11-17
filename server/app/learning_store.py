@@ -139,6 +139,8 @@ class _LearningStoreCore:
             if version == 1:
                 migrate_v2(db)
                 db.execute("PRAGMA user_version=2")
+            from .teacher_planning_store import ensure_schema
+            ensure_schema(db)
             db.commit()
         except BaseException:
             if db.in_transaction:
@@ -973,10 +975,21 @@ class _LearningStoreCore:
             attempt_no = int(db.execute("SELECT COALESCE(MAX(attempt_no),0)+1 FROM attempts WHERE task_id=?",
                                         (task_id,)).fetchone()[0])
             kind = "first" if attempt_no == 1 else "retry"
-            exposed = db.execute(
-                "SELECT 1 FROM task_events WHERE task_id=? AND event_type IN ('help','exposure') AND occurred_at<=? LIMIT 1",
+            exposed = False
+            for event in db.execute(
+                "SELECT id,event_type,payload_json FROM task_events WHERE task_id=? AND event_type IN ('help','exposure') AND occurred_at<=?",
                 (task_id, current),
-            ).fetchone() is not None
+            ):
+                payload = json.loads(event["payload_json"])
+                if event["event_type"] == "exposure" or "status" not in payload:
+                    exposed = True
+                    break
+                from .services.restricted_hints import hint_evidence_id
+                if (payload.get("status") == "validated_delivered" and payload.get("source") == "restricted_hint"
+                        and payload.get("attempt_cycle") == attempt_no and payload.get("response_id")
+                        and event["id"] == hint_evidence_id(payload["response_id"], "validated_delivered")):
+                    exposed = True
+                    break
             independent = kind == "first" and not exposed
             attempt_id, job_id = uuid4().hex, f"grade:{task_id}:{attempt_no}"
             max_score_units = sum(int(question["points_units"]) for question in questions.values())

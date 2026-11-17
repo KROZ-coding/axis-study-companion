@@ -79,11 +79,17 @@ class MessageCreate(RequestKey):
     text: str = Field(min_length=1, max_length=20000)
     task_id: str | None = Field(default=None, min_length=1, max_length=200)
     question_version_id: str | None = Field(default=None, min_length=1, max_length=200)
+    intent: Literal["chat", "hint"] = "chat"
+    hint_level: int | None = Field(default=None, ge=1, le=2, strict=True)
 
     @model_validator(mode="after")
     def question_requires_task(self):
         if self.question_version_id is not None and self.task_id is None:
             raise ValueError("question_version_id requires task_id")
+        if self.intent == "hint" and (self.task_id is None or self.question_version_id is None or self.hint_level is None):
+            raise ValueError("hint requires task, question version and hint level")
+        if self.intent != "hint" and self.hint_level is not None:
+            raise ValueError("hint level requires hint intent")
         return self
 
 
@@ -337,9 +343,27 @@ def post_message(conversation_id: str, payload: MessageCreate, access: Access = 
             raise NotFound("task is outside conversation course")
         scope.update({key: task_scope.get(key) for key in ("course_id", "class_id")})
         scope["task_id"] = payload.task_id
+    if payload.intent == "hint":
+        # Keep the saved draft/cycle stable through the companion outbox write.
+        # A lost HTTP response can replay the same binding; a new draft/cycle
+        # cannot silently reuse an earlier model request identity.
+        with access.runtime.learning.transaction():
+            policy = access.policy(access.user.id, task_id=payload.task_id, question_version_id=payload.question_version_id)
+            if policy.get("allow_hint_content") is not True or payload.hint_level not in policy.get("allowed_hint_levels", []):
+                raise InvalidTransition("hint requires a current saved formal attempt")
+            result = access.companion.post_message(
+                conversation_id, access.user.id, payload.text, request_id=payload.request_id,
+                task_id=payload.task_id, question_version_id=payload.question_version_id, budget_scope=scope,
+                intent=payload.intent, hint_level=payload.hint_level, hint_binding=policy["hint_binding"],
+            )
+            access.runtime.learning.record_restricted_hint(
+                access.user.id, result["response_id"], policy["hint_binding"],
+                level=payload.hint_level, status="requested",
+            )
+            return result
     return access.companion.post_message(conversation_id, access.user.id, payload.text, request_id=payload.request_id,
                                          task_id=payload.task_id, question_version_id=payload.question_version_id,
-                                         budget_scope=scope)
+                                         budget_scope=scope, intent=payload.intent)
 
 
 @router.get("/companion/conversations/{conversation_id}/messages")
@@ -596,6 +620,33 @@ def _notification_projection(item: dict, access: Access) -> dict:
                 item.pop("notice", None)
                 if message["redacted"]:
                     item["notice"] = message["notice"]
+        elif kind == "teaching_insight":
+            from ..services.teaching_insights import teaching_insight_access
+            if access.user.role != "teacher":
+                raise NotFound("teaching insight notifications are teacher-only")
+            insight = teaching_insight_access(access.runtime, access.user.id, resource_id)
+            payload = item.get("payload", {})
+            owner = access.platform.get_user(insight["owner_id"])
+            goal = access.runtime.learning.get_goal_scope(insight["origin_goal_id"], access.user.id)
+            if (insight["id"] != resource_id or insight["job_id"] != "teaching-insight:" + resource_id
+                    or owner is None or owner.get("role") != "teacher"
+                    or item["user_id"] != insight["owner_id"]
+                    or any(goal.get(key) != insight.get(key) for key in ("course_id", "class_id"))
+                    or payload.get("insight_id") != resource_id
+                    or payload.get("job_id") != insight["job_id"]):
+                raise NotFound("teaching insight notification binding changed")
+            canonical = {"insight_id": insight["id"], "goal_id": insight["origin_goal_id"],
+                         "class_id": insight["class_id"], "course_id": insight["course_id"],
+                         "source_report_revision": insight["source_report_revision"],
+                         "job_id": insight["job_id"], "status": insight["status"]}
+            if any(key in payload and payload[key] != value for key, value in canonical.items() if key != "status"):
+                raise NotFound("teaching insight notification scope changed")
+            if payload.get("owner_id", insight["owner_id"]) != insight["owner_id"]:
+                raise NotFound("teaching insight notification owner changed")
+            if item["event_type"] not in {"teaching_insight_ready", "teaching_insight_failed", "teaching_insight_cancelled"}:
+                raise NotFound("teaching insight notification event changed")
+            item.update(payload=canonical, redacted=False)
+            item.pop("notice", None)
         elif kind in {"attempt", "grade", "feedback", "result", "appeal"}:
             task_id = item.get("payload", {}).get("task_id")
             if task_id is None:

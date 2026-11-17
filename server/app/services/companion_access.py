@@ -74,19 +74,36 @@ def answer_policy(runtime, user_id: str, *, task_id: str | None = None,
     diagnostic = (scoped.get("diagnostic") is True or global_policy.get("diagnostic") is True
                   or scoped.get("phase") in {"diagnostic", "first_diagnostic"}
                   or global_policy.get("phase") in {"diagnostic", "first_diagnostic"})
-    attempted = scoped.get("attempted") is True and global_policy.get("attempted") is True
-    allowed = scoped.get("allow_generation") is True and global_policy.get("allow_generation") is True
+    attempted = scoped.get("attempted") is True if task_id and question_version_id else (
+        scoped.get("attempted") is True and global_policy.get("attempted") is True)
+    allowed = scoped.get("allow_generation") is True and global_policy.get("allow_generation") is True and not diagnostic
+    hint_content = bool(task_id and question_version_id and not diagnostic and scoped.get("allow_hint_content") is True)
+    hint_generation = hint_content and scoped.get("allow_hint_generation") is True
+    delivered = {}
+    # All public hint projections consume this evidence map, including history,
+    # message references, context and SSE. Keep durable delivery/billing facts;
+    # cancellation only removes the evidence from the current read permission.
+    for response_id, evidence in (scoped.get("delivered_hint_evidence", {}) if hint_content else {}).items():
+        response = runtime.companion.get_response(response_id)
+        job = response_job_state(runtime, response)
+        if job and (job["cancel_requested"] or job["status"] == "cancelled"):
+            continue
+        delivered[response_id] = evidence
     return {
         **scoped,
         "allow_generation": allowed,
         "allow_assistant_content": (scoped["allow_assistant_content"]
-                                    and global_policy["allow_assistant_content"]),
+                                    and global_policy["allow_assistant_content"] and not diagnostic),
+        "allow_hint_generation": hint_generation, "allow_hint_content": hint_content,
+        "allowed_hint_levels": scoped.get("allowed_hint_levels", []) if hint_content else [],
+        "hint_binding": scoped.get("hint_binding") if hint_content else None,
+        "delivered_hint_evidence": delivered,
         "diagnostic": diagnostic,
         "attempted": attempted,
         "active_count": global_policy.get("active_count", 0),
         "guidance_key": "independent_attempt" if diagnostic else "try_first" if not attempted else "await_results",
         "reason": "freeform" if allowed else "diagnostic" if diagnostic else "attempt_required" if not attempted else "await_results",
-        "help_recordable": bool(task_id and attempted and not diagnostic),
+        "help_recordable": hint_content,
     }
 
 

@@ -362,6 +362,35 @@ test("repeating count pages fail finitely and inactive identities cannot fetch o
   assert.doesNotMatch(h.notifications.render(), /data-notification-action/);
 });
 
+test("insight notifications retain exact locators without copying private results and require successful opening", async () => {
+  const h = harness({ count: 1, onOpen: () => false });
+  h.state.role = "teacher"; h.api.state.user.role = "teacher";
+  Object.assign(h.rows[0], { event_type: "teaching_insight_ready", resource_type: "teaching_insight", resource_id: "insight-1",
+    payload: { draft_id: "draft-1", summary: "PRIVATE-SUMMARY", result: { findings: ["PRIVATE-FINDING"] } } });
+  await h.notifications.load(); await h.click("panel");
+  assert.match(h.html(), /学情总结已生成/);
+  assert.equal(await h.notifications.open("notification-1"), false);
+  assert.deepEqual(h.opened[0].payload, { draft_id: "draft-1", insight_id: "insight-1" });
+  assert.equal(h.posts().length, 0); assert.equal(h.count(), "1");
+  assert.doesNotMatch(h.notifications.render(), /PRIVATE-SUMMARY|PRIVATE-FINDING/);
+  h.optionsState.onOpen = () => true;
+  assert.equal(await h.notifications.open("notification-1"), true);
+  assert.equal(h.posts().length, 1); assert.equal(h.count(), "0");
+});
+
+test("redacted insight notifications never restore a resource locator from the envelope", async () => {
+  const h = harness({ count: 1 });
+  h.state.role = "teacher"; h.api.state.user.role = "teacher";
+  Object.assign(h.rows[0], { event_type: "teaching_insight_failed", resource_type: "teaching_insight", resource_id: "private-insight",
+    payload: { redacted: true, insight_id: "private-insight", draft_id: "private-draft" } });
+  await h.notifications.load(); await h.click("panel"); await h.click("toggle", "notification-1");
+  assert.match(h.html(), /学情总结未完成/);
+  assert.equal(h.control("open", "notification-1").disabled, true);
+  assert.equal(await h.notifications.open("notification-1"), false);
+  assert.equal(h.opened.length, 0); assert.equal(h.posts().length, 0);
+  assert.doesNotMatch(h.notifications.render(), /private-insight|private-draft/);
+});
+
 test("teacher class changes preserve notification ownership and do not discard a receipt", async () => {
   const gate = deferred(), h = harness({ readGate: gate }); h.state.role = "teacher"; h.state.classId = "class-1";
   h.api.state.user.role = "teacher";

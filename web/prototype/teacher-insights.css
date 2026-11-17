@@ -1,0 +1,70 @@
+.teacher-insights { display: grid; gap: 20px; min-width: 0; color: var(--ink); font-family: var(--cjk); }
+.teacher-insights *, .teacher-insights *::before, .teacher-insights *::after { box-sizing: border-box; }
+.teacher-insights h1 { margin: 5px 0 10px; font-size: clamp(27px, 2.5vw, 36px); font-weight: 600; }
+.teacher-insights h2 { margin: 0 0 14px; font-size: 21px; font-weight: 600; }
+.teacher-insights h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.teacher-insights p { line-height: 1.75; overflow-wrap: anywhere; }
+.teacher-insights .ti-panel { min-width: 0; padding: 24px; }
+.teacher-insights .ti-heading, .teacher-insights .ti-section-head { display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: 14px 24px; }
+.teacher-insights .ti-heading p { margin: 0; max-width: 65ch; }
+.teacher-insights .ti-muted { color: var(--ink-soft); font-size: 14px; }
+.teacher-insights .ti-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.teacher-insights .ti-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.teacher-insights .ti-button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; border: 1px solid #aecbd8; border-radius: 9px; background: #f5fafc; color: #254e62; padding: 10px 15px; font: inherit; font-size: 14px; line-height: 1.5; cursor: pointer; }
+.teacher-insights .ti-button.primary { background: #285e75; border-color: #285e75; color: #fff; }
+.teacher-insights .ti-button:hover:not(:disabled) { border-color: #386f86; box-shadow: 0 2px 8px #294c6212; }
+.teacher-insights .ti-button:disabled { opacity: .55; cursor: not-allowed; }
+.teacher-insights :is(button, input, select, textarea, summary, [tabindex]):focus-visible { outline: 3px solid #4a95b3; outline-offset: 3px; }
+.teacher-insights .ti-selection, .teacher-insights .ti-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-block: 18px; }
+.teacher-insights .ti-field { display: grid; align-content: start; gap: 8px; min-width: 0; font-size: 14px; }
+.teacher-insights .ti-field :is(input, select, textarea) { min-width: 0; width: 100%; min-height: 44px; padding: 9px 12px; border: 1px solid #aecbd8; border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.teacher-insights .ti-field :is(input, select, textarea):disabled { background: #f1f5f6; color: #526776; }
+.teacher-insights .ti-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 16px 28px; margin: 18px 0; padding-block: 18px; border-block: 1px solid var(--line); }
+.teacher-insights .ti-meta div { min-width: 0; }
+.teacher-insights .ti-meta dt { color: var(--ink-soft); font-size: 12px; }
+.teacher-insights .ti-meta dd { margin: 6px 0 0; overflow-wrap: anywhere; font-size: 14px; font-variant-numeric: tabular-nums; }
+.teacher-insights .ti-notice { margin: 14px 0; padding: 14px 16px; border-left: 3px solid #4a95b3; border-radius: 0 8px 8px 0; background: #e7f4fa; color: #254e62; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.teacher-insights .ti-notice.error { border-color: #b45049; background: #fff0ee; color: #953734; }
+.teacher-insights .ti-notice.warning { border-color: #ad7d37; background: #fff7e8; color: #755424; }
+.teacher-insights .ti-notice p:first-child { margin-top: 0; }
+.teacher-insights .ti-notice p:last-child { margin-bottom: 0; }
+.teacher-insights .ti-tag { display: inline-block; border: 1px solid #b4d4df; border-radius: 6px; padding: 6px 9px; background: #eff8fb; color: #2d6073; font-size: 12px; overflow-wrap: anywhere; }
+.teacher-insights .ti-table-scroll { max-width: 100%; min-width: 0; overflow: auto; overscroll-behavior-inline: contain; margin-block: 16px; }
+.teacher-insights table { width: 100%; min-width: 580px; border-collapse: collapse; font-size: 13px; }
+.teacher-insights :is(th, td) { max-width: 360px; padding: 11px 12px; border-bottom: 1px solid #e0ebef; text-align: left; vertical-align: top; line-height: 1.6; overflow-wrap: anywhere; }
+.teacher-insights th { background: #edf6fa; color: #365b6d; font-weight: 600; }
+.teacher-insights .ti-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 12px 24px; margin-block: 18px; }
+.teacher-insights .ti-facts dt { color: var(--ink-soft); font-size: 13px; }
+.teacher-insights .ti-facts dd { margin: 5px 0 0; line-height: 1.6; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.teacher-insights .ti-list { margin: 12px 0; padding-left: 22px; line-height: 1.8; overflow-wrap: anywhere; }
+.teacher-insights .ti-history { display: grid; gap: 10px; }
+.teacher-insights .ti-history .ti-button { justify-content: flex-start; text-align: left; overflow-wrap: anywhere; }
+.teacher-insights .ti-history [aria-pressed="true"] { border-color: #36758f; background: #e4f3fa; }
+.teacher-insights .ti-pagination { display: flex; justify-content: flex-end; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; font-size: 14px; }
+.teacher-insights fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.teacher-insights legend { margin-bottom: 12px; font-size: 15px; font-weight: 600; }
+.teacher-insights .ti-members { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 6px 16px; margin-block: 12px 20px; max-height: 300px; overflow: auto; }
+.teacher-insights .ti-check { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 7px 4px; font-size: 14px; line-height: 1.65; cursor: pointer; overflow-wrap: anywhere; }
+.teacher-insights .ti-check input { flex: 0 0 auto; width: 18px; height: 18px; margin: 0; accent-color: #285e75; }
+.teacher-insights .ti-types { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.teacher-insights .ti-policy { display: grid; gap: 2px; margin-block: 16px; }
+.teacher-insights .ti-confirm { margin-block: 16px; padding: 12px 14px; border: 1px solid #b4d4df; border-radius: 8px; background: #f5fafc; }
+.teacher-insights .ti-papers { margin-top: 20px; border-top: 1px solid var(--line); }
+.teacher-insights summary { min-height: 44px; padding: 12px 4px; font-size: 15px; line-height: 1.6; cursor: pointer; overflow-wrap: anywhere; }
+.teacher-insights .ti-paper { padding-block: 18px; border-top: 1px solid var(--line); }
+.teacher-insights .ti-paper:first-of-type { border-top: 0; }
+.teacher-insights .ti-question { padding-block: 16px; border-bottom: 1px solid #e0ebef; }
+.teacher-insights .ti-question:last-child { border-bottom: 0; }
+.teacher-insights .ti-question > p { margin: 8px 0; }
+.teacher-insights .ti-question pre { max-width: 100%; margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-soft); font: inherit; font-size: 13px; }
+.teacher-insights .ti-raw { max-height: 420px; max-width: 100%; overflow: auto; margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 13px; line-height: 1.65; }
+.teacher-insights .ti-footer { display: grid; gap: 8px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+@media (max-width: 650px) {
+  .teacher-insights { gap: 15px; }
+  .teacher-insights .ti-panel { padding: 18px 15px; }
+  .teacher-insights .ti-selection, .teacher-insights .ti-fields { grid-template-columns: minmax(0, 1fr); }
+  .teacher-insights .ti-types { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .teacher-insights .ti-actions .ti-button { flex: 1 1 140px; }
+  .teacher-insights .ti-heading .ti-actions { width: 100%; }
+  .teacher-insights .ti-button { padding-inline: 10px; }
+}

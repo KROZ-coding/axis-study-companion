@@ -83,8 +83,9 @@ def _text(value: Any, field: str, *, maximum: int = 200) -> str:
 class ReportStore:
     """A lazy-runtime friendly, file-backed repository with explicit migrations."""
 
-    SCHEMA_VERSION = 1
-    _TABLES = frozenset({"reports", "report_snapshots", "report_revisions", "report_idempotency"})
+    SCHEMA_VERSION = 2
+    _V1_TABLES = frozenset({"reports", "report_snapshots", "report_revisions", "report_idempotency"})
+    _TABLES = _V1_TABLES | frozenset({"teaching_insights", "teaching_insight_outbox"})
 
     def __init__(self, db_path: str | Path, *, timeout: float = 30.0) -> None:
         if str(db_path) == ":memory:":
@@ -113,7 +114,8 @@ class ReportStore:
             raise RuntimeError("report database schema is newer than supported")
         if version == 0 and tables:
             raise RuntimeError("refusing to migrate an unversioned, non-empty report database")
-        if version > 0 and not self._TABLES.issubset(tables):
+        required = self._V1_TABLES if version == 1 else self._TABLES
+        if version > 0 and not required.issubset(tables):
             raise RuntimeError("existing database does not match the report schema")
 
     def _connect(self) -> sqlite3.Connection:
@@ -157,6 +159,10 @@ class ReportStore:
                 if version == 0:
                     self._migration_1(connection)
                     connection.execute("PRAGMA user_version=1")
+                if version < 2:
+                    from .teaching_insight_store import migrate_insights
+                    migrate_insights(connection)
+                    connection.execute("PRAGMA user_version=2")
                 connection.commit()
             except BaseException:
                 connection.rollback()

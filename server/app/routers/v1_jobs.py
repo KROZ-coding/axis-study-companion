@@ -99,12 +99,23 @@ def resume_job(job_id: str, payload: ResumeRequest, request: Request, actor=Depe
     job = require_job(runtime, actor, job_id, write=True)
     if job.cancel_requested or job.status == "cancelled":
         raise HTTPException(status_code=409, detail={"code": "cancelled_job", "message": "已取消的请求不能恢复，请重新发起业务请求"})
+    insight = None
+    if job.payload.get("resource_type") == "teaching_insight":
+        insight = runtime.insights.get(job.payload["resource_id"])
+        if insight is None or insight["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail={"code": "cancelled_job", "message": "已取消的总结不能恢复，请重新发起业务请求"})
+        if (insight.get("error") or {}).get("code") == "invalid_model_output":
+            raise HTTPException(status_code=409, detail={"code": "new_insight_required", "message": "此前模型输出未通过校验，请重新生成总结"})
     if job.paid and not payload.confirm_paid:
         raise HTTPException(status_code=409, detail={"code": "confirmation_required", "message": "恢复可能产生新费用，需要明确确认"})
     if job.status == "awaiting_confirmation":
         result = _queue_action(lambda: runtime.queue.confirm_recovery(job_id, approved=True))
     else:
         result = _queue_action(lambda: runtime.queue.retry(job_id, confirm_paid=payload.confirm_paid))
+    if insight is not None and insight["status"] == "failed":
+        # Queue recovery commits first. If the process stops here, the next
+        # claimed generation repeats this idempotent domain resume in Worker.
+        runtime.insights.resume(insight["id"], generation=job.generation + 1)
     runtime.platform.record_audit_event("job_resume_confirmed", actor.id, resource_type="job", resource_id=job_id)
     return job_view(result)
 
@@ -176,14 +187,25 @@ async def response_stream(response_id: str, request: Request, after: int = Query
 
     def snapshot(response):
         fields = ("response_id", "status", "text", "redacted", "notice", "error", "generation", "last_event_id",
-                  "assistant_message_id", "content_type", "task_id", "question_version_id", "job_id", "job")
+                  "assistant_message_id", "content_type", "task_id", "question_version_id", "job_id", "job",
+                  "intent", "hint_level", "hint_metadata")
         return frame("snapshot", {key: response.get(key) for key in fields}, response["last_event_id"])
 
     def visibility_state(response):
         job = response.get("job") or {}
         return (response.get("redacted", False), response.get("notice"),
                 response["status"] in {"failed", "cancelled"}, job.get("status"),
-                job.get("cancel_requested"), job.get("reconciliation_required"), job.get("cost_pending"))
+                job.get("cancel_requested"), job.get("reconciliation_required"), job.get("cost_pending"),
+                response.get("intent"), response.get("hint_level"), response.get("hint_metadata"))
+
+    def response_done(response):
+        # Hint content and delivery evidence commit in separate databases. Keep
+        # following an active job until its final projection can be observed.
+        if response.get("intent") == "hint" and response["status"] == "completed":
+            job = response.get("job") or {}
+            if job.get("status") in {"queued", "leased", "running", "retry_wait"}:
+                return False
+        return response["status"] in {"completed", "failed", "cancelled"}
 
     async def stream():
         cursor, generation, visibility = after, None, None
@@ -211,7 +233,7 @@ async def response_stream(response_id: str, request: Request, after: int = Query
                 cursor = response["last_event_id"]
                 visibility = current_visibility
                 yield snapshot(response)
-                if response["status"] in {"completed", "failed", "cancelled"} or once:
+                if response_done(response) or once:
                     return
                 continue
             visibility = current_visibility
@@ -244,7 +266,7 @@ async def response_stream(response_id: str, request: Request, after: int = Query
                 return
             if response["generation"] != generation or visibility_state(response) != visibility:
                 continue
-            terminal = response["status"] in {"completed", "failed", "cancelled"}
+            terminal = response_done(response)
             if cursor >= response["last_event_id"] and (once or terminal):
                 yield snapshot(response)
                 return

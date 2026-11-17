@@ -294,14 +294,19 @@ class TeacherPlanning:
             }
         return result
 
-    def _build(self, db, actor_id, config):
+    def _build(self, db, actor_id, config, *, frozen_suggestions=None, origin_goal_id=None, paper_overrides=None, confirmed_pool=None):
         students = self._scope(actor_id, config)
         knowledge = self._knowledge(actor_id, config)
         errors = self._time_errors(config)
         if set(config["knowledge_points"]) - set(knowledge):
             errors.append({"code": "knowledge_not_confirmed", "message": "所选知识点不是本课程可访问的已确认知识点"})
         pool, excluded = self._catalog(db, actor_id, config, knowledge)
-        suggestions = self._suggestions(db, config, knowledge)
+        if origin_goal_id is not None:
+            pool = self._unused_goal_pool(db, origin_goal_id, pool)
+        if confirmed_pool is not None:
+            allowed = {(ref["question_id"], ref["version"]): ref["fingerprint"] for ref in confirmed_pool}
+            pool = [q for q in pool if allowed.get(q["key"]) == q["fingerprint"]]
+        suggestions = frozen_suggestions if frozen_suggestions is not None else self._suggestions(db, config, knowledge)
         ratio = COMMON_RATIOS[config["common_level"]]
         target = config["question_count"] if len(students) == 1 else math.ceil(config["question_count"] * ratio / 100)
         slots = [(kind, None) for kind in TYPES for _ in range(config["question_types"][kind])]
@@ -331,7 +336,9 @@ class TeacherPlanning:
                 sid = student["student_id"]
                 weak = set(suggestions[sid]["weak_knowledge_points"])
                 def rank(q):
-                    return (q["key"] in intersection, -len(weak.intersection(q["summary"]["knowledge_points"])),
+                    preferred = suggestions[sid].get("preferred_difficulty")
+                    return (q["summary"]["difficulty"] != preferred if preferred else False,
+                            q["key"] in intersection, -len(weak.intersection(q["summary"]["knowledge_points"])),
                             usage[q["key"]], self._hash([sid, q["key"]]))
                 personal = self._match(personal_slots, pool, excluded_families=common_families, rank=rank)
                 if any(q is None for q in personal):
@@ -342,6 +349,22 @@ class TeacherPlanning:
                 keys = {q["key"] for q in personal}
                 intersection = keys if not usage else intersection & keys
                 usage.update(keys)
+        if paper_overrides:
+            current = {q["key"]: q for q in pool}
+            valid = set(paper_overrides).issubset(config["student_ids"]) and bool(papers)
+            for sid, refs in paper_overrides.items():
+                keys = [(ref["question_id"], ref["version"]) for ref in refs]
+                chosen = [current[key] for key in keys if key in current]
+                if (len(chosen) != len(keys) or len(chosen) != config["question_count"]
+                        or len({q["family"] for q in chosen}) != len(chosen)
+                        or Counter(q["group"][0] for q in chosen) != Counter({k: v for k, v in config["question_types"].items() if v})):
+                    valid = False
+                papers[sid] = chosen
+            structures = {tuple(sorted(q["group"] for q in paper)) for paper in papers.values()}
+            shared = set.intersection(*({q["key"] for q in paper} for paper in papers.values())) if papers else set()
+            if not valid or len(structures) != 1 or len(shared) < target:
+                errors.append({"code": "invalid_paper_override", "message": "编辑卷须使用未练过的合格题族，保持等题型、等分值结构与共同题比例"})
+                papers = {}
         actual = set.intersection(*({q["key"] for q in paper} for paper in papers.values())) if papers else set()
         selected = {q["key"]: q for paper in papers.values() for q in paper}
         common_count = len(actual)
@@ -539,3 +562,353 @@ class TeacherPlanning:
             )
             jobs.append({**spec, "status": job["status"], "stage": job["stage"]})
         return {**intent, "jobs": jobs}
+
+    def _unused_goal_pool(self, db, goal_id, pool):
+        """Exclude all historically exposed families, including numeric variants."""
+        used_ids, used_families = set(), set()
+        for row in db.execute("""SELECT ti.question_id,ti.frozen_json FROM task_items ti
+                JOIN learning_tasks t ON t.id=ti.task_id WHERE t.goal_id=?""", (goal_id,)):
+            used_ids.add(row["question_id"])
+            question = json.loads(row["frozen_json"])
+            try:
+                _, family = question_fingerprints({**question, "rubric": self._rubric(question)})
+            except (ValueError, TypeError, KeyError):
+                raise PlanningConflict("historical_family_invalid", "历史题族无法核对，须先复核原目标题目") from None
+            used_families.add("computed:" + family)
+            used_families.update(field + ":" + question[field] for field in ("family_id", "family_sha") if question.get(field))
+        # The catalog already unions identities across candidate questions. If
+        # one identity was used, exclude the entire connected candidate family.
+        blocked = {q["family"] for q in pool if q["key"][0] in used_ids or q["families"] & used_families}
+        return [q for q in pool if q["family"] not in blocked]
+
+    @staticmethod
+    def _next_view(row):
+        result = dict(row)
+        for field in ("config", "overrides", "basis", "published_result"):
+            encoded = result.pop(field + "_json")
+            result["paper_overrides" if field == "overrides" else field] = json.loads(encoded) if encoded else None
+        result["allocation_mode"] = "deterministic_teacher_confirmed"
+        result["bounded_plan_supported"] = True
+        return result
+
+    def _next_access(self, db, actor_id, draft_id, *, write=False):
+        row = db.execute("SELECT * FROM teacher_next_round_drafts WHERE id=?", (draft_id,)).fetchone()
+        if row is None:
+            raise LookupError("下一轮草稿不存在")
+        actor, classroom = self.platform.get_user(actor_id), self.platform.get_class(row["class_id"])
+        if (not actor or actor["status"] != "active" or actor["role"] != "teacher" or not classroom
+                or classroom["course_id"] != row["course_id"]
+                or not self.platform.can_access_class(actor_id, row["class_id"], teaching=write)):
+            raise PermissionError("下一轮草稿不存在或当前权限不足")
+        result = self._next_view(row)
+        goal = db.execute("SELECT version FROM learning_goals WHERE id=?", (row["origin_goal_id"],)).fetchone()
+        result["current_goal_version"] = goal[0] if goal else None
+        plan = db.execute("SELECT * FROM goal_plans WHERE goal_id=?", (row["origin_goal_id"],)).fetchone()
+        result["bounded_plan"] = self._bounded_view(plan) if plan else None
+        return result
+
+    @staticmethod
+    def _bounded_view(row):
+        policy = json.loads(row["policy_json"])
+        return {"goal_id": row["goal_id"], "status": row["status"], "remaining_rounds": row["remaining_rounds"],
+                "next_open_at": row["next_open_at"], "ends_at": row["ends_at"], "reason": row["reason"], "version": row["version"],
+                "interval_seconds": policy["interval_seconds"], "source_draft_id": policy.get("source_draft_id"),
+                "question_pool": policy["question_pool"]}
+
+    @staticmethod
+    def _next_revision(draft, expected_revision):
+        if type(expected_revision) is not int or expected_revision != draft["revision"]:
+            raise PlanningConflict("draft_revision_conflict", "草稿已在其他页面修改，请重新载入")
+        if draft["status"] != "draft":
+            raise PlanningConflict("draft_already_published", "此草稿已经发布，不能再次修改或生成新轮次")
+
+    def _next_guard(self, db, actor_id, draft, *, require_finished=True):
+        goal = self.learning._goal_row(db, draft["origin_goal_id"], actor_id)
+        self.learning._teacher_write(actor_id, goal)
+        if (goal["class_id"] != draft["class_id"] or goal["course_id"] != draft["course_id"]
+                or goal["version"] != draft["goal_version"]):
+            raise PlanningConflict("goal_version_conflict", "原目标版本或范围已改变，请从新报告重新创建下一轮草稿")
+        if goal["status"] in {"closed", "paused"}:
+            raise PlanningConflict("goal_unavailable", "原目标已关闭或暂停")
+        latest = db.execute("SELECT * FROM learning_rounds WHERE goal_id=? ORDER BY round_no DESC LIMIT 1", (goal["id"],)).fetchone()
+        if latest is None or latest["round_no"] + 1 != draft["next_round"]:
+            raise PlanningConflict("next_round_conflict", "原目标的最新轮次已改变，请重新创建草稿")
+        plan = db.execute("SELECT status FROM goal_plans WHERE goal_id=?", (goal["id"],)).fetchone()
+        if plan and plan["status"] == "active":
+            raise PlanningConflict("bounded_plan_active", "请先暂停原目标的持续计划，再确认单轮发布")
+        if require_finished:
+            tasks = db.execute("SELECT id,status,first_attempt_id FROM learning_tasks WHERE round_id=?", (latest["id"],)).fetchall()
+            if not tasks or any(task["first_attempt_id"] is None for task in tasks):
+                raise PlanningConflict("previous_round_incomplete", "前轮仍有未完成首次作答，暂不能发布下一轮")
+            pending = db.execute("""SELECT 1 FROM attempts a JOIN learning_tasks t ON t.id=a.task_id
+                WHERE t.round_id=? AND a.status!='graded' LIMIT 1""", (latest["id"],)).fetchone()
+            pending_items = db.execute("""SELECT 1 FROM attempt_items ai JOIN attempts a ON a.id=ai.attempt_id
+                JOIN learning_tasks t ON t.id=a.task_id WHERE t.round_id=? AND ai.status!='graded' LIMIT 1""", (latest["id"],)).fetchone()
+            if pending or pending_items or any(task["status"] in {"submitted", "grading", "awaiting_manual"} for task in tasks):
+                raise PlanningConflict("previous_round_ungraded", "前轮仍有待评分或人工复核，暂不能发布下一轮")
+        return goal, latest
+
+    def _next_config(self, config, draft):
+        config = self._config(config)
+        if config["class_id"] != draft["class_id"] or config["course_id"] != draft["course_id"]:
+            raise ValueError("下一轮不能改变原目标的课程或班级")
+        if set(config["student_ids"]) - set(draft["basis"]["students"]):
+            raise ValueError("下一轮只能选择冻结报告中的学生")
+        return config
+
+    def _next_suggestions(self, draft):
+        result = {}
+        preferences = {"mastered": "hard", "developing": "medium", "needs_practice": "easy", "insufficient_evidence": None}
+        for sid in draft["config"]["student_ids"]:
+            fact = draft["basis"]["students"][sid]
+            status = fact["status"]
+            result[sid] = {"student_id": sid, "student_code": fact["student_code"], "status": status,
+                           "percent": fact["percent"], "independent_families": fact["independent_families"],
+                           "preferred_difficulty": preferences[status], "weak_knowledge_points": [],
+                           "evidence_refs": fact["evidence_refs"], "basis": "frozen_goal_mastery",
+                           "message": "按冻结目标掌握度规则优先匹配难度；没有知识点薄弱映射，教师可调整题目。"
+                           if status != "insufficient_evidence" else "独立证据不足，待评估；按教师配置取新题，不推断薄弱。"}
+        return result
+
+    def create_next_round_draft(self, actor_id, insight, *, request_id, config=None):
+        supplied = self._config(config) if config is not None else None
+        payload = {"insight_id": insight["id"], "config": supplied}
+        with self.platform.transaction(), self.learning._using_connection(write=True) as db:
+            # Current class rights are checked before command replay as well.
+            self._scope(actor_id, {"class_id": insight["class_id"], "course_id": insight["course_id"]}, students=False)
+            def apply():
+                if insight["status"] != "completed":
+                    raise PlanningConflict("insight_not_completed", "请等待有效冻结总结完成")
+                latest = db.execute("SELECT * FROM learning_rounds WHERE goal_id=? ORDER BY round_no DESC LIMIT 1", (insight["origin_goal_id"],)).fetchone()
+                if latest is None:
+                    raise PlanningConflict("previous_round_required", "原目标尚未发布前轮")
+                frozen = insight["input"]
+                students = {frozen["student_codes"][fact["student_code"]]: fact for fact in frozen["model_input"]["facts"]["students"]}
+                basis = {"students": students, "input_hash": insight["input_hash"], "snapshot_sha256": insight["snapshot_sha256"],
+                         "source_revision": insight["source_revision"]}
+                draft = {"id": "next_" + uuid4().hex, "owner_id": actor_id, "course_id": insight["course_id"], "class_id": insight["class_id"],
+                         "insight_id": insight["id"], "origin_goal_id": insight["origin_goal_id"],
+                         "source_report_revision": insight["source_report_revision"], "goal_version": insight["goal_version"],
+                         "next_round": latest["round_no"] + 1, "basis": basis}
+                goal, _ = self._next_guard(db, actor_id, draft, require_finished=False)
+                selected = supplied
+                if selected is None:
+                    policy_row = db.execute("SELECT policy_json FROM round_policies WHERE round_id=?", (latest["id"],)).fetchone()
+                    if policy_row is None:
+                        raise PlanningConflict("previous_policy_missing", "前轮缺少冻结教师政策，请提供明确组卷配置")
+                    policy = json.loads(policy_row[0])
+                    first = db.execute("SELECT id FROM learning_tasks WHERE round_id=? ORDER BY student_id LIMIT 1", (latest["id"],)).fetchone()
+                    kinds = Counter(json.loads(row[0])["type"] for row in db.execute("SELECT frozen_json FROM task_items WHERE task_id=?", (first[0],)))
+                    if set(kinds) - set(TYPES):
+                        raise PlanningConflict("unsupported_previous_types", "前轮含不支持的题型，请提供明确组卷配置")
+                    ratio = policy.get("common_question_ratio", 50)
+                    level = min(COMMON_RATIOS, key=lambda key: abs(COMMON_RATIOS[key] - ratio))
+                    selected = {"course_id": goal["course_id"], "class_id": goal["class_id"], "title": goal["title"],
+                                "description": goal["description"], "student_ids": sorted(students), "question_count": sum(kinds.values()),
+                                "question_types": {kind: kinds[kind] for kind in TYPES}, "common_level": level,
+                                "allow_late": policy["allow_late"], "allow_retries": policy["allow_retries"],
+                                "allow_retry_after_deadline": policy["allow_retry_after_deadline"]}
+                selected = self._next_config(selected, draft)
+                self._scope(actor_id, selected)
+                now = self.clock()
+                db.execute("""INSERT INTO teacher_next_round_drafts
+                    (id,owner_id,course_id,class_id,insight_id,origin_goal_id,source_report_revision,goal_version,
+                     next_round,revision,status,config_json,overrides_json,basis_json,created_at,updated_at)
+                     VALUES(?,?,?,?,?,?,?,?,?,1,'draft',?,'{}',?,?,?)""",
+                    (draft["id"], actor_id, draft["course_id"], draft["class_id"], draft["insight_id"], draft["origin_goal_id"],
+                     draft["source_report_revision"], draft["goal_version"], draft["next_round"], self._json(selected), self._json(basis), now, now))
+                return self._next_access(db, actor_id, draft["id"], write=True)
+            stored = self.learning._command(db, actor_id, "teaching_insight:next_round", request_id, payload, apply)
+            return self._next_access(db, actor_id, stored["id"], write=True)
+
+    def get_next_round_draft(self, actor_id, draft_id):
+        with self.platform.transaction(), self.learning._using_connection() as db:
+            return self._next_access(db, actor_id, draft_id)
+
+    def save_next_round_draft(self, actor_id, draft_id, *, request_id, expected_revision, config, paper_overrides=None):
+        from ..schemas.v1_teaching_insights import NextRoundSave
+        command = NextRoundSave.model_validate({"request_id": request_id, "expected_revision": expected_revision,
+                                               "config": self._config(config), "paper_overrides": paper_overrides or {}}).model_dump()
+        with self.platform.transaction(), self.learning._using_connection(write=True) as db:
+            draft = self._next_access(db, actor_id, draft_id, write=True)
+            def apply():
+                self._next_revision(draft, expected_revision)
+                self._next_guard(db, actor_id, draft, require_finished=False)
+                selected = self._next_config(command["config"], draft)
+                self._scope(actor_id, selected)
+                if set(command["paper_overrides"]) - set(selected["student_ids"]):
+                    raise ValueError("编辑卷包含未选择的学生")
+                db.execute("""UPDATE teacher_next_round_drafts SET config_json=?,overrides_json=?,revision=revision+1,updated_at=?
+                    WHERE id=? AND revision=? AND status='draft'""",
+                    (self._json(selected), self._json(command["paper_overrides"]), self.clock(), draft_id, expected_revision))
+                return self._next_access(db, actor_id, draft_id, write=True)
+            return self.learning._command(db, actor_id, "next_round:save:" + draft_id, request_id, command, apply)
+
+    def preview_next_round_draft(self, actor_id, draft_id, *, expected_revision):
+        with self.platform.transaction(), self.learning._using_connection(write=True) as db:
+            draft = self._next_access(db, actor_id, draft_id, write=True)
+            self._next_revision(draft, expected_revision)
+            self._next_guard(db, actor_id, draft, require_finished=False)
+            config = self._next_config(draft["config"], draft)
+            result, snapshot = self._build(db, actor_id, config, frozen_suggestions=self._next_suggestions(draft),
+                                          origin_goal_id=draft["origin_goal_id"], paper_overrides=draft["paper_overrides"])
+            try:
+                self._next_guard(db, actor_id, draft)
+            except PlanningConflict as error:
+                result["errors"].append({"code": error.code, "message": str(error)})
+                result.update(ready=False, readiness="blocked")
+            result.update(draft_id=draft_id, draft_revision=draft["revision"], origin_goal_id=draft["origin_goal_id"],
+                          next_round=draft["next_round"], insight_id=draft["insight_id"],
+                          allocation_mode="deterministic_teacher_confirmed", bounded_plan_supported=True)
+            if result["ready"]:
+                token, now = secrets.token_urlsafe(32), self.clock()
+                binding = {"kind": "teaching_next_round", "draft_id": draft_id, "draft_revision": draft["revision"],
+                           "origin_goal_id": draft["origin_goal_id"], "goal_version": draft["goal_version"],
+                           "next_round": draft["next_round"], "insight_id": draft["insight_id"]}
+                snapshot["next_round_binding"] = binding
+                db.execute("INSERT INTO teacher_plan_previews VALUES(?,?,?,?,?,?,NULL)",
+                    (self._hash(token), actor_id, self._hash({"config": config, "overrides": draft["paper_overrides"], **binding}),
+                     self._json(snapshot), now, now + self.PREVIEW_SECONDS))
+                result.update(preview_token=token, preview_expires_at=now + self.PREVIEW_SECONDS)
+            return result
+
+    def publish_next_round_draft(self, actor_id, draft_id, *, request_id, expected_revision, preview_token, confirm):
+        from ..schemas.v1_teaching_insights import NextRoundPublish
+        command = NextRoundPublish.model_validate({"request_id": request_id, "expected_revision": expected_revision,
+                                                   "preview_token": preview_token, "confirm": confirm}).model_dump()
+        if getattr(self.learning._local, "connection", None) is not None:
+            raise RuntimeError("publish must own the learning transaction")
+        with self.platform.transaction(), self.learning._using_connection(write=True) as db:
+            draft = self._next_access(db, actor_id, draft_id, write=True)
+            self._scope(actor_id, draft["config"])
+            def apply():
+                if draft["status"] == "published":
+                    raise PlanningConflict("draft_already_published", "草稿已发布；请读取原发布结果，不要使用新的请求编号重发")
+                self._next_revision(draft, expected_revision)
+                self._next_guard(db, actor_id, draft)
+                row = db.execute("SELECT * FROM teacher_plan_previews WHERE token_hash=? AND owner_id=?",
+                                 (self._hash(preview_token), actor_id)).fetchone()
+                if row is None:
+                    raise PlanningConflict("preview_required", "请先预览当前下一轮草稿")
+                snapshot = json.loads(row["snapshot_json"])
+                binding = {"kind": "teaching_next_round", "draft_id": draft_id, "draft_revision": draft["revision"],
+                           "origin_goal_id": draft["origin_goal_id"], "goal_version": draft["goal_version"],
+                           "next_round": draft["next_round"], "insight_id": draft["insight_id"]}
+                config = self._next_config(draft["config"], draft)
+                expected_hash = self._hash({"config": config, "overrides": draft["paper_overrides"], **binding})
+                if snapshot.get("next_round_binding") != binding or row["config_fingerprint"] != expected_hash:
+                    raise PlanningConflict("preview_stale", "预览不属于当前草稿修订")
+                if row["expires_at"] <= self.clock() or self._time_errors(config):
+                    raise PlanningConflict("preview_expired", "预览或计划时间已过期，请重新预览")
+                knowledge = self._knowledge(actor_id, config)
+                if set(config["knowledge_points"]) - set(knowledge):
+                    raise PlanningConflict("preview_stale", "所选知识点已不可访问")
+                pool, _ = self._catalog(db, actor_id, config, knowledge)
+                pool = self._unused_goal_pool(db, draft["origin_goal_id"], pool)
+                current = {q["key"]: q for q in pool}
+                for ref in snapshot["questions"]:
+                    question = current.get((ref["question_id"], ref["version"]))
+                    if question is None or question["fingerprint"] != ref["fingerprint"]:
+                        raise PlanningConflict("preview_stale", "题目、题族或来源已变化，请重新预览")
+                structures = set()
+                for refs in snapshot["papers"].values():
+                    questions = [current[(ref["question_id"], ref["version"])] for ref in refs]
+                    structures.add(tuple(sorted(q["group"] for q in questions)))
+                    if (len({q["family"] for q in questions}) != len(questions)
+                            or Counter(q["group"][0] for q in questions) != Counter({k: v for k, v in config["question_types"].items() if v})
+                            or sum(q["group"][1] for q in questions) != snapshot["total_score_units"]):
+                        raise PlanningConflict("preview_stale", "编辑卷结构已变化")
+                if len(structures) != 1 or set(snapshot["papers"]) != set(config["student_ids"]):
+                    raise PlanningConflict("preview_stale", "个人卷范围或等分值结构不一致")
+                result = self.learning.publish_round(actor_id, draft["origin_goal_id"], expected_version=draft["goal_version"],
+                    request_id="next-round:" + draft_id, round_no=draft["next_round"], student_ids=config["student_ids"],
+                    question_versions=snapshot["papers"][config["student_ids"][0]], personal_question_versions=snapshot["papers"],
+                    common_question_ratio=COMMON_RATIOS[config["common_level"]],
+                    **{key: config[key] for key in ("deadline_at", "scheduled_at", "allow_late", "allow_retries", "allow_retry_after_deadline")})
+                result.update(draft_id=draft_id, insight_id=draft["insight_id"], origin_goal_id=draft["origin_goal_id"],
+                              common_count=snapshot["common_count"], actual_common_ratio=snapshot["actual_common_ratio"],
+                              source_report_revision=draft["source_report_revision"], goal_version=draft["goal_version"] + 1)
+                db.execute("UPDATE teacher_next_round_drafts SET status='published',published_result_json=?,revision=revision+1,updated_at=? WHERE id=?",
+                           (self._json(result), self.clock(), draft_id))
+                db.execute("UPDATE teacher_plan_previews SET published_result_json=? WHERE token_hash=?", (self._json(result), row["token_hash"]))
+                return result
+            return self.learning._command(db, actor_id, "next_round:publish:" + draft_id, request_id, command, apply)
+
+    def configure_next_round_plan(self, actor_id, draft_id, **options):
+        from ..schemas.v1_teaching_insights import BoundedPlanConfirm
+        command = BoundedPlanConfirm.model_validate(options).model_dump()
+        with self.platform.transaction(), self.learning._using_connection(write=True) as db:
+            draft = self._next_access(db, actor_id, draft_id, write=True)
+            self._scope(actor_id, draft["config"])
+            def apply():
+                if draft["status"] != "published":
+                    raise PlanningConflict("next_round_not_published", "请先确认并发布下一轮，再配置持续计划")
+                goal = self.learning._goal_row(db, draft["origin_goal_id"], actor_id)
+                if goal["version"] != command["expected_goal_version"] or goal["status"] != "active":
+                    raise PlanningConflict("goal_version_conflict", "原目标版本已改变或不再开放，请重新确认")
+                latest = db.execute("SELECT round_no FROM learning_rounds WHERE goal_id=? ORDER BY round_no DESC LIMIT 1", (goal["id"],)).fetchone()
+                if latest is None or latest[0] != draft["next_round"]:
+                    raise PlanningConflict("next_round_conflict", "持续计划必须从最近一次教师确认发布的轮次开始")
+                if command["ends_at"] <= self.clock() + command["interval_seconds"]:
+                    raise ValueError("持续计划结束时间须晚于首次下一轮开放时间")
+                config = {**draft["config"], "scheduled_at": None, "deadline_at": None}
+                knowledge = self._knowledge(actor_id, config)
+                pool, _ = self._catalog(db, actor_id, config, knowledge)
+                pool = self._unused_goal_pool(db, goal["id"], pool)
+                current = {q["key"]: q for q in pool}
+                keys = [(ref["question_id"], ref["version"]) for ref in command["question_pool"]]
+                if any(key not in current for key in keys):
+                    raise PlanningConflict("invalid_confirmed_pool", "题池含已练题族、旧版本、未审核或来源不可用题目")
+                selected = [{**current[key]["ref"], "fingerprint": current[key]["fingerprint"]} for key in keys]
+                preview, _ = self._build(db, actor_id, config, frozen_suggestions=self._next_suggestions(draft),
+                                         origin_goal_id=goal["id"], confirmed_pool=selected)
+                if not preview["ready"]:
+                    raise PlanningConflict("confirmed_pool_shortage", "教师确认题池不足以组成首个持续轮次，请补齐题池")
+                self.learning.configure_plan(goal["id"], actor_id, expected_version=command["expected_goal_version"],
+                    request_id="bounded:" + self._hash([draft_id, command["request_id"]]), future_round_count=command["future_round_count"],
+                    interval_seconds=command["interval_seconds"], ends_at=command["ends_at"], question_pool=command["question_pool"])
+                policy = {"schema_version": "teaching.confirmed.plan.v1", "interval_seconds": command["interval_seconds"],
+                          "question_pool": command["question_pool"], "confirmed_pool": selected, "config": config,
+                          "source_draft_id": draft_id, "actor_id": actor_id, "insight_id": draft["insight_id"],
+                          "basis": draft["basis"], "expected_goal_version": command["expected_goal_version"] + 1}
+                db.execute("UPDATE goal_plans SET policy_json=?,reason=NULL WHERE goal_id=?", (self._json(policy), goal["id"]))
+                plan = self._bounded_view(db.execute("SELECT * FROM goal_plans WHERE goal_id=?", (goal["id"],)).fetchone())
+                return {**plan, "goal_version": command["expected_goal_version"] + 1, "future_round_count": command["future_round_count"]}
+            return self.learning._command(db, actor_id, "next_round:bounded:" + draft_id, command["request_id"], command, apply)
+
+    def advance_confirmed_plan(self, db, plan, config):
+        """Called inside platform->learning by tick_plans; never calls models."""
+        actor_id = config["actor_id"]
+        goal = self.learning._goal_row(db, plan["goal_id"], actor_id)
+        self.learning._teacher_write(actor_id, goal)
+        if goal["version"] != config["expected_goal_version"]:
+            raise PlanningConflict("goal_version_conflict", "原目标版本已改变，请教师重新确认持续计划")
+        selection = {**config["config"], "scheduled_at": None,
+                     "deadline_at": min(plan["ends_at"], self.clock() + config["interval_seconds"])}
+        self._scope(actor_id, selection)
+        knowledge = self._knowledge(actor_id, selection)
+        all_pool, _ = self._catalog(db, actor_id, selection, knowledge)
+        # Confirmed versions/sources are immutable intent. A changed unused
+        # member pauses instead of silently widening or replacing the pool.
+        eligible = {q["key"]: q for q in all_pool}
+        used_ids = {row[0] for row in db.execute("""SELECT DISTINCT ti.question_id FROM task_items ti
+            JOIN learning_tasks t ON t.id=ti.task_id WHERE t.goal_id=?""", (goal["id"],))}
+        for ref in config["confirmed_pool"]:
+            if ref["question_id"] in used_ids:
+                continue
+            question = eligible.get((ref["question_id"], ref["version"]))
+            if question is None or question["fingerprint"] != ref["fingerprint"]:
+                raise PlanningConflict("confirmed_pool_changed", "教师确认题池的版本、审核或来源已变化")
+        pseudo_draft = {"config": selection, "basis": config["basis"]}
+        preview, snapshot = self._build(db, actor_id, selection, frozen_suggestions=self._next_suggestions(pseudo_draft),
+                                        origin_goal_id=goal["id"], confirmed_pool=config["confirmed_pool"])
+        if not preview["ready"]:
+            raise PlanningConflict("confirmed_pool_shortage", "教师确认的新题族不足或筛选范围已变化，等待教师调整")
+        latest = db.execute("SELECT MAX(round_no) FROM learning_rounds WHERE goal_id=?", (goal["id"],)).fetchone()[0]
+        result = self.learning.publish_round(actor_id, goal["id"], expected_version=goal["version"],
+            request_id=f"confirmed-plan:{plan['version']}:{latest + 1}", round_no=latest + 1,
+            student_ids=selection["student_ids"], question_versions=snapshot["papers"][selection["student_ids"][0]],
+            personal_question_versions=snapshot["papers"], common_question_ratio=COMMON_RATIOS[selection["common_level"]],
+            **{key: selection[key] for key in ("deadline_at", "scheduled_at", "allow_late", "allow_retries", "allow_retry_after_deadline")})
+        config["expected_goal_version"] = goal["version"] + 1
+        return result

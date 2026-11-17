@@ -259,13 +259,69 @@ class LearningLifecycle:
             return self.get_task(task_id, actor_id)
 
     def record_help(self, task_id, actor_id, question_id, *, payload=None, request_id=None, **options):
-        from .learning_store import InvalidTransition
-        policy = self.get_answer_policy(actor_id, task_id=task_id)
-        if policy["diagnostic"] or not policy["attempted"]:
-            raise InvalidTransition("首诊不提供提示；正式作答请先尝试")
+        """Client help events record requests only, never proof of assistance."""
+        from .learning_store import TaskNotFound
+        from collections.abc import Mapping
+        value = {} if payload is None else payload
+        if not isinstance(value, Mapping) or set(value) - {"hint_level", "status", "help_type", "source", "request_semantics"}:
+            raise ValueError("客户端只能记录提示请求")
+        if (value.get("status", "requested") != "requested"
+                or value.get("request_semantics", "requested") != "requested"
+                or value.get("source", "client") not in ("client", "companion")
+                or value.get("help_type", "hint") != "hint"):
+            raise ValueError("客户端不能伪造提示送达证据")
+        level = value.get("hint_level", 1)
+        if type(level) is not int or level not in (1, 2):
+            raise ValueError("提示级别无效")
         with self._using_connection(write=True) as db:
-            return self._command(db, actor_id, task_id, request_id, {"op": "help", "question": question_id, "payload": payload},
-                lambda: super(LearningLifecycle, self).record_help(task_id, actor_id, question_id, payload=payload, **options))
+            self._student_task(db, task_id, actor_id)
+            item = db.execute("SELECT question_version FROM task_items WHERE task_id=? AND question_id=?", (task_id, question_id)).fetchone()
+            if item is None:
+                raise TaskNotFound("题目不属于当前任务")
+            context = self._hint_context(db, actor_id, task_id, f"{question_id}:{item[0]}")
+            safe = {**context["binding"], "source": "client", "status": "requested", "hint_level": level, "help_type": "hint"}
+            return self._command(db, actor_id, task_id, request_id, {"op": "help", "question": question_id, "payload": dict(value)},
+                lambda: self._record_task_event(task_id, actor_id, "help", question_id, safe, None))
+
+    def record_restricted_hint(self, actor_id, response_id, binding, *, level, status, action_id=None, reason=None):
+        """Trusted server-only evidence, idempotent across companion DB recovery."""
+        from .learning_store import IdempotencyConflict, InvalidTransition, TaskNotFound
+        from .services.restricted_hints import (ACTIONS, BINDING_KEYS, POLICY_VERSION, VALIDATOR_VERSION,
+                                                hint_evidence_id, same_binding)
+        if status not in {"requested", "validated", "validated_delivered", "fallback"}:
+            raise ValueError("提示证据状态无效")
+        if type(level) is not int or level not in (1, 2) or not isinstance(binding, dict):
+            raise ValueError("提示证据绑定无效")
+        if (set(binding) != set(BINDING_KEYS) or binding.get("policy_version") != POLICY_VERSION
+                or binding.get("validator_version") != VALIDATOR_VERSION):
+            raise ValueError("提示证据策略版本无效")
+        record_id = hint_evidence_id(response_id, status)
+        with self._using_connection(write=True) as db:
+            task = self._student_task(db, binding["task_id"], actor_id)
+            self._require_access(actor_id, {"kind": "task", **dict(task)}, write=True)
+            item = next((row for row in db.execute("SELECT question_id,question_version FROM task_items WHERE task_id=?", (task["id"],))
+                         if f"{row['question_id']}:{row['question_version']}" == binding["question_version_id"]), None)
+            if item is None:
+                raise TaskNotFound("提示证据题目版本无效")
+            payload = {**binding, "source": "restricted_hint", "help_type": "hint", "response_id": response_id,
+                       "hint_level": level, "status": status, "action_id": action_id, "reason": reason}
+            old = db.execute("SELECT * FROM task_events WHERE id=?", (record_id,)).fetchone()
+            if old is not None:
+                if (old["actor_id"] != actor_id or old["task_id"] != task["id"]
+                        or json.loads(old["payload_json"]) != payload):
+                    raise IdempotencyConflict("提示证据已绑定其他内容")
+                return {"id": record_id, "payload": payload, "occurred_at": old["occurred_at"]}
+            if status != "fallback":
+                context = self._hint_context(db, actor_id, task["id"], binding["question_version_id"])
+                if not same_binding(binding, context["binding"]):
+                    raise InvalidTransition("提示证据作答周期已变化")
+                if status != "requested" and (not context["external_processing_allowed"]
+                        or action_id not in context["actions"].get(level, []) or action_id not in ACTIONS):
+                    raise InvalidTransition("提示动作不再许可")
+            when = time.time()
+            db.execute("INSERT INTO task_events VALUES(?,?,?,?,?,?,?)",
+                       (record_id, task["id"], actor_id, "help", item["question_id"], self._json(payload), when))
+            return {"id": record_id, "payload": payload, "occurred_at": when}
 
     def record_reading(self, task_id, actor_id, material_id=None, *, question_id=None, payload=None, request_id=None, **options):
         material_id = material_id or (payload or {}).get("material_id")

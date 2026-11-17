@@ -22,7 +22,7 @@ from uuid import uuid4
 
 
 APPLICATION_ID = 0x41584350
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SAFE_GUIDANCE = {
     "independent_attempt": "请独立完成这次诊断；暂时不会可以选择‘暂时不会’，结束后再一起回顾。",
     "try_first": "先写下你的想法或试着作答，保存后再继续获取提示。",
@@ -65,7 +65,7 @@ class StaleGeneration(CompanionStoreError):
 
 
 class CompanionStore:
-    """Version-one file-backed SQLite repository, with no implicit external I/O."""
+    """Versioned file-backed SQLite repository, with no implicit external I/O."""
 
     SCHEMA_VERSION = SCHEMA_VERSION
     APPLICATION_ID = APPLICATION_ID
@@ -73,7 +73,7 @@ class CompanionStore:
     _EXPECTED_TABLES = {
         "conversations", "messages", "responses", "response_outbox", "events", "collections",
         "collection_items", "notes", "memories", "discussion_threads", "discussion_messages",
-        "notifications", "retention_policies", "legal_holds", "audit_events",
+        "notifications", "retention_policies", "legal_holds", "audit_events", "hint_checkpoints",
     }
 
     def __init__(self, path: str | Path, *, answer_policy: AnswerPolicy | None = None,
@@ -142,7 +142,7 @@ class CompanionStore:
         if version == 0:
             if tables or app_id not in (0, APPLICATION_ID):
                 raise RuntimeError("refusing an unversioned non-empty database")
-        elif app_id != APPLICATION_ID or not cls._EXPECTED_TABLES.issubset(tables):
+        elif app_id != APPLICATION_ID or not (cls._EXPECTED_TABLES - ({"hint_checkpoints"} if version == 1 else set())).issubset(tables):
             raise RuntimeError("existing database does not match the companion schema")
         return version
 
@@ -150,6 +150,9 @@ class CompanionStore:
         with self.connect() as db:
             if str(db.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower() != "wal":
                 raise RuntimeError("SQLite WAL mode could not be enabled")
+            # Rebuild the mutually-referencing messages/responses tables in one
+            # transaction. No connection serving application writes has FKs off.
+            db.execute("PRAGMA foreign_keys=OFF")
             db.execute("BEGIN IMMEDIATE")
             try:
                 version = self._check_database(db)
@@ -157,10 +160,18 @@ class CompanionStore:
                     self._migration_1(db)
                     db.execute("PRAGMA application_id=0x41584350")
                     db.execute("PRAGMA user_version=1")
+                    version = 1
+                if version == 1:
+                    self._migration_2(db)
+                    db.execute("PRAGMA user_version=2")
+                if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise RuntimeError("companion migration violates foreign keys")
                 db.commit()
             except BaseException:
                 db.rollback()
                 raise
+            finally:
+                db.execute("PRAGMA foreign_keys=ON")
 
     @staticmethod
     def _migration_1(db: sqlite3.Connection) -> None:
@@ -314,6 +325,49 @@ class CompanionStore:
         for statement in statements:
             db.execute(statement)
 
+    @staticmethod
+    def _migration_2(db: sqlite3.Connection) -> None:
+        """Real v1 upgrade preserving rowids, indexes and inbound/outbound FKs."""
+        # CREATE/copy/drop/rename leaves the other tables' REFERENCES messages /
+        # responses intact. Renaming the old tables first would redirect them.
+        for table in ("messages", "responses"):
+            original = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
+            indexes = [row[0] for row in db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,))]
+            columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
+            upgraded = original.replace(f"CREATE TABLE {table}", f"CREATE TABLE {table}_v2", 1)
+            upgraded = upgraded.replace("content_type IN ('freeform','safe_guidance')",
+                                        "content_type IN ('freeform','safe_guidance','restricted_hint')")
+            upgraded = upgraded.replace("(content_type='freeform' AND guidance_key IS NULL)",
+                                        "(content_type IN ('freeform','restricted_hint') AND guidance_key IS NULL)")
+            columns_sql = """intent TEXT NOT NULL DEFAULT 'chat' CHECK(intent IN ('chat','hint')),
+                hint_level INTEGER CHECK(hint_level IN (1,2)),
+                hint_metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(hint_metadata_json)),
+                """
+            upgraded = upgraded.replace("FOREIGN KEY(conversation_id,user_id)",
+                                        columns_sql + "FOREIGN KEY(conversation_id,user_id)", 1)
+            checks = """,
+                CHECK((intent='chat' AND hint_level IS NULL) OR (intent='hint' AND hint_level IN (1,2))),
+                CHECK(content_type<>'restricted_hint' OR (intent='hint' AND COALESCE(json_extract(hint_metadata_json,'$.status'),'')='validated_delivered'))
+            """
+            upgraded = upgraded[:upgraded.rfind(")")] + checks + ")"
+            db.execute(upgraded)
+            names = ",".join(columns)
+            db.execute(f"INSERT INTO {table}_v2(rowid,{names}) SELECT rowid,{names} FROM {table}")
+            db.execute(f"DROP TABLE {table}")
+            db.execute(f"ALTER TABLE {table}_v2 RENAME TO {table}")
+            for index in indexes:
+                db.execute(index)
+        db.execute("""CREATE TABLE hint_checkpoints (
+            response_id TEXT PRIMARY KEY REFERENCES responses(id) ON DELETE RESTRICT,
+            generation INTEGER NOT NULL CHECK(generation>0), call_id TEXT NOT NULL,
+            validated_json TEXT NOT NULL CHECK(json_valid(validated_json)),
+            checkpoint_hash TEXT NOT NULL CHECK(length(checkpoint_hash)=64),
+            state TEXT NOT NULL CHECK(state IN ('prepared','completed')),
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        )""")
+        db.execute("CREATE INDEX hint_checkpoints_state_idx ON hint_checkpoints(state,updated_at,response_id)")
+
     @property
     def schema_version(self) -> int:
         with self.connect() as db:
@@ -384,7 +438,15 @@ class CompanionStore:
 
     @staticmethod
     def _public(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
-        return {key: row[key] for key in row.keys() if key not in {"request_hash", "request_id", "payload_json"}}
+        result = {key: row[key] for key in row.keys()
+                  if key not in {"request_hash", "request_id", "payload_json", "hint_metadata_json"}}
+        if "hint_metadata_json" in row.keys():
+            metadata = json.loads(row["hint_metadata_json"])
+            result["hint_metadata"] = metadata
+            if result.get("intent") == "hint":
+                from .services.restricted_hints import BINDING_KEYS
+                result["hint_binding"] = {key: metadata[key] for key in BINDING_KEYS if key in metadata}
+        return result
 
     def _policy(self, user_id: str, task_id: str | None, question_version_id: str | None,
                 provider: AnswerPolicy | Mapping[str, Any] | None) -> dict[str, Any]:
@@ -407,13 +469,35 @@ class CompanionStore:
     def _notice(policy: Mapping[str, Any]) -> str:
         return _POLICY_NOTICE if policy.get("known") else _UNKNOWN_POLICY_NOTICE
 
+    @staticmethod
+    def _content_visible(row: Mapping[str, Any], policy: Mapping[str, Any]) -> bool:
+        """One predicate for history, responses, events, collections and context."""
+        if row.get("content_type") == "safe_guidance":
+            return SAFE_GUIDANCE.get(row.get("guidance_key")) == row.get("text")
+        if row.get("content_type") != "restricted_hint":
+            return policy.get("allow_assistant_content") is True
+        from .services.restricted_hints import same_binding, valid_metadata
+        metadata = row.get("hint_metadata") or {}
+        response_id = row.get("response_id") or row.get("id")
+        evidence = policy.get("delivered_hint_evidence", {}).get(response_id)
+        return bool(policy.get("allow_hint_content") is True and not policy.get("diagnostic")
+                    and row.get("intent") == "hint" and metadata.get("hint_level") == row.get("hint_level")
+                    and row.get("hint_level") in policy.get("allowed_hint_levels", [])
+                    and metadata.get("task_id") == row.get("task_id")
+                    and metadata.get("question_version_id") == (row.get("question_version_id") or "").replace("@", ":")
+                    and valid_metadata(metadata, text=row.get("text", ""), response_id=response_id)
+                    and same_binding(metadata, policy.get("hint_binding"))
+                    and isinstance(evidence, Mapping) and same_binding(metadata, evidence)
+                    and evidence.get("evidence_id") == metadata.get("evidence_id")
+                    and evidence.get("action_id") == metadata.get("action_id")
+                    and evidence.get("hint_level") == metadata.get("hint_level"))
+
     def _project_message(self, row: sqlite3.Row | Mapping[str, Any], user_id: str,
                          provider: AnswerPolicy | Mapping[str, Any] | None) -> dict[str, Any]:
         result = self._public(row)
-        safe = row["content_type"] == "safe_guidance" and SAFE_GUIDANCE.get(row["guidance_key"]) == row["text"]
-        if row["role"] == "assistant" and not safe:
+        if row["role"] == "assistant":
             policy = self._policy(user_id, row["task_id"], row["question_version_id"], provider)
-            if not policy["allow_assistant_content"]:
+            if not self._content_visible(result, policy):
                 result.update(text="", content="", redacted=True, notice=self._notice(policy))
                 return result
         result.update(content=row["text"], redacted=False)
@@ -478,13 +562,33 @@ class CompanionStore:
 
     def post_message(self, conversation_id: str, user_id: str, text: str, *, request_id: str,
                      task_id: str | None = None, question_version_id: str | None = None,
-                     budget_scope: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                     budget_scope: Mapping[str, Any] | None = None, intent: str = "chat",
+                     hint_level: int | None = None, hint_binding: Mapping[str, Any] | None = None) -> dict[str, Any]:
         text, request_id = self._text(text, "text", 20000, strip=False), self._request(request_id)
         task_id = self._id(task_id, "task_id") if task_id is not None else None
         question_version_id = self._id(question_version_id, "question_version_id") if question_version_id is not None else None
         if question_version_id is not None and task_id is None:
             raise ValueError("question_version_id requires task_id")
-        digest = self._hash([text, task_id, question_version_id])
+        if intent not in {"chat", "hint"} or (intent == "chat" and (hint_level is not None or hint_binding is not None)):
+            raise ValueError("invalid message intent")
+        metadata = {}
+        if intent == "hint":
+            from .services.restricted_hints import BINDING_KEYS, POLICY_VERSION, VALIDATOR_VERSION
+            if type(hint_level) is not int or hint_level not in (1, 2) or not task_id or not question_version_id:
+                raise ValueError("hint requires a task, question version and level")
+            if not isinstance(hint_binding, Mapping) or set(hint_binding) != set(BINDING_KEYS):
+                raise ValueError("hint requires a server-issued binding")
+            metadata = dict(hint_binding)
+            if (metadata["task_id"] != task_id or metadata["question_version_id"] != question_version_id.replace("@", ":")
+                    or type(metadata["attempt_cycle"]) is not int or metadata["attempt_cycle"] < 1
+                    or not isinstance(metadata["draft_hash"], str) or len(metadata["draft_hash"]) != 64
+                    or metadata["policy_version"] != POLICY_VERSION or metadata["validator_version"] != VALIDATOR_VERSION):
+                raise ValueError("invalid hint binding")
+            metadata["hint_level"] = hint_level
+        # Preserve v1 chat digests. Non-default intent/level and its trusted
+        # attempt binding are part of the new immutable hint request identity.
+        digest = self._hash([text, task_id, question_version_id] if intent == "chat" else
+                            [text, task_id, question_version_id, intent, hint_level, metadata])
         with self._transaction() as db:
             conversation = self._owned(db, "conversations", conversation_id, user_id)
             old = db.execute("SELECT * FROM messages WHERE conversation_id=? AND request_id=?", (conversation_id, request_id)).fetchone()
@@ -494,13 +598,17 @@ class CompanionStore:
             if conversation["status"] != "active":
                 raise InvalidTransition("restore the archived conversation before posting")
             message_id, response_id, job_id, outbox_id, now = uuid4().hex, uuid4().hex, uuid4().hex, uuid4().hex, time.time()
-            db.execute("""INSERT INTO messages(id,conversation_id,user_id,role,text,task_id,question_version_id,request_id,request_hash,created_at)
-                          VALUES(?,?,?,'user',?,?,?,?,?,?)""",
-                       (message_id, conversation_id, user_id, text, task_id, question_version_id, request_id, digest, now))
-            db.execute("INSERT INTO responses(id,conversation_id,user_id,message_id,job_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                       (response_id, conversation_id, user_id, message_id, job_id, now, now))
-            payload = {"purpose": "student", "resource_id": response_id, "response_id": response_id,
-                       "conversation_id": conversation_id, "user_id": user_id}
+            db.execute("""INSERT INTO messages(id,conversation_id,user_id,role,text,task_id,question_version_id,request_id,request_hash,created_at,intent,hint_level,hint_metadata_json)
+                          VALUES(?,?,?,'user',?,?,?,?,?,?,?,?,?)""",
+                       (message_id, conversation_id, user_id, text, task_id, question_version_id, request_id, digest, now,
+                        intent, hint_level, self._json(metadata)))
+            db.execute("INSERT INTO responses(id,conversation_id,user_id,message_id,job_id,created_at,updated_at,intent,hint_level,hint_metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       (response_id, conversation_id, user_id, message_id, job_id, now, now, intent, hint_level, self._json(metadata)))
+            payload = {"purpose": "hint" if intent == "hint" else "student", "resource_id": response_id, "response_id": response_id,
+                       "conversation_id": conversation_id, "user_id": user_id, "intent": intent}
+            if intent == "hint":
+                payload.update(hint_level=hint_level, hint_binding=dict(hint_binding), task_id=task_id,
+                               question_version_id=question_version_id)
             if budget_scope is not None:
                 frozen = {key: self._id(budget_scope[key], key)
                           for key in ("student_id", "course_id", "class_id", "task_id", "project_id")
@@ -544,6 +652,7 @@ class CompanionStore:
                               r.status AS linked_response_status,r.generation AS linked_generation,
                               r.text AS linked_response_text,r.content_type AS linked_content_type,
                               r.guidance_key AS linked_guidance_key,r.assistant_message_id AS linked_assistant_message_id,
+                              r.intent AS linked_intent,r.hint_level AS linked_hint_level,r.hint_metadata_json AS linked_hint_metadata_json,
                               m.task_id AS linked_task_id,m.question_version_id AS linked_question_version_id,
                               COALESCE((SELECT MAX(e.event_id) FROM events e
                                         WHERE e.response_id=r.id AND e.generation=r.generation),0) AS linked_last_event_id
@@ -563,9 +672,12 @@ class CompanionStore:
                 message["client_request_id"] = row["request_id"]
             if row["linked_response_id"]:
                 policy = self._policy(user_id, row["linked_task_id"], row["linked_question_version_id"], answer_policy)
-                safe = (row["linked_content_type"] == "safe_guidance"
-                        and SAFE_GUIDANCE.get(row["linked_guidance_key"]) == row["linked_response_text"])
-                blocked = not safe and not policy["allow_assistant_content"]
+                visible_row = {"response_id": row["linked_response_id"], "text": row["linked_response_text"],
+                               "content_type": row["linked_content_type"], "guidance_key": row["linked_guidance_key"],
+                               "task_id": row["linked_task_id"], "question_version_id": row["linked_question_version_id"],
+                               "intent": row["linked_intent"], "hint_level": row["linked_hint_level"],
+                               "hint_metadata": json.loads(row["linked_hint_metadata_json"])}
+                blocked = not self._content_visible(visible_row, policy)
                 failed = row["linked_response_status"] in {"failed", "cancelled"}
                 message["response"] = {
                     "response_id": row["linked_response_id"],
@@ -580,6 +692,8 @@ class CompanionStore:
                     "redacted": blocked,
                     "notice": self._notice(policy) if blocked else SAFE_GUIDANCE["response_cancelled" if row["linked_response_status"] == "cancelled" else "response_failed"] if failed else None,
                     "content_type": row["linked_content_type"],
+                    "intent": row["linked_intent"], "hint_level": row["linked_hint_level"],
+                    "hint_metadata": visible_row["hint_metadata"],
                 }
             result.append(message)
         return result
@@ -639,7 +753,7 @@ class CompanionStore:
     @staticmethod
     def _response_row(db: sqlite3.Connection, response_id: str, user_id: str | None = None) -> sqlite3.Row:
         row = db.execute(
-            "SELECT r.*,m.task_id,m.question_version_id,c.course_id,'student' purpose FROM responses r "
+            "SELECT r.*,m.task_id,m.question_version_id,c.course_id,CASE WHEN r.intent='hint' THEN 'hint' ELSE 'student' END purpose FROM responses r "
             "JOIN messages m ON m.id=r.message_id JOIN conversations c ON c.id=r.conversation_id "
             "WHERE r.id=? AND (? IS NULL OR r.user_id=?)",
             (response_id, user_id, user_id)).fetchone()
@@ -664,9 +778,8 @@ class CompanionStore:
         result = dict(response)
         if user_id is None:
             return result
-        safe = response["content_type"] == "safe_guidance" and SAFE_GUIDANCE.get(response["guidance_key"]) == response["text"]
         policy = self._policy(user_id, response["task_id"], response["question_version_id"], answer_policy)
-        if not safe and not policy["allow_assistant_content"]:
+        if not self._content_visible(result, policy):
             result.update(text="", content="", error=None, redacted=True, notice=self._notice(policy))
         elif response["status"] in {"failed", "cancelled"}:
             code = "response_cancelled" if response["status"] == "cancelled" else "response_failed"
@@ -744,7 +857,10 @@ class CompanionStore:
             raise ValueError("a delta must contain 1 to 1000000 characters")
         call_id, generation = self._id(call_id, "call_id"), self._generation(generation, expected_generation)
         with self._transaction() as db:
-            row = self._bind(db, self._response_row(db, response_id), call_id, generation)
+            row = self._response_row(db, response_id)
+            if row["intent"] == "hint":
+                raise InvalidTransition("restricted hints must be buffered and validated before publication")
+            row = self._bind(db, row, call_id, generation)
             old = db.execute("SELECT * FROM events WHERE response_id=? AND generation=? AND seq=? AND event_type='delta'", (response_id, generation, seq)).fetchone()
             if old is not None:
                 if json.loads(old["data_json"])["text"] != text:
@@ -772,7 +888,10 @@ class CompanionStore:
         if text is not None:
             text = self._text(text, "text", 1000000, strip=False)
         with self._transaction() as db:
-            row = self._bind(db, self._response_row(db, response_id), call_id, generation)
+            row = self._response_row(db, response_id)
+            if row["intent"] == "hint":
+                raise InvalidTransition("restricted hint responses require their evidence-bound completion")
+            row = self._bind(db, row, call_id, generation)
             if row["status"] in {"failed", "cancelled"}:
                 raise InvalidTransition("response is terminal")
             final = row["text"] if text is None else text
@@ -797,6 +916,121 @@ class CompanionStore:
             db.execute("""UPDATE responses SET status='completed',text=?,content_type=?,guidance_key=?,last_seq=?,assistant_message_id=?,updated_at=?,terminal_at=? WHERE id=?""",
                        (final, content_type, key, max(1, row["last_seq"]), assistant_id, now, now, response_id))
             self._event(db, response_id, "end", generation, {"status": "completed", "message_id": assistant_id})
+            db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, row["conversation_id"]))
+            return self._public(self._response_row(db, response_id))
+
+    @staticmethod
+    def _checked_hint_value(row: Mapping[str, Any], value: Mapping[str, Any]) -> dict[str, Any]:
+        from .services.restricted_hints import ACTIONS, BINDING_KEYS, same_binding
+        metadata = json.loads(row["hint_metadata_json"])
+        proposed = value.get("metadata") if isinstance(value, Mapping) else None
+        if (row["intent"] != "hint" or not same_binding(metadata, proposed)
+                or proposed.get("response_id") != row["id"] or proposed.get("hint_level") != row["hint_level"]):
+            raise InvalidTransition("hint checkpoint binding does not match response")
+        status, action_id, key = value.get("status"), value.get("action_id"), value.get("guidance_key")
+        if status == "validated":
+            action = ACTIONS.get(action_id) if isinstance(action_id, str) else None
+            if (action is None or action[0] != row["hint_level"] or action[2] != value.get("text")
+                    or value.get("content_type") != "restricted_hint" or key is not None):
+                raise InvalidTransition("hint checkpoint is not a server template")
+            reason = "validated"
+        elif status == "fallback":
+            if (key not in SAFE_GUIDANCE or SAFE_GUIDANCE[key] != value.get("text")
+                    or value.get("content_type") != "safe_guidance" or action_id is not None):
+                raise InvalidTransition("hint fallback is not fixed guidance")
+            reason = value.get("reason")
+            if reason not in {"policy_denied", "binding_changed", "no_approved_actions", "external_processing_denied",
+                              "invalid_selection", "model_unavailable", "budget_unavailable", "price_unavailable"}:
+                reason = "invalid_selection"
+        else:
+            raise InvalidTransition("invalid hint checkpoint state")
+        safe_metadata = {key: metadata[key] for key in BINDING_KEYS}
+        safe_metadata.update(response_id=row["id"], hint_level=row["hint_level"])
+        if action_id is not None:
+            safe_metadata["action_id"] = action_id
+        return {"status": status, "action_id": action_id, "text": value["text"], "content_type": value["content_type"],
+                "guidance_key": key, "metadata": safe_metadata, "reason": reason}
+
+    def get_hint_checkpoint(self, response_id: str) -> dict[str, Any] | None:
+        """Trusted worker-only recovery data, always server catalogue text."""
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM hint_checkpoints WHERE response_id=?", (response_id,)).fetchone()
+        if row is None:
+            return None
+        return {key: row[key] for key in ("response_id", "generation", "call_id", "state", "created_at", "updated_at")} | {
+            "validated": json.loads(row["validated_json"])}
+
+    def save_hint_checkpoint(self, response_id: str, validated: Mapping[str, Any], *, call_id: str,
+                             generation: int) -> dict[str, Any]:
+        call_id = self._id(call_id, "call_id")
+        self._integer(generation, "generation", 1)
+        with self._transaction() as db:
+            row = self._response_row(db, response_id)
+            if row["generation"] != generation or row["call_id"] != call_id:
+                raise StaleGeneration("hint checkpoint belongs to another generation")
+            if row["status"] != "streaming":
+                raise InvalidTransition("hint checkpoint requires an active response")
+            value = self._checked_hint_value(row, validated)
+            previous = db.execute("SELECT * FROM hint_checkpoints WHERE response_id=?", (response_id,)).fetchone()
+            digest, now = self._hash(value), time.time()
+            if previous is not None:
+                old_value = json.loads(previous["validated_json"])
+                # Policy revocation may downgrade a never-published hint once.
+                if previous["checkpoint_hash"] != digest and not (previous["state"] == "prepared"
+                        and old_value["status"] == "validated" and value["status"] == "fallback"):
+                    raise IdempotencyConflict("hint checkpoint cannot change its selected action")
+                db.execute("UPDATE hint_checkpoints SET generation=?,call_id=?,validated_json=?,checkpoint_hash=?,updated_at=? WHERE response_id=?",
+                           (generation, call_id, self._json(value), digest, now, response_id))
+            else:
+                db.execute("INSERT INTO hint_checkpoints VALUES(?,?,?,?,?,'prepared',?,?)",
+                           (response_id, generation, call_id, self._json(value), digest, now, now))
+        return self.get_hint_checkpoint(response_id)
+
+    def complete_hint_response(self, response_id: str, validated: Mapping[str, Any], metadata: Mapping[str, Any], *,
+                               call_id: str, generation: int) -> dict[str, Any]:
+        """CAS publication of a checkpointed catalogue template with evidence ID."""
+        from .services.restricted_hints import hint_evidence_id, valid_metadata
+        call_id = self._id(call_id, "call_id")
+        self._integer(generation, "generation", 1)
+        with self._transaction() as db:
+            row = self._response_row(db, response_id)
+            if row["generation"] != generation or row["call_id"] != call_id:
+                raise StaleGeneration("hint completion belongs to another generation")
+            if row["status"] in {"failed", "cancelled"}:
+                raise InvalidTransition("hint response is terminal")
+            value = self._checked_hint_value(row, validated)
+            checkpoint = db.execute("SELECT * FROM hint_checkpoints WHERE response_id=?", (response_id,)).fetchone()
+            if (checkpoint is None or checkpoint["generation"] != generation or checkpoint["call_id"] != call_id
+                    or checkpoint["checkpoint_hash"] != self._hash(value)):
+                raise InvalidTransition("hint completion requires its durable checkpoint")
+            evidence_status = "validated_delivered" if value["status"] == "validated" else "fallback"
+            canonical = {**value["metadata"], "status": evidence_status,
+                         "evidence_id": hint_evidence_id(response_id, evidence_status)}
+            if canonical != dict(metadata) or (value["status"] == "validated"
+                    and not valid_metadata(canonical, text=value["text"], response_id=response_id)):
+                raise InvalidTransition("hint completion evidence metadata is invalid")
+            if row["status"] == "completed":
+                if row["text"] != value["text"] or json.loads(row["hint_metadata_json"]) != canonical:
+                    raise IdempotencyConflict("completed hint differs from checkpoint")
+                return self._public(row)
+            if row["status"] != "streaming" or row["text"] or row["last_seq"]:
+                raise InvalidTransition("hint completion cannot adopt streamed raw content")
+            assistant_id, now = uuid4().hex, time.time()
+            encoded = self._json(canonical)
+            db.execute("""INSERT INTO messages(id,conversation_id,user_id,role,text,task_id,question_version_id,response_id,
+                          content_type,guidance_key,created_at,intent,hint_level,hint_metadata_json)
+                          VALUES(?,?,?,'assistant',?,?,?,?,?,?,?,'hint',?,?)""",
+                       (assistant_id, row["conversation_id"], row["user_id"], value["text"], row["task_id"],
+                        row["question_version_id"], response_id, value["content_type"], value["guidance_key"], now,
+                        row["hint_level"], encoded))
+            db.execute("""UPDATE responses SET status='completed',text=?,content_type=?,guidance_key=?,last_seq=1,
+                          assistant_message_id=?,hint_metadata_json=?,updated_at=?,terminal_at=? WHERE id=?""",
+                       (value["text"], value["content_type"], value["guidance_key"], assistant_id, encoded, now, now, response_id))
+            event_metadata = {"intent": "hint", "hint_level": row["hint_level"], "content_type": value["content_type"],
+                              "hint_metadata": canonical}
+            self._event(db, response_id, "delta", generation, {"text": value["text"], **event_metadata}, seq=1)
+            self._event(db, response_id, "end", generation, {"status": "completed", "message_id": assistant_id, **event_metadata})
+            db.execute("UPDATE hint_checkpoints SET state='completed',updated_at=? WHERE response_id=?", (now, response_id))
             db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, row["conversation_id"]))
             return self._public(self._response_row(db, response_id))
 
@@ -900,7 +1134,7 @@ class CompanionStore:
         with self.connect() as db:
             row = self._response_row(db, response_id, user_id)
             current = db.execute("SELECT rowid,text FROM messages WHERE id=?", (row["message_id"],)).fetchone()
-            recent = db.execute("""SELECT role,text,task_id,question_version_id,content_type,guidance_key
+            recent = db.execute("""SELECT *
                                    FROM messages WHERE conversation_id=? AND user_id=? AND rowid<?
                                    AND (task_id IS NULL OR task_id=?) ORDER BY rowid DESC LIMIT ?""",
                                 (row["conversation_id"], row["user_id"], current["rowid"], row["task_id"], recent_limit)).fetchall()
@@ -914,15 +1148,13 @@ class CompanionStore:
         history = []
         for item in reversed(recent):
             if item["role"] == "assistant":
-                safe = (item["content_type"] == "safe_guidance"
-                        and SAFE_GUIDANCE.get(item["guidance_key"]) == item["text"])
                 history_policy = self._policy(row["user_id"], item["task_id"], item["question_version_id"], answer_policy)
-                if not safe and not history_policy["allow_assistant_content"]:
+                if not self._content_visible(self._public(item), history_policy):
                     continue
             history.append({"role": item["role"], "content": item["text"][:2000]})
         return {"current_question": current["text"][:4000],
                 "messages": history + [{"role": "user", "content": current["text"][:4000]}],
-                "allow_generation": bool(allowed), "safe_guidance_key": key,
+                "allow_generation": bool(allowed) and row["intent"] != "hint", "safe_guidance_key": key,
                 "notice": "" if allowed else self._notice(policy if not policy["allow_generation"] else global_policy)}
 
     def create_collection(self, user_id: str, title: str, *, request_id: str) -> dict[str, Any]:
@@ -1290,7 +1522,12 @@ class CompanionStore:
         result, payload = self._public(row), json.loads(row["payload_json"])
         task_id = payload.get("task_id") or (row["resource_id"] if row["resource_type"] == "task" else None)
         policy = self._policy(user_id, task_id, payload.get("question_version_id"), provider)
-        if row["resource_type"] == "discussion_thread" and row["event_type"] in _DISCUSSION_NOTIFICATION_EVENTS:
+        if row["resource_type"] == "teaching_insight":
+            # The HTTP projection authorizes the authoritative insight; keep
+            # locators only even when a legacy row cached generated text.
+            fields = ("insight_id", "goal_id", "class_id", "course_id", "owner_id", "source_report_revision", "job_id", "status", "generation")
+            result.update(payload={key: payload[key] for key in fields if key in payload}, redacted=True)
+        elif row["resource_type"] == "discussion_thread" and row["event_type"] in _DISCUSSION_NOTIFICATION_EVENTS:
             # Keep only stable locators through a closed answer gate. The HTTP
             # layer reauthorizes the thread and reprojects the referenced message.
             fields = ("event_type", "student_id", "course_id", "class_id", "task_id", "attempt_id", "thread_id",

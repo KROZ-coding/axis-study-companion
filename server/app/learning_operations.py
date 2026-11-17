@@ -316,7 +316,7 @@ class LearningOperations:
         normalized["score_units"] = normalized["points_units"]
         normalized["points"] = question.get("points", normalized["points"])
         for key in ("course_id", "class_id", "content_sha", "family_sha", "family_id", "source_anchors", "review_evidence",
-                    "external_processing_permission", "pipeline_job_id", "source_revision", "knowledge_points", "difficulty", "answer_format", "reference_answer", "provenance"):
+                    "external_processing_permission", "pipeline_job_id", "source_revision", "knowledge_points", "difficulty", "answer_format", "reference_answer", "provenance", "hint_action_ids"):
             if key in question:
                 normalized[key] = question[key]
         return normalized
@@ -404,6 +404,67 @@ class LearningOperations:
                      {"state": "awaiting_manual" if manual else "results_ready"},
                      key=f"grading:{attempt_id}:{row['attempt_revision']}")
 
+    def _global_diagnostic(self, db, user_id):
+        """A pending first diagnostic vetoes help across all accessible tasks."""
+        for row in db.execute("SELECT id FROM learning_tasks WHERE student_id=? AND status<>'closed'", (user_id,)):
+            try:
+                self._task_row(db, row["id"], user_id)
+            except (LookupError, PermissionError):
+                continue
+            policy = self._policy(db, row["id"])
+            if policy.get("submission_closed"):
+                continue
+            if policy.get("diagnostic_required") and not policy.get("diagnostic_completed"):
+                return True
+            if db.execute("SELECT 1 FROM diagnostic_sessions WHERE task_id=? AND status='active'", (row["id"],)).fetchone():
+                return True
+        return False
+
+    def _hint_context(self, db, user_id, task_id, question_version_id):
+        """Trusted, minimal frozen question/draft snapshot; never returns an answer key."""
+        from .learning_store import InvalidTransition, TaskNotFound
+        from .services.restricted_hints import POLICY_VERSION, VALIDATOR_VERSION, allowed_actions
+        task = self._task_row(db, task_id, user_id)
+        if task["student_id"] != user_id:
+            raise TaskNotFound("提示只允许当前学生的任务")
+        self._require_access(user_id, {"kind": "task", **dict(task)}, write=True)
+        if task["status"] != "in_progress":
+            raise InvalidTransition("提示需要正在作答的正式任务")
+        self._open_task(db, task)
+        round_row = db.execute("SELECT status FROM learning_rounds WHERE id=?", (task["round_id"],)).fetchone()
+        goal = db.execute("SELECT status FROM learning_goals WHERE id=?", (task["goal_id"],)).fetchone()
+        if not round_row or round_row[0] != "open" or not goal or goal[0] == "closed":
+            raise InvalidTransition("任务所属轮次或目标已关闭")
+        if self._global_diagnostic(db, user_id):
+            raise InvalidTransition("首诊期间必须独立完成")
+        item = next((row for row in db.execute("SELECT * FROM task_items WHERE task_id=?", (task_id,))
+                     if question_version_id in {f"{row['question_id']}:{row['question_version']}",
+                                                f"{row['question_id']}@{row['question_version']}"}), None)
+        if item is None:
+            raise TaskNotFound("题目版本不属于当前任务")
+        draft = db.execute("SELECT answer_json FROM draft_answers WHERE task_id=? AND question_id=?",
+                           (task_id, item["question_id"])).fetchone()
+        if draft is None:
+            raise InvalidTransition("请先可靠保存当前题的尝试")
+        question, answer = json.loads(item["frozen_json"]), json.loads(draft[0])
+        self._check_answer(question, answer)
+        cycle = int(db.execute("SELECT COALESCE(MAX(attempt_no),0)+1 FROM attempts WHERE task_id=?", (task_id,)).fetchone()[0])
+        binding = {"task_id": task_id, "question_version_id": f"{item['question_id']}:{item['question_version']}",
+                   "attempt_cycle": cycle, "draft_hash": self._digest(answer),
+                   "policy_version": POLICY_VERSION, "validator_version": VALIDATOR_VERSION}
+        minimal = {key: question[key] for key in ("type", "stem", "options")}
+        # The teacher may narrow the server action catalogue, never inject text.
+        actions = allowed_actions(question)
+        permission = question.get("external_processing_permission")
+        external_allowed = permission is True or (isinstance(permission, str) and permission in {"approved", "allowed"})
+        return {"binding": binding, "question_id": item["question_id"], "question": minimal,
+                "draft": answer, "actions": actions, "external_processing_allowed": external_allowed,
+                "student_id": user_id, "course_id": task["course_id"], "class_id": task["class_id"]}
+
+    def get_hint_context(self, user_id, *, task_id, question_version_id):
+        with self._using_connection() as db:
+            return self._hint_context(db, user_id, task_id, question_version_id)
+
     def get_answer_policy(self, user_id, *, task_id=None, question_version_id=None):
         from .learning_store import TaskNotFound
         with self._using_connection() as db:
@@ -442,9 +503,39 @@ class LearningOperations:
                         same_family_active = same_family_active or ref in other_refs
                 blocked = scoped_active or same_family_active
                 released = task["status"] == "results_ready" and not blocked
-            return {"allow_assistant_content": not blocked, "allow_generation": not blocked,
-                    "results_released": released, "diagnostic": diagnostic, "attempted": attempted,
-                    "hints_allowed": blocked and attempted and not diagnostic, "active_count": len(active)}
+            diagnostic = self._global_diagnostic(db, user_id)
+            hint_context = None
+            if task_id and question_version_id and not diagnostic:
+                try:
+                    hint_context = self._hint_context(db, user_id, task_id, question_version_id)
+                except (LookupError, PermissionError, ValueError, TypeError):
+                    pass
+                except Exception as error:
+                    from .learning_store import InvalidTransition
+                    if not isinstance(error, InvalidTransition):
+                        raise
+            levels = [level for level in (1, 2) if hint_context and hint_context["actions"].get(level)]
+            hint_allowed = bool(levels)
+            delivered = {}
+            if hint_context:
+                from .services.restricted_hints import hint_evidence_id, same_binding
+                for event in db.execute("SELECT id,payload_json FROM task_events WHERE task_id=? AND actor_id=? AND question_id=? AND event_type='help'",
+                                        (task_id, user_id, hint_context["question_id"])):
+                    evidence = json.loads(event["payload_json"])
+                    response_id = evidence.get("response_id")
+                    if (evidence.get("source") == "restricted_hint" and evidence.get("status") == "validated_delivered"
+                            and response_id and event["id"] == hint_evidence_id(response_id, "validated_delivered")
+                            and same_binding(evidence, hint_context["binding"])):
+                        delivered[response_id] = {**evidence, "evidence_id": event["id"]}
+            return {"allow_assistant_content": not blocked and not diagnostic,
+                    "allow_generation": not blocked and not diagnostic,
+                    "results_released": released and not diagnostic, "diagnostic": diagnostic,
+                    "attempted": bool(hint_context) if task_id and question_version_id else attempted,
+                    "allow_hint_generation": hint_allowed and hint_context["external_processing_allowed"],
+                    "allow_hint_content": hint_allowed, "allowed_hint_levels": levels,
+                    "hint_binding": hint_context["binding"] if hint_context else None,
+                    "delivered_hint_evidence": delivered,
+                    "hints_allowed": hint_allowed, "active_count": len(active)}
 
     def get_discussion_scope(self, user_id, *, task_id, attempt_id=None, question_version_id=None, grading_revision=None):
         from .learning_store import TaskNotFound

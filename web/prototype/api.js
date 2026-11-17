@@ -154,8 +154,9 @@ const activateAccount = (code, password) => post("/auth/activate", { code, passw
 const resetPassword = (code, password) => post("/auth/password-reset", { code, password }, { expect: 204 });
 
 async function logout() {
+  const user = state.user;
   await post("/auth/logout", undefined, { expect: 204 });
-  state.user = null;
+  if (state.user === user) state.user = null;
 }
 
 /** 教师端：拿到自己带得动的课程与班级。 */
@@ -229,10 +230,11 @@ const archiveConversation = (id) => post(`/companion/conversations/${encodeURICo
 const restoreConversation = (id) => post(`/companion/conversations/${encodeURIComponent(id)}/restore`, undefined);
 // Serialize the caller's request ID and input immediately. Recovery only reads the
 // returned response ID; it never repeats this POST or creates a replacement key.
-const postMessage = (conversationId, text, { taskId, questionVersionId, requestId } = {}) => post(
+const postMessage = (conversationId, text, { taskId, questionVersionId, requestId, intent, hintLevel } = {}) => post(
   `/companion/conversations/${encodeURIComponent(conversationId)}/messages`,
   { text, request_id: requestId, ...(taskId ? { task_id: taskId } : {}),
-    ...(questionVersionId ? { question_version_id: questionVersionId } : {}) },
+    ...(questionVersionId ? { question_version_id: questionVersionId } : {}),
+    ...(intent ? { intent } : {}), ...(hintLevel !== undefined ? { hint_level: hintLevel } : {}) },
   { expect: 202 },
 );
 const getResponse = (responseId, { signal } = {}) => get(`/companion/responses/${encodeURIComponent(responseId)}`, { signal });
@@ -330,13 +332,16 @@ function openResponseStream(responseId, handlers = {}, { after = 0, generation =
     if (Object.prototype.hasOwnProperty.call(snapshot, "content")) snapshot.content = lastText;
     const key = JSON.stringify([cursor, lastGeneration, snapshot.status, lastText, lastRedacted,
       snapshot.notice, snapshot.error, snapshot.message_id, snapshot.assistant_message_id, snapshot.content_type,
+      snapshot.intent, snapshot.hint_level, snapshot.hint_metadata,
       snapshot.job?.status, snapshot.job?.cancel_requested, snapshot.job?.reconciliation_required, snapshot.job?.cost_pending]);
     if (key !== snapshotKey) {
       snapshotKey = key;
       emit("snapshot", snapshot);
     }
     if (!active) return true;
-    if (terminal(snapshot.status)) {
+    const hintDeliveryPending = snapshot.intent === "hint" && snapshot.status === "completed"
+      && ["queued", "leased", "running", "retry_wait"].includes(snapshot.job?.status);
+    if (terminal(snapshot.status) && !hintDeliveryPending) {
       // Give consumers authoritative text before end: an end handler may close
       // immediately, and failed/cancelled responses must not retain a prefix.
       if (terminalEvent && terminalEvent.generation === lastGeneration) {
@@ -551,11 +556,11 @@ async function startDiagnostic(taskId, version, requestId) {
   });
 }
 
-async function submitDiagnostic(diagnosticId, answers, requestId) {
+async function submitDiagnostic(diagnosticId, answers, requestId, unknownQuestionIds = []) {
   return post(`/diagnostics/${encodeURIComponent(diagnosticId)}/submit`, {
     request_id: requestId,
     answers,
-    unknown_question_ids: [],
+    unknown_question_ids: unknownQuestionIds,
   });
 }
 

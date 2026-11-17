@@ -264,6 +264,26 @@ test("same-cursor job changes expose reconciliation and confirmation without rep
   close();
 });
 
+test("same-cursor hint metadata replaces the projection without inventing streamed text", async () => {
+  const initial = snapshot({ last_event_id: 5, intent: "hint", hint_level: 1,
+    hint_metadata: { status: "validated" }, content_type: "restricted_hint" });
+  const h = harness(async () => response(200, initial));
+  const o = observer();
+  const close = h.api.openResponseStream(responseId, o.handlers);
+  await h.flush();
+  const delivered = { ...initial, hint_metadata: { status: "validated_delivered" } };
+  h.sources[0].send("snapshot", delivered, 5);
+  h.sources[0].send("snapshot", delivered, 5);
+  assert.equal(o.of("snapshot").length, 2);
+  assert.equal(o.of("snapshot").at(-1).data.hint_level, 1);
+  assert.equal(o.of("snapshot").at(-1).data.hint_metadata.status, "validated_delivered");
+  h.sources[0].send("snapshot", { ...delivered, text: "old hint", redacted: true, notice: "作答范围已变化" }, 5);
+  assert.equal(o.of("snapshot").length, 3);
+  assert.equal(o.view.text, "");
+  assert.equal(o.of("delta").length, 0);
+  close();
+});
+
 test("companion cancel and explicit paid recovery address the same encoded job without posting another message", async () => {
   const h = harness(async () => response(200, { status: "queued" }));
   await h.api.cancelCompanionJob("job/one");
