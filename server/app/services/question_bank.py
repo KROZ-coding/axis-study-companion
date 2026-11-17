@@ -18,6 +18,7 @@ import unicodedata
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ..content_store import ContentConflict, ContentStore
+from .math_grading import grade_objective
 from .model_gateway import build_minimal_context
 
 
@@ -507,6 +508,19 @@ class QuestionBank:
                     if candidate["type"]=="multi_choice" and isinstance(right,list):
                         right = sorted(right)
                     agreed = agreed and type(left) is type(right) and left==right
+                elif candidate["type"]=="fill":
+                    left = candidate["answer"] if isinstance(candidate["answer"],list) else [candidate["answer"]]
+                    right = independent["answer"] if isinstance(independent["answer"],list) else [independent["answer"]]
+                    # Text alternatives may be different accepted spellings;
+                    # an independent answer need only match one of them. Math
+                    # alternatives must also agree in the opposite direction.
+                    directions = ((left,right),) if candidate.get("answer_format")=="text" else ((left,right),(right,left))
+                    for references,answers in directions:
+                        question = {**candidate,"answer":references,"score_units":100}
+                        for answer in answers:
+                            decision = grade_objective(question,answer)
+                            if decision["status"]=="graded" and decision["score_units"]==0:
+                                agreed = False
                 if not agreed:
                     conflicts.append(index)
             state.setdefault("comparison_history",[]).append({"stage":stage,"comparisons":[by_index[i] for i in range(len(candidates))],"conflicts":conflicts})

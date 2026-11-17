@@ -751,6 +751,13 @@ h2.section { font-size: 26px; margin: 22px 0 10px; }
   padding: 16px 16px calc(18px + env(safe-area-inset-bottom)); z-index: 7;
   box-shadow: 0 -12px 40px rgba(16,42,52,.16); max-height: 78vh; overflow: auto;
 }
+.student-logout-dialog {
+  inset: 50% auto auto 50%; transform: translate(-50%, -50%);
+  width: min(480px, calc(100vw - 48px)); max-height: calc(100vh - 64px);
+  padding: 28px; border-radius: 20px;
+}
+.student-logout-dialog p { line-height: 1.7; }
+.student-logout-dialog .row { justify-content: flex-end; margin-top: 24px; }
 .q-nav { display: flex; gap: 8px; overflow: auto; padding-bottom: 8px; }
 .q-nav button { min-width: 44px; }
 .formula { font-family: "Cambria Math", "Times New Roman", serif; font-size: 22px; }

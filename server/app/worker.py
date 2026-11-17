@@ -592,7 +592,7 @@ class Worker:
                 prepared = service.prepare_input(resource["id"], stage=stage)
                 self._current(job)
                 self._content_access(resource["id"])
-                result = await self._call(job, step, job.payload["purpose"], prepared["messages"], json_mode=True)
+                result = await self._call(job, step, prepared["purpose"], prepared["messages"], json_mode=True)
                 self._current(job)
                 # Reauthorize after I/O, including the final publish stage.
                 self._content_access(resource["id"])

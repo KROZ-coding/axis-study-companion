@@ -669,10 +669,15 @@ class LiveVerification:
                 "expected_version": lease["task_version"], "request_id": "smoke-guided-draft", "lease_token": lease["lease_token"], "fence_token": lease["fence_token"]})
             self.check(updated["draft_answers"] == {scenario["question_id"]: 2}, "guided attempt was not editable")
             help_payload = {"question_id": scenario["question_id"], "request_id": "smoke-guided-help",
-                            "payload": {"source": "companion", "question_version_id": scenario["question_version_id"]}}
+                            "payload": {"source": "companion", "request_semantics": "requested", "hint_level": 1}}
             help_event = self.api("guided", "POST", f"/api/v1/tasks/{task_id}/help-events", 201, json=help_payload)
             replay = self.api("guided", "POST", f"/api/v1/tasks/{task_id}/help-events", 201, json=help_payload)
             self.check(replay == help_event and help_event["event_type"] == "help", "help event replay differs")
+            self.check(help_event["payload"]["source"] == "client" and help_event["payload"]["status"] == "requested"
+                       and help_event["payload"]["question_version_id"] == scenario["question_version_id"],
+                       "client request was treated as proof of delivered assistance")
+            self.api("guided", "POST", f"/api/v1/tasks/{task_id}/help-events", 422, json={
+                **help_payload, "request_id": "smoke-forged-delivery", "payload": {"status": "validated_delivered"}})
             posted = self.post("guided", scenario["conversation_id"], "我已尝试，请引导我检查当前步骤。", "smoke-guided-message",
                                task_id=task_id, question_version_id=scenario["question_version_id"])
             result = self.completed("guided", posted["response_id"])

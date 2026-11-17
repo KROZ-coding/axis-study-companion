@@ -941,15 +941,16 @@ function renderStudent() {
     : page === "result" ? "任务反馈" : ({ tasks: "我的任务", companion: "学伴", mine: "我的学习", feedback: "教师反馈" })[state.studentTab];
   const name = state.who || "同学";
   const navItems = studentNav("tasks", "我的任务") + studentNav("companion", "学伴") + studentNav("mine", "我的学习") + studentNav("feedback", "教师反馈");
+  const logoutOpen = state.sheet === "logout";
   view.innerHTML = `
     <div class="student-app" data-student-shell>
-      <aside class="student-sidebar">
+      <aside class="student-sidebar" ${logoutOpen ? "inert" : ""}>
         <div class="student-brand"><svg class="student-brand-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M9 34 23 8l15 26M16 24h15" stroke="currentColor" stroke-width="3"/><ellipse cx="24" cy="25" rx="22" ry="8" transform="rotate(-26 24 25)" stroke="currentColor" stroke-width="1.2"/><circle cx="40" cy="16" r="3" fill="currentColor"/></svg><span><strong>伴星导学</strong><small>学习工作台</small></span></div>
         <nav class="student-nav" aria-label="学生导航">${navItems}</nav>
         <div class="student-sidebar-note"><span>每一步，都有记录。</span><p>从独立作答到读懂反馈，<br>把进步留在自己的学习中。</p></div>
         <div class="student-account"><span class="student-avatar" aria-hidden="true">${escapeHtml(Array.from(name)[0])}</span><div><strong>${escapeHtml(name)}</strong><small>学生账号</small></div><button class="student-signout" data-action="logout" aria-label="退出登录" ${state.loggingOut ? "disabled" : ""}>${studentIcon("logout")}</button></div>
       </aside>
-      <div class="student-desk">
+      <div class="student-desk" ${logoutOpen ? "inert" : ""}>
         <header class="student-topbar"><div class="student-breadcrumb">学习空间 <span>/</span> ${section}</div><div class="student-session"><i></i>${state.loading ? "正在同步" : "正式学习记录"}<time>${new Date().toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })}</time></div></header>
         <div class="student-columns">
           <main class="student-main" id="student-main" tabindex="-1" aria-label="${section}">
@@ -959,7 +960,7 @@ function renderStudent() {
           <aside class="student-context" aria-label="学习信息">${studentContext()}</aside>
         </div>
       </div>
-      <nav class="student-mobile-nav" aria-label="学生快捷导航">${navItems}<button class="student-nav-item" data-action="logout" aria-label="退出登录" ${state.loggingOut ? "disabled" : ""}>${studentIcon("logout")}<span>退出</span></button></nav>
+      <nav class="student-mobile-nav" aria-label="学生快捷导航" ${logoutOpen ? "inert" : ""}>${navItems}<button class="student-nav-item" data-action="logout" aria-label="退出登录" ${state.loggingOut ? "disabled" : ""}>${studentIcon("logout")}<span>退出</span></button></nav>
       ${state.sheet ? sheet() : ""}
     </div>`;
 }
@@ -1314,7 +1315,10 @@ function resultPageLive() {
   const task = state.liveTask;
   const attempts = task?.attempts || [];
   const attempt = state.selectedAttemptId ? attempts.find((item) => item.id === state.selectedAttemptId) : attempts[attempts.length - 1];
-  const heading = `<div class="student-workspace-head"><button class="btn" data-tab="tasks">返回任务</button><span class="tag">${taskStatus(task || {})}</span></div>${studentHeading(task ? taskTitle(task) : "本轮结果", "把每次作答和具体反馈放在一起看。")}`;
+  const refreshNotice = state.banner === "grading-refresh-failed"
+    ? "评分状态暂时未读到，自动刷新已暂停。后台仍会继续处理，请点击“刷新结果”重新读取。"
+    : state.banner === "grading-refresh-stopped" ? "评分仍在后台处理，自动刷新已暂停，请稍后点击“刷新结果”。" : "";
+  const heading = `<div class="student-workspace-head"><button class="btn" data-tab="tasks">返回任务</button><span class="tag">${taskStatus(task || {})}</span></div>${studentHeading(task ? taskTitle(task) : "本轮结果", "把每次作答和具体反馈放在一起看。")}${refreshNotice ? `<div class="state-banner warn" role="status">${refreshNotice}</div>` : ""}`;
   if (!task || !attempt) return `${heading}<div class="state-banner warn">${state.selectedAttemptId ? "这次作答记录暂时不可用，请返回我的学习后重试。" : task?.submission_closed ? "老师已关闭提交，这份任务没有已交卷记录。已保存的草稿继续保留。" : "还在评卷，成绩稍后出现在这里。"}</div><button class="btn" data-action="refresh-task" ${state.loading ? "disabled" : ""}>刷新结果</button>`;
   const feedbackLink = `<div class="student-focus-actions"><button class="btn" data-action="open-feedback" data-task-id="${escapeHtml(task.id)}" data-attempt-id="${escapeHtml(attempt.id)}">教师短评与评分异议</button></div>`;
   const summary = `<section class="student-result-summary"><div class="student-score">${attempt.total_score ?? "—"}<small> / ${attempt.max_score ?? "—"}</small></div><div><h2>${attempt.kind === "first" ? "首次成绩" : "重做成绩"}</h2><p>${attempt.independent_evidence ? "独立作答与提示记录分开保留。" : "这次是复习记录，首次成绩保持不变。"}</p><small>${studentDate(attempt.submitted_at, true)}</small></div></section>`;
@@ -1329,6 +1333,7 @@ function resultPageLive() {
 }
 
 function sheet() {
+  if (state.sheet === "logout") return `<div class="drawer-back" data-action="cancel-logout" aria-hidden="true"></div><section class="sheet student-logout-dialog" role="dialog" aria-modal="true" aria-labelledby="student-logout-title" aria-describedby="student-logout-note" tabindex="-1"><h2 class="section" id="student-logout-title">退出登录？</h2><p id="student-logout-note">仍有仅保留在本页的作答、未发送消息或未确认的聊天请求。退出成功后，这些本页内容会丢失，已保存的学习记录会保留。</p><div class="row"><button class="btn" data-action="cancel-logout">继续编辑</button><button class="btn primary" data-action="confirm-logout">确认退出</button></div></section>`;
   const sheets = {
     conversation: `<h2 class="section" id="student-sheet-title">${escapeHtml(state.activeConversation?.title || "学习对话")}</h2><div class="student-conversation">${state.liveMessages.length ? state.liveMessages.map((message) => `<article class="bubble${message.role === "user" ? " me" : ""}"><strong>${message.role === "user" ? "我" : "学伴"}</strong><p>${escapeHtml(message.redacted ? message.notice || "这条内容暂未开放。" : message.content || message.text || "暂无内容")}</p></article>`).join("") : '<p class="muted">这段会话还没有消息。</p>'}</div>`,
     chats: `<h2 class="section">会话</h2>${state.conversations.map((item, index) => `<button class="btn" data-chat="${index}">${item}</button>`).join("")}<form class="field" data-action="new-chat"><input name="title" placeholder="新会话名称" aria-label="新会话名称"><button class="btn" type="submit">新建</button></form>`,
@@ -1547,14 +1552,17 @@ function bind() {
     state.chatRenameError = "";
   }));
   view.querySelectorAll("[data-chat-input]").forEach((input) => {
-    input.addEventListener("input", () => {
+    const rememberDraft = () => {
       if (input.readOnly) return;
       state.chatDraft = input.value;
       state.chatDrafts[state.activeConversationId || "__new"] = input.value;
       if (!state.activeConversationId && state.chatContext) state.chatContext.prompt = input.value;
-    });
+    };
+    input.addEventListener("input", rememberDraft);
     input.addEventListener("compositionstart", () => { chatComposing = true; });
     input.addEventListener("compositionend", () => {
+      // 最终 input 事件可能晚于 compositionend；先保留最终值，再重绘排队的回答。
+      rememberDraft();
       chatComposing = false;
       if (chatRenderPending) renderStudentChatIfActive(chatEpoch);
     });
@@ -1586,6 +1594,17 @@ function bind() {
   teacherInsightsWorkspace.bind(view);
   studentFeedback.bind(view);
   learningNotifications.bind(view);
+  const logoutDialog = view.querySelector(".student-logout-dialog");
+  if (logoutDialog) {
+    const cancel = logoutDialog.querySelector('[data-action="cancel-logout"]');
+    const confirm = logoutDialog.querySelector('[data-action="confirm-logout"]');
+    cancel.focus({ preventScroll: true });
+    logoutDialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { event.preventDefault(); onAction({ currentTarget: cancel }); }
+      if (event.key === "Tab" && event.shiftKey && document.activeElement === cancel) { event.preventDefault(); confirm.focus(); }
+      else if (event.key === "Tab" && !event.shiftKey && document.activeElement === confirm) { event.preventDefault(); cancel.focus(); }
+    });
+  }
   if (state.live && state.role === "student") refreshStudentSaveStatus();
 }
 
@@ -1648,14 +1667,23 @@ async function finishLogout() {
 
 function onAction(event) {
   const action = event.currentTarget.dataset.action;
+  if (action === "cancel-logout") {
+    if (state.sheet !== "logout" || state.loggingOut) return;
+    state.sheet = null;
+    render();
+    view.querySelector("[data-chat-input]")?.focus({ preventScroll: true });
+    return;
+  }
   if (action === "toggle-peek") return; // 由 bind 里的专用处理器接管，避免整屏重渲染丢输入
   if (action === "reveal") {
     animateReveal(1);
     return;
   }
-  if (action === "logout") {
-    if (state.loggingOut || state.transition || !leaveStudentWork({ logout: true })) return;
+  if (action === "logout" || action === "confirm-logout") {
+    if (state.loggingOut || state.transition || action === "confirm-logout" && state.sheet !== "logout") return;
+    if (!leaveStudentWork({ logout: true, confirmed: action === "confirm-logout" })) return;
     const generation = state.transitionId;
+    state.sheet = null;
     state.loggingOut = true;
     render();
     if (state.live) {
@@ -2338,26 +2366,41 @@ function rememberDiagnosticDraft() {
 }
 
 function studentWorkPending() {
-  return state.studentComposing || state.studentSubmitBusy || state.draftDirty || diagnosticHasInput()
+  return state.studentComposing || chatComposing || state.studentSubmitBusy || state.draftDirty || diagnosticHasInput()
     || Boolean(state.diagnosticCommand) || Object.values(state.studentDrafts || {}).some((draft) => draft.dirty)
     || Object.values(state.diagnosticDrafts || {}).some((draft) => draft.unknown.length || draft.answers.some((value) => value !== "" && value != null))
-    || Object.values(state.studentWrites || {}).some((write) => write.flight || write.pending || write.submit);
+    || Object.values(state.studentWrites || {}).some((write) => write.flight || write.pending || write.submit)
+    || Boolean(state.chatDraft?.trim()) || Object.values(state.chatDrafts || {}).some((draft) => draft?.trim())
+    || state.chatSending || state.chatCreating || Boolean(state.pendingChatCreate)
+    || Object.values(state.chatPendingSends || {}).some(Boolean) || Boolean(state.chatContext?.pending)
+    || Object.values(state.chatContexts || {}).some((context) => context?.pending);
 }
 
 function studentConfirm(message) {
-  return typeof window.confirm === "function" ? window.confirm(message) : true;
+  return typeof window.confirm === "function" ? window.confirm(message) : false;
 }
 
-function leaveStudentWork({ logout = false } = {}) {
+function leaveStudentWork({ logout = false, confirmed = false } = {}) {
   if (!state.live || state.role !== "student") return true;
-  if (state.studentComposing) { toast("请先完成当前输入，再离开作答页"); return false; }
+  if (state.studentComposing || chatComposing) { toast("请先完成当前输入，再离开作答页"); return false; }
   if (state.studentSubmitBusy || state.diagnosticCommand || Object.values(state.studentWrites || {}).some((write) => write.flight || write.pending || write.submit)) {
     toast("保存或提交结果尚未确认，请先重试原请求，确认结果后再离开");
     return false;
   }
-  if (studentWorkPending() && !studentConfirm(logout
-    ? "仍有仅保留在本页的作答，退出成功后会丢失。确认退出登录？"
-    : "仍有未提交或未保存的作答，仅保留在本页内存；刷新或关闭页面会丢失。确认暂时离开？")) return false;
+  const input = view.querySelector("[data-chat-input]");
+  if (input && !input.readOnly) {
+    state.chatDraft = input.value;
+    state.chatDrafts[state.activeConversationId || "__new"] = input.value;
+    if (!state.activeConversationId && state.chatContext) state.chatContext.prompt = input.value;
+  }
+  if (studentWorkPending() && !confirmed) {
+    if (logout) {
+      state.sheet = "logout";
+      render();
+      return false;
+    }
+    if (!studentConfirm("仍有未提交或未保存的作答、未发送消息或未确认的聊天请求，仅保留在本页内存；刷新或关闭页面会丢失。确认暂时离开？")) return false;
+  }
   rememberDiagnosticDraft();
   stopStudentEditing();
   return true;
@@ -2523,9 +2566,16 @@ async function refreshStudentTask() {
   render();
   try {
     const full = await api.task(id);
-    if (generation === state.transitionId && state.liveTask?.id === id) updateStudentTask(full);
+    if (generation === state.transitionId && state.liveTask?.id === id) {
+      updateStudentTask(full);
+      state.banner = "";
+      if (["submitted", "grading"].includes(full.status)) pollTask(id, generation);
+    }
   } catch (error) {
-    if (generation === state.transitionId) toast(error?.message || "结果暂时没有读到");
+    if (generation === state.transitionId && state.liveTask?.id === id) {
+      state.banner = "grading-refresh-failed";
+      toast(error?.message || "结果暂时没有读到");
+    }
   } finally {
     if (generation === state.transitionId) { state.loading = false; render(); }
   }
@@ -3305,6 +3355,7 @@ async function sendContextChat({ savedHint = null } = {}) {
     state.studentPage = "chat";
     state.studentTab = "companion";
     state.chatDrafts[conversation.id] = "";
+    delete state.chatDrafts.__new;
     state.chatMessages = [{ id: receipt.message_id, client_request_id: pending.requestId, role: "user", text: pending.text,
       created_at: pending.createdAt, response: { response_id: receipt.response_id, status: receipt.status || "pending", text: "", last_event_id: 0,
         ...(hint ? { intent: "hint", hint_level: pending.hintLevel, task_id: pending.taskId, question_version_id: pending.questionVersionId } : {}) } }];
@@ -3488,8 +3539,16 @@ async function pollTask(taskId, generation, tries = 40) {
         return;
       }
     } catch {
+      if (generation === state.transitionId && state.screen === "app" && state.liveTask?.id === taskId) {
+        state.banner = "grading-refresh-failed";
+        render();
+      }
       return;
     }
+  }
+  if (generation === state.transitionId && state.screen === "app" && state.liveTask?.id === taskId) {
+    state.banner = "grading-refresh-stopped";
+    render();
   }
 }
 
@@ -3567,7 +3626,8 @@ function startLeaseRenewal(taskId, generation) {
       if (timer === leaseTimer && studentWriteCurrent(write) && state.liveLease === lease) state.liveLease = { ...lease, ...renewed };
     } catch (error) {
       if (timer !== leaseTimer || !studentWriteCurrent(write) || state.liveLease !== lease) return;
-      studentWriteFailed(write, { status: 409, code: "lease_lost", message: error?.message || "编辑连接已断开" });
+      // 临时断网或服务错误不能证明租约已丢失；保留原租约以核对未决保存的回执。
+      studentWriteFailed(write, error);
       refreshStudentSaveStatus();
     } finally { renewing = false; }
   }, 60000);

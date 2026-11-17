@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from app.learning_store import (
     IdempotencyConflict,
@@ -70,6 +71,185 @@ class LearningStoreTests(unittest.TestCase):
         return self.store.mark_grading_outbox(
             outbox["job_id"], "dispatched", queue_job_id=outbox["job_id"], fence_token=1,
         )
+
+    def _publish_policy_task(self, *, allow_retry_after_deadline, allow_late=False):
+        goal = self.store.create_goal("teacher-1", "Deadline policy", goal_id="policy-goal")
+        published = self.store.publish_round(
+            "teacher-1", goal["id"], expected_version=goal["version"], request_id="policy-publish",
+            round_no=1, student_ids=["student-1"],
+            question_versions=[{"question_id": "q1", "version": 1}, {"question_id": "q2", "version": 3}],
+            deadline_at=500, allow_late=allow_late, allow_retries=True,
+            allow_retry_after_deadline=allow_retry_after_deadline,
+        )
+        return published["task_ids"][0]
+
+    def _policy_draft(self, task_id, *, now, request_id):
+        lease = self.store.acquire_draft_lease(task_id, "student-1", "policy-device", now=now)
+        saved = self.store.save_draft(
+            task_id, "student-1", {"q1": 1, "q2": "yes"}, expected_version=lease["task_version"],
+            request_id=request_id, lease_token=lease["lease_token"], fence_token=lease["fence_token"], now=now + 1,
+        )
+        return {"expected_version": saved["version"], "request_id": "submit-" + request_id,
+                "lease_token": lease["lease_token"], "fence_token": lease["fence_token"]}
+
+    def _grade_policy_first(self, task_id):
+        options = self._policy_draft(task_id, now=100, request_id="policy-first")
+        submitted = self.store.submit_attempt(task_id, "student-1", **options, now=102)
+        attempt_id = submitted["first_attempt_id"]
+        outbox = self.store.list_grading_outbox()[0]
+        self.store.mark_grading_outbox(outbox["job_id"], "dispatched", fence_token=1)
+        for question_id, score in (("q1", 2), ("q2", 1)):
+            ready = self.store.apply_grading_result(
+                attempt_id, question_id, {"score": score}, expected_revision=1,
+                job_id=outbox["job_id"], fence_token=1,
+            )
+        return ready, options
+
+    def _start_policy_retry(self, task_id, ready, *, now):
+        with patch("app.learning_operations.time.time", return_value=now):
+            return self.store.start_retry(
+                task_id, "student-1", expected_version=ready["version"], request_id="policy-retry",
+            )
+
+    def _assert_submission_unchanged(self, task_id, before, request_id):
+        self.assertEqual(self.store.get_task(task_id, "student-1"), before)
+        with self.store.connect() as db:
+            self.assertIsNone(db.execute(
+                "SELECT 1 FROM idempotency WHERE task_id=? AND request_id=?", (task_id, request_id),
+            ).fetchone())
+            attempts = db.execute("SELECT COUNT(*) FROM attempts WHERE task_id=?", (task_id,)).fetchone()[0]
+            jobs = db.execute(
+                "SELECT COUNT(*) FROM grading_outbox o JOIN attempts a ON a.id=o.attempt_id WHERE a.task_id=?",
+                (task_id,),
+            ).fetchone()[0]
+        self.assertEqual(attempts, len(before["attempts"]))
+        self.assertEqual(jobs, attempts)
+
+    def test_deadline_retry_allowed_submits_late_and_preserves_first_score(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=True)
+        ready, _ = self._grade_policy_first(task_id)
+        self._start_policy_retry(task_id, ready, now=501)
+        options = self._policy_draft(task_id, now=502, request_id="policy-second")
+        self.store = LearningStore(self.database)
+        submitted = self.store.submit_attempt(task_id, "student-1", **options, now=504)
+        self.assertEqual(submitted["status"], "grading")
+        self.assertFalse(submitted["allow_late"])
+        self.assertEqual(submitted["first_attempt_id"], ready["first_attempt_id"])
+        for key in ("id", "kind", "status", "revision", "answers", "total_score", "total_score_units"):
+            self.assertEqual(submitted["attempts"][0][key], ready["attempts"][0][key])
+        self.assertEqual(submitted["attempts"][0]["total_score"], 3)
+        retry = submitted["attempts"][1]
+        self.assertEqual(retry["kind"], "retry")
+        self.assertTrue(retry["late"])
+        self.assertFalse(retry["independent_evidence"])
+        self.assertFalse(submitted["answer_released"])
+        self.assertEqual(len(self.store.list_grading_outbox(status="all")), 2)
+        replay = self.store.submit_attempt(task_id, "student-1", **options, now=1000)
+        self.assertEqual(replay["attempts"], submitted["attempts"])
+        self.assertEqual(replay["version"], submitted["version"])
+        self.assertEqual(len(self.store.list_grading_outbox(status="all")), 2)
+        with self.assertRaises(IdempotencyConflict):
+            self.store.submit_attempt(task_id, "student-1", **{**options, "fence_token": options["fence_token"] + 1}, now=1000)
+
+    def test_deadline_retry_disallowed_rejects_start_and_cross_deadline_submit(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=False)
+        ready, _ = self._grade_policy_first(task_id)
+        with self.assertRaises(InvalidTransition):
+            self._start_policy_retry(task_id, ready, now=501)
+        self._assert_submission_unchanged(task_id, ready, "policy-retry")
+        self._start_policy_retry(task_id, ready, now=490)
+        options = self._policy_draft(task_id, now=491, request_id="policy-second")
+        before = self.store.get_task(task_id, "student-1")
+        with self.assertRaises(InvalidTransition):
+            self.store.submit_attempt(task_id, "student-1", **options, now=501)
+        self._assert_submission_unchanged(task_id, before, options["request_id"])
+
+    def test_deadline_first_submission_cannot_use_retry_permission(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=True)
+        options = self._policy_draft(task_id, now=490, request_id="policy-first")
+        before = self.store.get_task(task_id, "student-1")
+        with self.assertRaises(InvalidTransition):
+            self.store.submit_attempt(task_id, "student-1", **options, now=501)
+        self._assert_submission_unchanged(task_id, before, options["request_id"])
+        self.assertIsNone(before["first_attempt_id"])
+
+    def test_deadline_first_late_policy_still_allows_first_submission(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=False, allow_late=True)
+        options = self._policy_draft(task_id, now=501, request_id="policy-first")
+        submitted = self.store.submit_attempt(task_id, "student-1", **options, now=503)
+        self.assertEqual(submitted["attempts"][0]["kind"], "first")
+        self.assertTrue(submitted["attempts"][0]["late"])
+
+    def test_deadline_first_late_policy_does_not_override_retry_policy(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=False, allow_late=True)
+        ready, _ = self._grade_policy_first(task_id)
+        with self.assertRaises(InvalidTransition):
+            self._start_policy_retry(task_id, ready, now=501)
+        self._start_policy_retry(task_id, ready, now=490)
+        options = self._policy_draft(task_id, now=491, request_id="policy-second")
+        before = self.store.get_task(task_id, "student-1")
+        with self.assertRaises(InvalidTransition):
+            self.store.submit_attempt(task_id, "student-1", **options, now=501)
+        self._assert_submission_unchanged(task_id, before, options["request_id"])
+
+    def test_deadline_first_submit_replay_during_retry_does_not_create_attempt(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=False)
+        ready, first_options = self._grade_policy_first(task_id)
+        self._start_policy_retry(task_id, ready, now=490)
+        self._policy_draft(task_id, now=491, request_id="policy-second")
+        before = self.store.get_task(task_id, "student-1")
+        replay = self.store.submit_attempt(task_id, "student-1", **first_options, now=1000)
+        self.assertEqual(replay, before)
+        self.assertEqual(len(self.store.list_grading_outbox(status="all")), 1)
+
+    def test_deadline_retry_permission_cannot_bypass_task_close(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=True)
+        ready, first_options = self._grade_policy_first(task_id)
+        self._start_policy_retry(task_id, ready, now=501)
+        options = self._policy_draft(task_id, now=502, request_id="policy-second")
+        current = self.store.get_task(task_id, "teacher-1")
+        self.store.close_task(task_id, "teacher-1", expected_version=current["version"],
+                              request_id="policy-close", reason="Teacher stopped submissions")
+        before = self.store.get_task(task_id, "student-1")
+        self.assertTrue(before["submission_closed"])
+        self.assertEqual(before["draft_answers"], {"q1": 1, "q2": "yes"})
+        for request in (options, first_options):
+            with self.subTest(request_id=request["request_id"]), self.assertRaises(InvalidTransition):
+                self.store.submit_attempt(task_id, "student-1", **request, now=504)
+        with self.assertRaises(InvalidTransition):
+            self._start_policy_retry(task_id, before, now=504)
+        self._assert_submission_unchanged(task_id, before, options["request_id"])
+
+    def test_goal_close_stops_future_rounds_but_keeps_published_task_policy(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=True)
+        ready, _ = self._grade_policy_first(task_id)
+        self._start_policy_retry(task_id, ready, now=490)
+        options = self._policy_draft(task_id, now=491, request_id="policy-second")
+        with self.store.connect() as db:
+            db.execute("UPDATE learning_goals SET status='closed',version=version+1 WHERE id=?", (ready["goal_id"],))
+        before = self.store.get_task(task_id, "student-1")
+        submitted = self.store.submit_attempt(task_id, "student-1", **options, now=504)
+        self.assertEqual(submitted["status"], "grading")
+        self.assertEqual(submitted["attempts"][1]["kind"], "retry")
+        self.assertEqual(len(self.store.list_grading_outbox(status="all")), 2)
+        closed_goal = self.store.get_goal(ready["goal_id"], "teacher-1")
+        with self.assertRaises(InvalidTransition):
+            self.store.publish_round(
+                "teacher-1", ready["goal_id"], expected_version=closed_goal["version"],
+                request_id="publish-after-goal-close", round_no=2, student_ids=["student-1"],
+                question_versions=[{"question_id": "q1", "version": 1}, {"question_id": "q2", "version": 3}],
+            )
+
+    def test_deadline_retry_permission_cannot_bypass_round_close(self):
+        task_id = self._publish_policy_task(allow_retry_after_deadline=True)
+        ready, _ = self._grade_policy_first(task_id)
+        self._start_policy_retry(task_id, ready, now=501)
+        options = self._policy_draft(task_id, now=502, request_id="policy-second")
+        self.store.set_round_status(ready["round_id"], "teacher-1", "closed", expected_version=1)
+        before = self.store.get_task(task_id, "student-1")
+        with self.assertRaises(InvalidTransition):
+            self.store.submit_attempt(task_id, "student-1", **options, now=504)
+        self._assert_submission_unchanged(task_id, before, options["request_id"])
 
     def test_database_is_isolated_versioned_wal_and_rejects_unversioned_store(self):
         self.assertEqual(self.store.schema_version, LearningStore.SCHEMA_VERSION)

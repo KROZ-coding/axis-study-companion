@@ -383,6 +383,20 @@ test("local import accepts non-external source rights but cannot turn preview or
   assert.doesNotMatch(h.html(), /<option value="m1"/);
 });
 
+test("leased preparation jobs keep polling until the reviewed content is published", async () => {
+  const jobs = [{ id: "leased-job", status: "pending", stage: "review", queue_status: "leased", input: {} }];
+  const h = harness({ jobs }); await h.library.load(); await h.click("tab", "jobs");
+  assert.match(h.html(), /已接单/);
+  assert.equal(h.timers.size, 1);
+  const [id, tick] = [...h.timers.entries()][0]; h.timers.delete(id);
+  jobs[0] = { ...jobs[0], status: "completed", queue_status: "succeeded", state: { published_versions: [{ question_id: "q1", version: 1 }] } };
+  const before = h.calls.length; await tick();
+  assert.ok(h.calls.slice(before).some(([method, url]) => method === "GET" && url.includes("/question-jobs")));
+  assert.match(h.html(), /审查通过，已入库/);
+  assert.equal(h.timers.size, 0);
+  h.library.reset();
+});
+
 test("content terminal status outranks queue success and only completed jobs with published versions are approved", async () => {
   const cases = [
     [{ status: "quarantined", queue_status: "succeeded" }, "已隔离", "warn"],

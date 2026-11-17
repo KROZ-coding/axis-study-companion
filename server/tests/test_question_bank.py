@@ -139,6 +139,32 @@ class QuestionBankTests(unittest.TestCase):
         with self.assertRaises(ContentConflict):
             self.bank.prepare_input(job["id"])
 
+    def test_fill_proved_mismatch_cannot_publish_despite_model_agreement(self):
+        cases = ((["1/2"], "2/3", "math"),
+                 (["北京"], "上海", "text"),
+                 (["1/2", "2/3"], "0.5", "math"),
+                 (["1/2"], ["0.5", "2/3"], "math"))
+        for reference,independent,answer_format in cases:
+            with self.subTest(reference=reference,independent=independent):
+                question = {"type":"fill","stem":"填写一个满足条件的答案。","options":[],
+                            "answer":reference,"answer_format":answer_format,"points":1,
+                            "explanation":"按题目条件核对。","rubric":[],"source_refs":["B1"]}
+                job = self._generate(question)
+                job = self._finish(job,answer=independent)
+                self.assertEqual(job["stage"],"recheck",job)
+                self.assertEqual(self.authority.versions,{})
+                job = self._finish(job,answer=independent)
+                self.assertEqual(job["status"],"quarantined",job)
+                self.assertEqual(self.authority.versions,{})
+
+    def test_fill_equivalent_alternatives_can_complete_independent_review(self):
+        question = {"type":"fill","stem":"写出二分之一的等价值。","options":[],
+                    "answer":["1/2","2/4"],"answer_format":"math","points":1,
+                    "explanation":"约分后为二分之一。","rubric":[],"source_refs":["B1"]}
+        job = self._finish(self._generate(question),answer=["0.5","4/8"])
+        self.assertEqual(job["status"],"completed",job)
+        self.assertEqual(len(self.authority.versions),1)
+
     def test_boolean_false_comparison_and_unanswerable_solution_cannot_publish(self):
         job = self._generate()
         job = self._apply(job,{"solutions":[{"index":0,"answer":None,"reasoning":"题目有歧义","solvable":False}]})

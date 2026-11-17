@@ -267,7 +267,7 @@ function chatDom(responseId = "response-one") {
       querySelector: (selector) => selector === "[data-chat-input]" ? input : selector === "[data-chat-thread]" ? thread : null,
       querySelectorAll: (selector) => selector === "[data-response-id]" ? [responseRoot] : selector === "[data-chat-input]" ? [input] : [],
     },
-    render() { renders += 1; document.activeElement = null; replaceNodes(1200); },
+    render(value = "Draft being edited") { renders += 1; document.activeElement = null; replaceNodes(1200); input.value = value; },
     get input() { return input; }, get thread() { return thread; }, get body() { return body; },
     get renders() { return renders; }, get submits() { return submits; },
   };
@@ -762,6 +762,54 @@ test("released results format booleans, choices, alternatives and fill slots usi
   const markup = h.context.resultPageLive();
   for (const text of ["你的作答：错误", "参考答案：错误", "你的作答：A. Zero", "你的作答：A. Alpha；C. Gamma", "你的作答：0", "参考答案：x+1 或 1+x", "第 1 空：0；第 2 空：x^2", "你的作答：&lt;img onerror=&#39;bad&#39;&gt;", "参考答案：&lt;script&gt;reference&lt;/script&gt;"]) assert.ok(markup.includes(text), text);
   assert.ok(!markup.includes("<script>") && !markup.includes("<img") && !markup.includes("你的作答：正确"));
+});
+
+test("grading status read failures and exhausted polling remain visible with a manual refresh", async () => {
+  for (const mode of ["failure", "exhausted"]) {
+    const current = task("grading-status", { status: "grading", answer_released: false,
+      attempts: [{ id: "submitted", kind: "first" }] });
+    const h = harness(["pollTask", "escapeHtml", "resultPageLive"], {
+      state: { liveTask: current, studentPage: "result" },
+      globals: { setTimeout: (callback) => { callback(); return 1; },
+        studentHeading: () => "", studentDate: () => "", taskStatus: () => "正在评卷" },
+      api: { task: async () => { if (mode === "failure") throw new Error("服务暂时不可用"); return current; } },
+    });
+    await h.context.pollTask(current.id, h.state.transitionId, 1);
+    const markup = h.context.resultPageLive();
+    assert.match(markup, /自动刷新已暂停/);
+    assert.match(markup, /data-action="refresh-task"/);
+    assert.match(markup, /整轮评分完成前/);
+    assert.equal(h.state.liveTask.status, "grading", "a read failure cannot turn background grading into failure");
+    assert.equal(h.state.banner, mode === "failure" ? "grading-refresh-failed" : "grading-refresh-stopped");
+  }
+});
+
+test("late grading poll failures cannot change a different task or login generation", async () => {
+  for (const transition of ["task", "identity"]) {
+    const gate = deferred(), current = task("grading-old", { status: "grading" });
+    const h = harness(["pollTask"], { state: { liveTask: current },
+      globals: { setTimeout: (callback) => { callback(); return 1; } },
+      api: { task: () => gate.promise },
+    });
+    const polling = h.context.pollTask(current.id, h.state.transitionId, 1); await settle();
+    if (transition === "task") h.state.liveTask = task("grading-new");
+    else h.state.transitionId += 1;
+    gate.reject(new Error("旧读取失败")); await polling;
+    assert.equal(h.state.banner, "");
+    assert.equal(h.calls.some(([name]) => name === "render"), false);
+  }
+});
+
+test("manual result refresh resumes status polling without creating another submission", async () => {
+  const current = task("grading-manual-refresh", { status: "grading" });
+  const h = harness(["refreshStudentTask"], {
+    state: { liveTask: current, banner: "grading-refresh-failed" },
+    api: { task: async () => current },
+  });
+  await h.context.refreshStudentTask();
+  assert.equal(h.state.banner, "");
+  assert.equal(h.state.loading, false);
+  assert.deepEqual(plain(h.calls.filter(([name]) => name === "pollTask")), [["pollTask", current.id, h.state.transitionId]]);
 });
 
 test("question rendering and unreleased results never read protected answer or explanation fields", () => {
@@ -1446,6 +1494,222 @@ test("pending sends stay with their conversations and successful retries clean u
   assert.equal(h.state.chatMessages[0].id, "accepted-chat-a");
   assert.deepEqual(posts[0], posts[3]);
   assert.deepEqual(posts[1], posts[2]);
+});
+
+test("unsent chat text and composition guard beforeunload across conversation switches without browser storage", async () => {
+  const storage = { getItem: () => assert.fail("chat read browser storage"), setItem: () => assert.fail("chat persisted browser storage") };
+  const h = chatHarness(["bind"], {
+    window: { sessionStorage: storage, localStorage: storage },
+    api: { getConversation: async (id) => ({ id }), conversationMessages: async () => [], companionAnswerPolicy: async () => ({}) },
+  });
+  const input = controlNode();
+  h.nodes.set("[data-chat-input]", [input]);
+  h.context.bind();
+  let prevented = 0;
+  const unload = () => {
+    const event = { preventDefault: () => { prevented += 1; } };
+    h.context.beforeStudentUnload(event);
+    return event;
+  };
+  assert.equal(unload().returnValue, undefined);
+  input.fire("compositionstart");
+  assert.equal(unload().returnValue, "", "composition is protected before the first input event");
+  input.value = "请检查我的思路";
+  input.fire("compositionend");
+  assert.equal(h.state.chatDrafts["chat-a"], input.value);
+  assert.equal(unload().returnValue, "");
+  await h.context.loadConversation("chat-b");
+  assert.equal(h.state.chatDraft, "");
+  assert.equal(unload().returnValue, "", "another conversation's unsent draft must still warn on refresh");
+  await h.context.loadConversation("chat-a");
+  assert.equal(h.state.chatDraft, "请检查我的思路");
+  input.value = " \n ";
+  input.fire("input");
+  assert.equal(unload().returnValue, undefined, "whitespace alone does not contain an unsent message");
+  assert.equal(prevented, 3);
+});
+
+test("unknown chat POSTs guard beforeunload until the same request is confirmed from history or retry", async () => {
+  for (const confirmation of ["history", "retry"]) {
+    const posts = [];
+    let history = [];
+    const storage = { setItem: () => assert.fail("an uncertain chat request was persisted") };
+    const h = chatHarness([], {
+      state: { chatDraft: "检查我的独立尝试", chatDrafts: { "chat-a": "检查我的独立尝试" } },
+      window: { sessionStorage: storage, localStorage: storage },
+      api: {
+        getConversation: async (id) => ({ id }),
+        conversationMessages: async (id) => id === "chat-a" ? history : [],
+        companionAnswerPolicy: async () => ({ help_recordable: false }),
+        postMessage: async (...args) => {
+          posts.push(plain(args));
+          if (posts.length === 1) throw Object.assign(new Error("POST result unknown"), { status: 0 });
+          return { message_id: "confirmed-user", response_id: "confirmed-response", status: "completed" };
+        },
+      },
+    });
+    await h.context.sendStudentMessage();
+    const pending = h.state.chatPendingSends["chat-a"];
+    assert.ok(pending);
+    assert.equal(h.state.chatSending, false);
+    // Even without a visible draft, the original request must survive navigation and refresh protection.
+    h.state.chatDraft = "";
+    h.state.chatDrafts["chat-a"] = "";
+    await h.context.loadConversation("chat-b");
+    let prevented = 0;
+    const event = { preventDefault: () => { prevented += 1; } };
+    h.context.beforeStudentUnload(event);
+    assert.equal(prevented, 1);
+    assert.equal(event.returnValue, "");
+    assert.equal(h.state.chatPendingSends["chat-a"], pending);
+    if (confirmation === "history") history = [chatMessage("confirmed-user", {}, { text: pending.text, client_request_id: pending.requestId })];
+    await h.context.loadConversation("chat-a");
+    if (confirmation === "retry") {
+      await h.context.sendStudentMessage();
+      assert.deepEqual(posts[1], posts[0], "retry retains the original text, scope and request ID");
+    } else assert.equal(posts.length, 1, "history confirmation must not send another POST");
+    assert.equal(h.state.chatPendingSends["chat-a"], undefined);
+    const confirmed = { preventDefault: () => { prevented += 1; } };
+    h.context.beforeStudentUnload(confirmed);
+    assert.equal(prevented, 1, "the matching receipt releases refresh protection");
+    assert.equal(confirmed.returnValue, undefined);
+  }
+});
+
+test("an unknown new task-context POST guards beforeunload off-page and its exact retry clears the transient draft", async () => {
+  const posts = [], creates = [];
+  const context = { taskId: "task-a", questionId: "question-a", questionVersionId: "question-a:3", prompt: "请检查我的尝试" };
+  const storage = { setItem: () => assert.fail("a task-context request was persisted") };
+  const h = chatHarness([], {
+    state: { activeConversationId: null, studentPage: "home", chatContext: context, chatContexts: { __new: context }, chatDraft: context.prompt, chatDrafts: { __new: context.prompt } },
+    window: { sessionStorage: storage, localStorage: storage },
+    api: {
+      companionAnswerPolicy: async () => ({ help_recordable: false }),
+      createConversation: async (...args) => { creates.push(plain(args)); return { id: "new-context" }; },
+      postMessage: async (...args) => {
+        posts.push(plain(args));
+        if (posts.length === 1) throw Object.assign(new Error("context POST result unknown"), { status: 0 });
+        return { message_id: "confirmed-context", response_id: "context-response", status: "completed" };
+      },
+    },
+  });
+  await h.context.sendContextChat();
+  const pending = context.pending;
+  assert.ok(pending);
+  assert.equal(h.state.chatSending, false);
+  h.context.closeStudentChatStream();
+  h.state.chatContext = null;
+  h.state.chatDraft = "";
+  h.state.chatDrafts.__new = "";
+  h.state.studentTab = "tasks";
+  let prevented = 0;
+  const event = { preventDefault: () => { prevented += 1; } };
+  h.context.beforeStudentUnload(event);
+  assert.equal(prevented, 1, "the retained __new context alone must protect the request ID");
+  assert.equal(event.returnValue, "");
+  assert.equal(h.state.chatContexts.__new.pending, pending);
+  h.state.chatContext = context;
+  h.state.chatDrafts.__new = pending.text;
+  h.state.studentTab = "companion";
+  assert.equal(await h.context.sendContextChat(), true);
+  assert.equal(creates.length, 1);
+  assert.deepEqual(posts[1], posts[0]);
+  assert.equal(h.state.chatDrafts.__new, undefined);
+  assert.equal(h.state.chatContexts.__new, undefined);
+  const confirmed = { preventDefault: () => { prevented += 1; } };
+  h.context.beforeStudentUnload(confirmed);
+  assert.equal(prevented, 1);
+  assert.equal(confirmed.returnValue, undefined);
+});
+
+test("bound chat input and logout controls keep drafts on cancel and send logout only after page confirmation", async () => {
+  for (const pending of [false, true]) {
+    let logouts = 0, h;
+    const gate = deferred(), document = { activeElement: null };
+    const input = controlNode({}, { focus() { document.activeElement = this; } });
+    const logout = controlNode({ action: "logout" });
+    const cancel = controlNode({ action: "cancel-logout" }, { focus() { document.activeElement = this; } });
+    const confirm = controlNode({ action: "confirm-logout" }, { focus() { document.activeElement = this; } });
+    const dialog = controlNode({}, { querySelector: (selector) => selector === '[data-action="cancel-logout"]' ? cancel : confirm });
+    h = chatHarness(["bind", "onAction", "finishLogout", "sheet", "escapeHtml"], {
+      state: { reduce: true, chatMessages: [chatMessage("completed")], chatPendingSends: pending ? { "chat-a": { requestId: "original-chat-request", text: "发送结果未知" } } : {} },
+      window: { confirm: () => assert.fail("logout must not depend on a native confirmation") },
+      api: { logout: () => { logouts += 1; return gate.promise; } },
+      view: { querySelector: (selector) => selector === "[data-chat-input]" ? input : selector === ".student-logout-dialog" && h.state.sheet === "logout" ? dialog : null },
+      globals: { document, render: () => h.context.bind() },
+    });
+    h.nodes.set("[data-chat-input]", [input]);
+    h.nodes.set("[data-action]:not(form)", [logout, cancel, confirm]);
+    h.context.bind();
+    confirm.fire("click");
+    assert.equal(logouts, 0, "a stale confirmation control cannot bypass the first step");
+    input.value = pending ? "" : "未发送的中文消息";
+    input.fire("input");
+    const before = plain({ draft: h.state.chatDraft, drafts: h.state.chatDrafts, pending: h.state.chatPendingSends, messages: h.state.chatMessages });
+    logout.fire("click");
+    assert.equal(logouts, 0);
+    assert.equal(h.state.sheet, "logout");
+    assert.equal(document.activeElement, cancel, "the safe action receives initial focus");
+    assert.match(h.context.sheet(), /role="dialog"/);
+    assert.match(h.context.sheet(), /未发送消息或未确认的聊天请求/);
+    dialog.fire("keydown", { key: "Tab", shiftKey: true, preventDefault() {} });
+    assert.equal(document.activeElement, confirm);
+    dialog.fire("keydown", { key: "Tab", shiftKey: false, preventDefault() {} });
+    assert.equal(document.activeElement, cancel);
+    cancel.fire("click");
+    assert.equal(h.state.sheet, null);
+    assert.equal(document.activeElement, input);
+    assert.deepEqual(plain({ draft: h.state.chatDraft, drafts: h.state.chatDrafts, pending: h.state.chatPendingSends, messages: h.state.chatMessages }), before);
+    logout.fire("click");
+    dialog.fire("keydown", { key: "Escape", preventDefault() {} });
+    assert.equal(h.state.sheet, null);
+    assert.equal(logouts, 0);
+    logout.fire("click");
+    confirm.fire("click");
+    confirm.fire("click");
+    assert.equal(logouts, 1);
+    assert.equal(h.state.loggingOut, true);
+    assert.equal(h.state.screen, "app", "private data remains until the server confirms logout");
+    gate.resolve();
+    await settle();
+    assert.equal(h.state.screen, "entry");
+    assert.equal(Boolean(h.context.studentWorkPending()), false);
+  }
+});
+
+test("logout captures visible chat text even before input state is synchronized", () => {
+  const input = controlNode({}, { value: "仍在输入框里的最终文字" });
+  const h = chatHarness(["onAction"], {
+    window: { confirm: undefined },
+    view: { querySelector: (selector) => selector === "[data-chat-input]" ? input : null },
+  });
+  assert.equal(h.state.chatDraft, "");
+  h.context.onAction({ currentTarget: { dataset: { action: "logout" } } });
+  assert.equal(h.state.sheet, "logout");
+  assert.equal(h.state.chatDraft, input.value);
+  assert.equal(h.state.chatDrafts["chat-a"], input.value);
+  assert.equal(h.state.loggingOut, false);
+  assert.equal(h.context.studentConfirm("unavailable"), false);
+});
+
+test("failed confirmed logout retains the chat draft and pending request for another explicit attempt", async () => {
+  const draft = "退出失败后仍需保留", pending = { requestId: "same-request", text: "待确认消息" };
+  let requests = 0;
+  const h = chatHarness(["onAction", "finishLogout"], {
+    state: { chatDraft: draft, chatDrafts: { "chat-a": draft }, chatPendingSends: { "chat-a": pending } },
+    api: { logout: async () => { requests += 1; throw new Error("logout unavailable"); } },
+  });
+  h.context.onAction({ currentTarget: { dataset: { action: "logout" } } });
+  h.context.onAction({ currentTarget: { dataset: { action: "confirm-logout" } } });
+  await settle();
+  assert.equal(requests, 1);
+  assert.equal(h.state.screen, "app");
+  assert.equal(h.state.loggingOut, false);
+  assert.equal(h.state.chatDraft, draft);
+  assert.equal(h.state.chatPendingSends["chat-a"], pending);
+  h.context.onAction({ currentTarget: { dataset: { action: "logout" } } });
+  assert.equal(h.state.sheet, "logout");
+  assert.equal(requests, 1);
 });
 
 test("history reconciles client_request_id rather than consuming an identical earlier question", async () => {
@@ -2166,6 +2430,56 @@ test("composition Enter never submits and snapshots defer rerender until composi
   assert.equal(dom.renders, 2, "chat rerenders cannot replace another role or tab");
 });
 
+test("IME final Chinese text survives a queued snapshot before the final input event and reaches the chat POST", async () => {
+  for (const contextual of [false, true]) {
+    const dom = chatDom(), posts = [];
+    const original = "wo xiang qing ni jian cha si lu", finalText = "我想请你检查思路";
+    let handlers, h;
+    const context = { taskId: "task-a", questionId: "question-a", questionVersionId: "question-a:3", prompt: original };
+    h = chatHarness(["bind"], {
+      state: {
+        activeConversationId: contextual ? null : "chat-a", studentPage: contextual ? "home" : "chat",
+        chatDraft: original, chatDrafts: { [contextual ? "__new" : "chat-a"]: original },
+        chatContext: contextual ? context : null, chatContexts: contextual ? { __new: context } : {},
+        chatMessages: [chatMessage("one", { status: "streaming" })],
+      },
+      view: dom.view, globals: { document: dom.document, render: () => { dom.render(h.state.chatDraft); h.context.bind(); } },
+      api: {
+        openResponseStream: (id, callbacks) => { handlers = callbacks; return () => {}; },
+        companionAnswerPolicy: async () => ({ help_recordable: false }),
+        createConversation: async () => ({ id: "context-chat" }),
+        postMessage: async (...args) => { posts.push(plain(args)); return { message_id: "sent-chinese", response_id: "chinese-response", status: "completed" }; },
+      },
+    });
+    h.context.bind();
+    if (!contextual) h.context.connectChatResponse("response-one");
+    const input = dom.input;
+    dom.document.activeElement = input;
+    input.fire("compositionstart");
+    input.value = original;
+    input.fire("input", { isComposing: true });
+    if (contextual) h.context.renderStudentChatIfActive(h.context.chatEpoch);
+    else handlers.snapshot({ text: "Full response", status: "completed", last_event_id: 7 }, { id: 7, generation: 1 });
+    assert.equal(dom.renders, 0);
+    assert.equal(h.context.chatRenderPending, true);
+    input.value = finalText;
+    input.fire("compositionend");
+    assert.equal(dom.renders, 1);
+    assert.notEqual(dom.input, input);
+    assert.equal(dom.input.value, finalText, "the replacement textarea must use the completed Chinese text");
+    assert.equal(h.state.chatDraft, finalText);
+    assert.equal(h.state.chatDrafts[contextual ? "__new" : "chat-a"], finalText);
+    if (contextual) assert.equal(h.state.chatContext.prompt, finalText);
+    input.fire("input", { isComposing: false, inputType: "insertCompositionText" });
+    assert.equal(h.state.chatDraft, finalText, "a final input event on the replaced node must not restore pinyin");
+    if (contextual) await h.context.sendContextChat();
+    else await h.context.sendStudentMessage();
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0][1], finalText);
+    assert.equal(Boolean(h.context.studentWorkPending()), false, "acknowledged text must not leave a stale unsent draft");
+  }
+});
+
 test("chat routes contain only an encoded ID and authenticated refresh restores that conversation after workspace load", async () => {
   const order = [], urls = [];
   const id = "conversation / one?#中文";
@@ -2626,6 +2940,95 @@ test("an uncertain draft retries identical payload and ID at most three times be
   assert.equal(h.state.studentWrites[current.id].pending, null);
   assert.deepEqual(plain(h.state.answers), [1]);
   assert.equal(h.state.draftDirty, true);
+});
+
+test("temporary renewal failures preserve an unknown save for exact same-ID version and answer confirmation", async () => {
+  for (const status of [0, 503]) {
+    const current = task(`renew-unknown-${status}`), requests = [], renewals = [];
+    const originalLease = lease(current.id);
+    const h = harness(["rememberStudentDraft"], {
+      state: { liveTask: current, liveTasks: [current], liveLease: originalLease, answers: [0] },
+      api: {
+        saveDraft: async (...args) => {
+          requests.push(plain(args));
+          if (requests.length === 1) throw Object.assign(new Error("save receipt lost"), { status: 0 });
+          return { ...current, version: 4, status: "in_progress", draft_answers: { [`${current.id}-q`]: 0 } };
+        },
+        renewLease: async (...args) => {
+          renewals.push(plain(args));
+          if (renewals.length === 1) throw Object.assign(new Error("temporary renewal failure"), { status, code: status ? "service_unavailable" : "network_unavailable" });
+          return { lease_until: originalLease.lease_until + 180 };
+        },
+        acquireLease: () => assert.fail("an uncertain save cannot acquire a replacement lease"),
+      },
+    });
+    h.context.rememberStudentDraft();
+    h.context.startLeaseRenewal(current.id, h.state.transitionId);
+    assert.equal(await h.context.saveLiveDraft({ automatic: true }), false);
+    const write = h.state.studentWrites[current.id], pending = write.pending;
+    assert.ok(pending);
+    await [...h.intervals.values()][0]();
+    assert.equal(h.state.liveLease, originalLease, "temporary failure retains the original lease and fencing tokens");
+    assert.equal(write.blocked, "");
+    assert.equal(write.pending, pending);
+    assert.equal(h.state.banner, "save-fail");
+    assert.equal(h.intervals.size, 1, "a transient failure must leave renewal available");
+    assert.equal(await h.context.recoverStudentDraft(), false, "unknown writes must be reconciled before takeover");
+    assert.equal(await h.context.saveLiveDraft(), true);
+    assert.deepEqual(requests[1], requests[0], "retry freezes version, lease, answers and request ID");
+    assert.equal(requests[1][1], 3);
+    assert.deepEqual(requests[1][3], { [`${current.id}-q`]: 0 });
+    assert.equal(write.pending, null);
+    assert.equal(write.blocked, "");
+    assert.equal(write.version, 4);
+    assert.equal(write.savedInput, "[0]");
+    assert.equal(h.state.liveTask.version, 4);
+    assert.deepEqual(plain(h.state.liveTask.draft_answers), { [`${current.id}-q`]: 0 });
+    assert.deepEqual(plain(h.state.answers), [0]);
+    assert.equal(h.state.draftDirty, false);
+    assert.equal(h.state.studentDrafts[current.id], undefined);
+    assert.ok(h.state.savedAt);
+    assert.equal(h.state.banner, "");
+    assert.equal(h.timeouts.size, 0);
+    await [...h.intervals.values()][0]();
+    assert.equal(h.state.liveLease.lease_until, originalLease.lease_until + 180);
+    assert.deepEqual(renewals[1], renewals[0]);
+  }
+});
+
+test("explicit renewal lease loss or expiry still blocks editing and rejects a late save receipt", async () => {
+  for (const code of ["lease_lost", "lease_expired"]) {
+    const current = task(code), requests = [];
+    const h = harness(["rememberStudentDraft"], {
+      state: { liveTask: current, liveTasks: [current], liveLease: lease(current.id), answers: [0] },
+      api: {
+        saveDraft: async (...args) => {
+          requests.push(plain(args));
+          if (requests.length === 1) throw Object.assign(new Error("save receipt lost"), { status: 0 });
+          return { ...current, version: 4, status: "in_progress", draft_answers: { [`${current.id}-q`]: 0 } };
+        },
+        renewLease: async () => { throw Object.assign(new Error(code), { status: 409, code }); },
+      },
+    });
+    h.context.rememberStudentDraft();
+    h.context.startLeaseRenewal(current.id, h.state.transitionId);
+    assert.equal(await h.context.saveLiveDraft({ automatic: true }), false);
+    const write = h.state.studentWrites[current.id];
+    await [...h.intervals.values()][0]();
+    assert.equal(write.blocked, code);
+    assert.equal(h.state.liveLease, null);
+    assert.equal(h.context.studentAnswerLocked(), true);
+    assert.equal(h.state.banner, "takeover");
+    assert.equal(h.intervals.size, 0);
+    assert.equal(h.timeouts.size, 0);
+    assert.equal(await h.context.saveLiveDraft(), false, "a late receipt cannot restore confirmed lost editing rights");
+    assert.deepEqual(requests[1], requests[0]);
+    assert.equal(write.pending, null);
+    assert.equal(h.state.liveTask.version, 3);
+    assert.equal(h.state.draftDirty, true);
+    assert.deepEqual(plain(h.state.studentDrafts[current.id].answers), [0]);
+    assert.equal(h.state.savedAt, null);
+  }
 });
 
 test("submit waits for saved input and explicit confirmation, then replays an unknown submit without a new save", async () => {

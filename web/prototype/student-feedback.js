@@ -35,6 +35,8 @@ function taskTitle(task, goals) {
 }
 const scoreText = (score, max) => finiteNumber(score) ? `${score}${finiteNumber(max) ? ` / ${max}` : ""} 分` : "待评分";
 const appealKey = (attemptId, questionId, revision) => JSON.stringify([attemptId, questionId, Number(revision)]);
+const definiteRejection = (error) => Number(error?.status) >= 400 && Number(error.status) < 500
+  && ![408, 425].includes(Number(error.status));
 function requestId(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
 }
@@ -346,7 +348,10 @@ export function createStudentFeedback({ api, state, render: renderApp = () => {}
     } catch (error) {
       if (writeCurrent(write)) {
         pending.inFlight = false;
-        current.replyErrors.set(threadId, error?.message || "发送结果尚未确认，草稿已保留。请重试确认。");
+        if (definiteRejection(error)) current.replyPending.delete(threadId);
+        current.replyErrors.set(threadId, error?.message || (definiteRejection(error)
+          ? "发送未被接受，草稿已保留，可修改或刷新后重试。"
+          : "发送结果尚未确认，草稿已保留。请重试确认。"));
         if (sameSelection(write)) repaint();
       }
       return false;
@@ -392,7 +397,10 @@ export function createStudentFeedback({ api, state, render: renderApp = () => {}
     } catch (error) {
       if (writeCurrent(write)) {
         pending.inFlight = false;
-        current.appealErrors.set(key, error?.message || "提交结果尚未确认，原因已保留。请重试确认。");
+        if (definiteRejection(error)) current.appealPending.delete(key);
+        current.appealErrors.set(key, error?.message || (definiteRejection(error)
+          ? "提交未被接受，原因已保留，请刷新评分记录后重试。"
+          : "提交结果尚未确认，原因已保留。请重试确认。"));
         if (sameSelection(write)) repaint();
       }
       return false;

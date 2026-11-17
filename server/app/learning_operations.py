@@ -187,9 +187,18 @@ class LearningOperations:
             raise InvalidTransition("尚未到开放时间")
         if policy.get("diagnostic_required") and not policy.get("diagnostic_completed"):
             raise InvalidTransition("请先完成独立短诊")
-        if task["deadline_at"] is not None and now > task["deadline_at"] and not task["allow_late"]:
-            if not (task["first_attempt_id"] and policy.get("allow_retry_after_deadline", True)):
-                raise InvalidTransition("已截止，草稿保留，请联系教师延期")
+        self._check_deadline(task, policy, now)
+
+    @staticmethod
+    def _check_deadline(task, policy, now):
+        from .learning_store import InvalidTransition
+        if task["deadline_at"] is None or now <= task["deadline_at"]:
+            return
+        if task["first_attempt_id"] is not None:
+            if not task["allow_retries"] or not policy.get("allow_retry_after_deadline", True):
+                raise InvalidTransition("发布规则不允许截止后重做")
+        elif not task["allow_late"]:
+            raise InvalidTransition("已截止，草稿保留，请联系教师延期")
 
     def publish_round(self, actor_id, goal_id, *, expected_version, request_id, round_no, student_ids, question_versions,
                       deadline_at=None, scheduled_at=None, allow_late=False, allow_retries=True,
@@ -294,18 +303,13 @@ class LearningOperations:
         with self._using_connection(write=True) as db:
             task = self._task_row(db, task_id, actor_id)
             self._submission_open(db, task)
-            if task["status"] in {"not_started", "in_progress"}:
-                self._open_task(db, task, options.get("now"))
             return super().submit_attempt(task_id, actor_id, **options)
 
     def start_retry(self, task_id, actor_id, **options):
-        from .learning_store import InvalidTransition
         with self._using_connection(write=True) as db:
             task = self._task_row(db, task_id, actor_id)
             self._submission_open(db, task)
-            policy = self._policy(db, task_id)
-            if task["deadline_at"] and time.time() > task["deadline_at"] and not policy.get("allow_retry_after_deadline", True):
-                raise InvalidTransition("发布规则不允许截止后重做")
+            self._check_deadline(task, self._policy(db, task_id), time.time())
             return super().start_retry(task_id, actor_id, **options)
 
     @classmethod
@@ -315,8 +319,15 @@ class LearningOperations:
         normalized = super()._normalize_question(question)
         normalized["score_units"] = normalized["points_units"]
         normalized["points"] = question.get("points", normalized["points"])
+        # Freeze the same bounded conditions that trusted grading/review may
+        # send. Never discard a restriction and accidentally grade over R.
+        from .services.model_gateway import GatewayError, _question_requirements
+        try:
+            normalized.update(_question_requirements(question))
+        except GatewayError as error:
+            raise ValueError("题目作答格式或数学条件无效或超出限制") from error
         for key in ("course_id", "class_id", "content_sha", "family_sha", "family_id", "source_anchors", "review_evidence",
-                    "external_processing_permission", "pipeline_job_id", "source_revision", "knowledge_points", "difficulty", "answer_format", "reference_answer", "provenance", "hint_action_ids"):
+                    "external_processing_permission", "pipeline_job_id", "source_revision", "knowledge_points", "difficulty", "reference_answer", "provenance", "hint_action_ids"):
             if key in question:
                 normalized[key] = question[key]
         return normalized

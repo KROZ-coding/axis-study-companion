@@ -244,11 +244,13 @@ class Flow:
             port = listener.getsockname()[1]
         self.base = f"http://127.0.0.1:{port}"
         env = dict(self.env, DATA_DIR=str(data_dir), STUDY_DATA_DIR=str(data_dir))
+        self.server_stop = self.root / f"stop-{port}.requested"
+        self.server_status = self.root / f"stopped-{port}.json"
         self.server_log = tempfile.TemporaryFile(mode="w+b")
         self.process = subprocess.Popen(
-            [sys.executable, "-I", "-m", "uvicorn", "app.main:app", "--app-dir", str(SERVER),
-             "--host", "127.0.0.1", "--port", str(port), "--workers", "1", "--lifespan", "on",
-             "--no-access-log", "--log-level", "warning", "--timeout-graceful-shutdown", "10"],
+            [sys.executable, "-I", "-B", str(SERVER / "tests" / "platform_flow_server.py"),
+             "--port", str(port), "--stop-file", str(self.server_stop),
+             "--status-file", str(self.server_status)],
             cwd=self.root, env=env, stdin=subprocess.DEVNULL, stdout=self.server_log, stderr=subprocess.STDOUT,
         )
         self.clients = {actor: httpx.Client(base_url=self.base, headers={"Origin": self.base},
@@ -282,17 +284,36 @@ class Flow:
             return
         process = self.process
         if process.poll() is None:
-            process.terminate()
+            self.server_stop.touch(exist_ok=False)
             try:
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
-                self.evidence["failures"].append({"stage": self.stage_name, "type": "ShutdownTimeout", "message": "uvicorn exceeded terminate/wait timeout; kill/wait required"})
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                self.evidence["failures"].append({"stage": self.stage_name, "type": "ShutdownTimeout", "message": "uvicorn did not shut down gracefully; forced termination was required"})
         else:
             self.evidence["failures"].append({"stage": self.stage_name, "type": "UnexpectedServerExit", "message": f"uvicorn exited unexpectedly: {process.returncode}"})
         self.check(process.poll() is not None, "uvicorn process was not reaped")
-        self.evidence.setdefault("shutdowns", []).append({"pid": process.pid, "exit_code": process.returncode, "reaped": True})
+        status = {}
+        if self.server_status.is_file():
+            try:
+                status = json.loads(self.server_status.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                pass
+        workers = status.get("workers", {})
+        graceful = (process.returncode == 0 and status.get("started") is True
+                    and status.get("stop_requested") is True and workers.get("running") == 0
+                    and workers.get("needs_attention") is False)
+        self.evidence.setdefault("shutdowns", []).append({
+            "pid": process.pid, "exit_code": process.returncode, "reaped": True,
+            "graceful": graceful, "workers": workers,
+        })
+        if not graceful:
+            self.evidence["failures"].append({"stage": self.stage_name, "type": "ShutdownFailed", "message": "server must exit with code 0 and confirm all workers stopped"})
         self.process = None
         if self.server_log is not None:
             self.server_log.flush()
@@ -569,10 +590,17 @@ class Flow:
             from app.runtime import Runtime
             fixture_runtime = Runtime(Settings())
             self.refs, self.future_refs = [], []
+            # Different stems are necessary: changing only a number remains the
+            # same computed family and must not qualify as a new practice round.
+            stems = ("Synthetic: identify the number of sides in a triangle.",
+                     "Synthetic: choose the unit used to measure length.",
+                     "Synthetic diagnostic: identify an even integer.",
+                     "Synthetic: recognize the definition of a right angle.",
+                     "Synthetic: select the meaning of a fraction denominator.")
             for index, answer, points in ((1, 1, 2), (2, 0, 3), (3, 1, 1), (4, 1, 2), (5, 0, 3)):
                 qid = f"synthetic-flow-choice-{index}"
                 fixture_runtime.learning.create_question_version(self.users["teacher"]["id"], qid, 1, {
-                    "type": "single_choice", "stem": f"Synthetic objective check {index}",
+                    "type": "single_choice", "stem": stems[index - 1],
                     "options": ["Option A", "Option B", "Option C"], "answer": answer, "points": points,
                     "family_id": f"synthetic-family-{index}", "explanation": PRIVATE_MARKER,
                     "rubric": [{"point": PRIVATE_MARKER, "score": points}], "external_processing_permission": False,
@@ -773,7 +801,12 @@ class Flow:
             self.check(response["detail"]["code"] == "asr_not_configured", "audio did not explicitly report unavailable ASR")
 
         with self.stage("continuous_plan_real_elapsed_round") as row:
-            goal = self.poll("continuous plan next round", lambda: self.api("teacher", "GET", f"/api/v1/goals/{self.goal_id}"),
+            def next_round():
+                plans = self.sql("learning", "SELECT status,reason FROM goal_plans WHERE goal_id=?", (self.goal_id,))
+                self.check(plans and plans[0][0] != "blocked",
+                           "continuous plan blocked: " + (str(plans[0][1]) if plans else "missing plan"))
+                return self.api("teacher", "GET", f"/api/v1/goals/{self.goal_id}")
+            goal = self.poll("continuous plan next round", next_round,
                              lambda item: len(item["rounds"]) == 2, timeout=self.args.plan_timeout)
             elapsed = time.monotonic() - self.plan_started
             self.check(elapsed >= 59.5, "next round appeared without the real 60-second interval")

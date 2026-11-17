@@ -1,0 +1,31 @@
+[Unit]
+Description=AXIS study companion API and background worker
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=axis
+Group=axis
+WorkingDirectory=/opt/axis-study-companion/server
+EnvironmentFile=/etc/axis-study-companion/production.env
+EnvironmentFile=-/etc/axis-study-companion/credentials.env
+ExecStartPre=/opt/axis-study-companion/server/.venv/bin/python -B -m app.deployment_check --profile production
+ExecStart=/opt/axis-study-companion/server/.venv/bin/python -B -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log --timeout-graceful-shutdown 420
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=450
+KillSignal=SIGINT
+UMask=0077
+StateDirectory=axis-study-companion
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/axis-study-companion
+
+[Install]
+WantedBy=multi-user.target

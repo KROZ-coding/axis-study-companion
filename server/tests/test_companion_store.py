@@ -273,6 +273,14 @@ class CompanionStoreTests(unittest.TestCase):
         context = self.store.build_request_context(second["response_id"], answer_policy=diagnostic)
         self.assertEqual(context["safe_guidance_key"], "independent_attempt")
 
+    def test_long_current_question_keeps_the_final_request_in_model_context(self):
+        text = "条件" * 9990 + "请核对最后这个问题。"
+        posted = self.post(text)
+        context = self.store.build_request_context(posted["response_id"], answer_policy=self.policy)
+        self.assertEqual(context["current_question"], text)
+        self.assertEqual(context["messages"][-1], {"role": "user", "content": text})
+        self.assertLessEqual(len(text), 20000)
+
     def test_failed_response_and_safe_guidance_end_atomically(self):
         failed = self.post(request_id="failed")
         self.store.fail_response(failed["response_id"], "provider unavailable", call_id="call", generation=1)

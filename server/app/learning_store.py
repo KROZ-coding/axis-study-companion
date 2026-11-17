@@ -963,8 +963,9 @@ class _LearningStoreCore:
             round_row = db.execute("SELECT status FROM learning_rounds WHERE id=?", (task["round_id"],)).fetchone()
             if round_row is None or round_row["status"] != "open":
                 raise InvalidTransition("round is closed")
-            if task["deadline_at"] is not None and current > task["deadline_at"] and not task["allow_late"]:
-                raise InvalidTransition("task deadline has passed")
+            # Use the same frozen first/retry policy as leases and drafts, after
+            # idempotency replay but before creating any attempt or grading job.
+            self._open_task(db, task, current)
             questions = {item["id"]: item for item in self._items(db, task_id)}
             rows = db.execute("SELECT question_id,answer_json FROM draft_answers WHERE task_id=?", (task_id,)).fetchall()
             answers = {row["question_id"]: json.loads(row["answer_json"]) for row in rows}

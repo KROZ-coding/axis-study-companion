@@ -1,0 +1,9 @@
+# Replace this hostname before installation. Keep uvicorn on loopback only.
+study.example.org {
+    encode zstd gzip
+    redir / /prototype/ 302
+    reverse_proxy 127.0.0.1:8000 {
+        # Flush SSE snapshots and committed deltas without proxy buffering.
+        flush_interval -1
+    }
+}

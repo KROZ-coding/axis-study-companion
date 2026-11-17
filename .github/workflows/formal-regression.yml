@@ -1,0 +1,91 @@
+name: Formal regression
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-regression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SKIP_ENV_FILE: "1"
+  APP_ENV: test
+  STUDY_DEMO_ENABLED: "false"
+  LLM_PROVIDERS_JSON: ""
+  LLM_PRICES_JSON: ""
+  LLM_BASE_URL: ""
+  LLM_API_KEY: ""
+  LLM_MODEL: ""
+  MAXKB_URL: ""
+  MAXKB_API_KEY: ""
+
+jobs:
+  regression:
+    name: Python and Node (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install backend dependencies
+        run: python -m pip install -r server/requirements.txt
+      - name: Isolated backend regression
+        run: python -I -B -X utf8 server/tests/run_tests.py
+      - name: Formal frontend regression
+        run: node --test server/tests/*regression.cjs
+      - name: Whitespace checks
+        run: git diff --check
+
+  http-acceptance:
+    name: Loopback HTTP acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/requirements.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r server/requirements.txt
+      - name: Platform workflow and stopped restore
+        run: python -I -B -X utf8 server/tests/run_platform_flow.py --output-dir .scratch/ci-platform
+      - name: Companion streaming, cancellation and recovery
+        run: python -I -B -X utf8 server/tests/verify_companion_live.py --output-dir .scratch/ci-companion
+      - name: Teaching loop, summaries and restricted hints
+        run: python -I -B -X utf8 server/tests/verify_teaching_loop.py --output-dir .scratch/ci-teaching
+      - name: Preserve redacted acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: formal-http-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .scratch/ci-platform/evidence.json
+            .scratch/ci-companion/evidence.json
+            .scratch/ci-teaching/evidence.json
+          if-no-files-found: ignore
+          retention-days: 7

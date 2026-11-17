@@ -493,6 +493,46 @@ test("appeal retries preserve exact reason/revision/id and confirmation is not a
   assert.equal(await h.appeal(), false); assert.equal(h.appealBodies.length, 2); assert.equal(h.feedback.leave(), true);
 });
 
+test("definite rejection unlocks reply and appeal drafts without replaying rejected commands", async () => {
+  for (const kind of ["reply", "appeal"]) {
+    for (const status of [403, 409, 422, 429]) {
+      const h = harness(); await h.open();
+      h.optionsState[kind] = () => { throw Object.assign(new Error("本次请求未被接受"), { status }); };
+      assert.equal(await write(h, kind, "保留原文"), false);
+      const first = plain(h.posts()[0].body);
+      const form = kind === "reply" ? h.replyForm() : h.appealForm();
+      assert.equal(form.querySelector("textarea").readOnly, false);
+      assert.equal(form.querySelector("textarea").value, "保留原文");
+      assert.equal(h.node('[data-feedback-action="refresh"]').disabled, false);
+      assert.equal(h.feedback.leave(), true);
+      assert.equal(await h.open(), true);
+      h.optionsState[kind] = undefined;
+      assert.equal(await write(h, kind, "修改后的说明"), true);
+      const second = h.posts()[1].body;
+      assert.notEqual(second.request_id, first.request_id);
+      assert.equal(second[kind === "reply" ? "text" : "reason"], "修改后的说明");
+      assert.equal(h.posts().length, 2);
+    }
+  }
+});
+
+test("timeout and server errors keep the exact command pending for explicit confirmation", async () => {
+  for (const kind of ["reply", "appeal"]) {
+    for (const status of [0, 408, 425, 500, 503]) {
+      const h = harness(); await h.open();
+      h.optionsState[kind] = () => { throw Object.assign(new Error("回执未知"), { status }); };
+      assert.equal(await write(h, kind, "原始请求"), false);
+      const first = plain(h.posts()[0].body);
+      const form = kind === "reply" ? h.replyForm() : h.appealForm();
+      assert.equal(form.querySelector("textarea").readOnly, true);
+      assert.equal(h.feedback.leave(), false);
+      h.optionsState[kind] = undefined;
+      assert.equal(await write(h, kind, "不能替换"), true);
+      assert.deepEqual(h.posts()[1].body, first);
+    }
+  }
+});
+
 test("unknown or wrong reply receipts keep the same explicit command pending", async () => {
   const h = harness(); await h.open();
   const base = { id: "receipt", thread_id: "thread-current", author_id: "student-1", author_role: "student" };

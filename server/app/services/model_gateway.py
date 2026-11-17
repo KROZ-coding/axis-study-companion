@@ -172,6 +172,92 @@ def _answer_context(value: Any) -> str | int | bool | list[int] | list[str]:
     raise GatewayError("invalid_context", status_code=422)
 
 
+def _question_requirements(question: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy bounded answer/mathematical requirements, never arbitrary metadata.
+
+    Objects may name mathematical variables or explicit mathematical attributes.
+    Unknown object keys fail closed instead of silently dropping a condition that
+    might change grading. Text is selected/de-identified by the trusted caller,
+    just like a question stem; this helper is not a free-text PII detector.
+    """
+    selected: dict[str, Any] = {}
+    remaining = 128
+    attributes = {
+        "domain", "variables", "assumptions", "constraints", "type", "symbol",
+        "expression", "relation", "value", "values", "min", "max", "lower", "upper",
+        "inclusive", "lower_inclusive", "upper_inclusive", "excluded", "unit", "units",
+        "real", "integer", "positive", "nonnegative", "negative", "nonzero", "finite",
+    }
+
+    def copy(value: Any, depth: int = 0) -> Any:
+        nonlocal remaining
+        remaining -= 1
+        if remaining < 0 or depth > 4:
+            raise GatewayError("invalid_context", status_code=422)
+        if value is None or type(value) is bool:
+            return value
+        if type(value) is int and abs(value) <= 10**12:
+            return value
+        if type(value) is float and math.isfinite(value) and abs(value) <= 10**12:
+            return value
+        if isinstance(value, str):
+            return _text(value, maximum=2_000)
+        if isinstance(value, (list, tuple)) and len(value) <= 32:
+            return [copy(item, depth + 1) for item in value]
+        if isinstance(value, Mapping) and len(value) <= 32:
+            result = {}
+            for key, item in value.items():
+                if not isinstance(key, str) or (key not in attributes and not re.fullmatch(r"[A-Za-z](?:_[0-9]{1,2})?", key)):
+                    raise GatewayError("invalid_context", status_code=422)
+                result[key] = copy(item, depth + 1)
+            return result
+        raise GatewayError("invalid_context", status_code=422)
+
+    if "answer_format" in question:
+        selected["answer_format"] = _text(question["answer_format"], maximum=256)
+    for key in ("domain", "variables", "assumptions", "constraints"):
+        if key in question:
+            # Empty/unrestricted markers are meaningful and must not be coerced
+            # into different conditions. Nested strings still need real content.
+            selected[key] = "" if question[key] == "" else copy(question[key])
+    if len(json.dumps(selected, ensure_ascii=False, allow_nan=False)) > 8_000:
+        raise GatewayError("context_too_large", status_code=422)
+    return selected
+
+
+def _question_maximum(question: Mapping[str, Any]) -> int | None:
+    """Use exact integer score units, with bounded legacy point conversion."""
+    units = []
+    for key in ("score_units", "points_units", "max_score_units"):
+        if key in question:
+            value = question[key]
+            if type(value) is not int or not 0 <= value <= 10**9:
+                raise GatewayError("invalid_context", status_code=422)
+            units.append(value)
+    if units:
+        if len(set(units)) != 1:
+            raise GatewayError("invalid_context", status_code=422)
+        return units[0]
+    if "points" not in question:
+        return None
+    from decimal import Decimal, InvalidOperation
+    from fractions import Fraction
+
+    value = question["points"]
+    if type(value) not in (str, int, float, Decimal) or len(str(value)) > 64:
+        raise GatewayError("invalid_context", status_code=422)
+    try:
+        decimal = Decimal(str(value))
+        if not decimal.is_finite() or abs(decimal.as_tuple().exponent) > 64:
+            raise ValueError
+        scaled = Fraction(decimal) * 100
+        if scaled.denominator != 1 or not 0 <= scaled <= 10**9:
+            raise ValueError
+        return scaled.numerator
+    except (InvalidOperation, ValueError, OverflowError):
+        raise GatewayError("invalid_context", status_code=422) from None
+
+
 def build_minimal_context(
     *, question: Mapping[str, Any] | None = None,
     approved_blocks: Sequence[Mapping[str, Any]] = (), answer: Any = None,
@@ -180,9 +266,11 @@ def build_minimal_context(
 ) -> dict[str, Any]:
     """Explicit allowlist; never accepts users, rosters, or conversation history.
 
-    Question fields: type, stem, options, knowledge_points. References/rubric are
-    opt-in for authorized grading/review callers. Aggregate fields are counts
-    and integer score units only; user and class IDs are never serialized.
+    Question fields: type, stem, options, knowledge_points, bounded answer format
+    and mathematical requirements, and integer maximum score units. Mathematical
+    conditions remain visible to independent review without exposing the key.
+    References/rubric are opt-in for authorized grading/review callers. Aggregate
+    fields are counts and integer score units only; user/class IDs are excluded.
     Free text must already be de-identified by the service that selected it.
     """
     context: dict[str, Any] = {}
@@ -201,6 +289,10 @@ def build_minimal_context(
                 if not isinstance(values, (list, tuple)) or len(values) > 32:
                     raise GatewayError("invalid_context", status_code=422)
                 selected[key] = [_text(value, maximum=2_000) for value in values]
+        selected.update(_question_requirements(question))
+        maximum = _question_maximum(question)
+        if maximum is not None:
+            selected["score_units"] = maximum
         if include_reference:
             for key in ("answer", "reference_answer"):
                 if key in question and question[key] is not None:

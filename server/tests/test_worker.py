@@ -719,8 +719,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.queue.list_calls(job.job_id), ())
         self.assertEqual(self.content.get_job(resource["id"])["status"], "quarantined")
 
-    def test_content_successful_stages_route_only_from_job_payload(self):
-        resource, job = self.make_content_job(purpose="review")
+    def test_content_generation_and_independent_review_keep_distinct_call_purposes(self):
+        resource, job = self.make_content_job()
         outputs = iter((
             {"questions": [self.candidate()]},
             {"solutions": [{"index": 0, "answer": 1, "reasoning": "Independent sum equals five.", "solvable": True}]},
@@ -731,7 +731,11 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.queue.get_job(job.job_id).status, "succeeded")
         completed = self.content.get_job(resource["id"])
         self.assertEqual(completed["status"], "completed", str(completed))
-        self.assertEqual([call["purpose"] for call in self.gateway.calls], ["review"] * 3)
+        self.assertEqual([call["purpose"] for call in self.gateway.calls], ["generate", "review", "review"])
+        calls = self.queue.list_calls(job.job_id)
+        self.assertEqual({call.step_name: call.metadata["purpose"] for call in calls},
+                         {"generate": "generate", "review": "review", "compare": "review"})
+        self.assertEqual(self.queue.get_job(job.job_id).payload["purpose"], "generate")
         self.assertEqual(len(self.learning.versions), 1)
 
     def test_objective_grading_smoke_reads_nested_scope_without_model_or_price(self):

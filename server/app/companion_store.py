@@ -1152,8 +1152,8 @@ class CompanionStore:
                 if not self._content_visible(self._public(item), history_policy):
                     continue
             history.append({"role": item["role"], "content": item["text"][:2000]})
-        return {"current_question": current["text"][:4000],
-                "messages": history + [{"role": "user", "content": current["text"][:4000]}],
+        return {"current_question": current["text"],
+                "messages": history + [{"role": "user", "content": current["text"]}],
                 "allow_generation": bool(allowed) and row["intent"] != "hint", "safe_guidance_key": key,
                 "notice": "" if allowed else self._notice(policy if not policy["allow_generation"] else global_policy)}
 

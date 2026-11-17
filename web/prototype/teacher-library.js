@@ -2,7 +2,7 @@
 const TYPES = { single_choice: "单选题", judge: "判断题", fill: "填空题", text: "作答题", multi_choice: "多选题" };
 const STATUSES = { approved: "可用", candidate: "候选", reviewing: "审查中", quarantined: "暂停使用", retired: "已退役" };
 const DIFFICULTIES = { easy: "基础", medium: "适中", hard: "进阶" };
-const JOB_STATUS = { pending: "等待处理", queued: "排队中", running: "处理中", retry_wait: "等待重试", approved: "审查通过，已入库", review_pending: "处理结束，尚无通过记录", succeeded: "已完成", completed: "已完成", failed: "失败", cancelled: "已取消", quarantined: "已隔离", awaiting_confirmation: "等待确认", reconciling: "等待核对", budget_blocked: "额度不足", not_dispatched: "等待调度" };
+const JOB_STATUS = { pending: "等待处理", queued: "排队中", leased: "已接单", running: "处理中", retry_wait: "等待重试", approved: "审查通过，已入库", review_pending: "处理结束，尚无通过记录", succeeded: "已完成", completed: "已完成", failed: "失败", cancelled: "已取消", quarantined: "已隔离", awaiting_confirmation: "等待确认", reconciling: "等待核对", budget_blocked: "额度不足", not_dispatched: "等待调度" };
 const STAGES = { generate: "生成候选题", review: "独立求解审查", compare: "答案比对", recheck: "独立复核", compare_recheck: "复核答案比对", done: "已完成", quarantined: "隔离待处理", parse: "解析材料" };
 const MATERIAL_STATUS = { parsed: "待确认", draft: "待确认", manual_required: "待人工核对", partial: "部分已确认", confirmed: "已确认", blocked: "有待解决疑点" };
 const LICENSES = { unknown: "尚未确认", own: "本人原创", permission: "已获授权", cc0: "CC0", cc_by: "CC BY", cc_by_sa: "CC BY-SA", restricted: "限制使用" };
@@ -330,7 +330,7 @@ export function createTeacherLibrary({ api, state, render: renderApp, toast = ()
     const queued = job.queue_status || queueInfo(job).status;
     return ["succeeded", "completed"].includes(queued || job.status) ? "review_pending" : queued || job.status;
   }
-  function isPending(job) { return ["pending", "queued", "running", "retry_wait", "not_dispatched"].includes(jobStatus(job)); }
+  function isPending(job) { return ["pending", "queued", "leased", "running", "retry_wait", "not_dispatched"].includes(jobStatus(job)); }
   function jobReason(job) { return job.reason || job.error || job.state?.quarantine_reason || job.queue_reason || queueInfo(job).reason || ""; }
 
   function renderLibrary() {
