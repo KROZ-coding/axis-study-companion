@@ -604,14 +604,15 @@ class Worker:
         )
 
     def _record_usage(self, job, call_id, price, usage, *, request_sent=True):
-        # Affirmative proof of no send is the only case that may turn absent
-        # usage into a final zero. Late usage is independent of the lease.
-        cost = price.cost(usage) if request_sent else 0
+        # No-price calls retain actual usage and NULL money. Only affirmative
+        # proof of no send can clear missing usage; never manufacture token zero.
+        cost = None if price is None else price.cost(usage) if request_sent else 0
+        pending = request_sent and (usage is None if price is None else cost is None)
         self.queue.record_call_usage(
             job.job_id, call_id, usage=usage, cost_units=cost,
-            cost_pending=request_sent and cost is None,
+            cost_pending=pending, request_sent=request_sent,
         )
-        return cost
+        return cost, pending
 
     def _park_call(self, job, call_id, *, not_sent=False):
         call = self.queue.get_call(call_id)
@@ -676,19 +677,24 @@ class Worker:
             before_send()
         description = self.runtime.gateway.describe(purpose)
         provider = description["provider"]
-        prices = PriceRegistry(self.runtime.settings.llm_prices_json)
-        price = prices.get(provider.name, description["model"])
-        budget_currency = getattr(self.runtime.settings, "budget_currency", price.currency)
-        if price.currency != budget_currency:
-            raise PriceUnavailable("model price currency does not match BUDGET_CURRENCY")
+        unmetered = getattr(self.runtime.settings, "competition_unmetered", False) is True
+        billing_mode = "unmetered_competition" if unmetered else "metered"
+        price = None
+        if not unmetered:
+            prices = PriceRegistry(self.runtime.settings.llm_prices_json)
+            price = prices.get(provider.name, description["model"])
+            budget_currency = getattr(self.runtime.settings, "budget_currency", price.currency)
+            if price.currency != budget_currency:
+                raise PriceUnavailable("model price currency does not match BUDGET_CURRENCY")
         input_hash = hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         call_id = call_id or f"{job.job_id}:{step.name}:{step.attempts}"
         intent = self.queue.start_call(
             job.job_id, call_id, self.worker_id, job.generation, step_name=step.name,
-            reserve_units=price.reserve(messages, description["max_tokens"]),
-            model_name=description["model"], price_version=price.version,
-            input_version=str(job.payload.get("input_revision", 1)),
-            metadata={"purpose": purpose, "price": price.snapshot(), "input_hash": input_hash},
+            reserve_units=0 if unmetered else price.reserve(messages, description["max_tokens"]),
+            model_name=description["model"], price_version="no-price" if unmetered else price.version,
+            input_version=str(job.payload.get("input_revision", 1)), billing_mode=billing_mode,
+            metadata={"purpose": purpose, "provider": provider.name, "billing_mode": billing_mode,
+                      "price": None if unmetered else price.snapshot(), "input_hash": input_hash},
         )
         if not intent.should_send:
             return intent.result
@@ -733,30 +739,32 @@ class Worker:
             try:
                 response = await operation
             except GatewayError as error:
-                cost = self._record_usage(job, call_id, price, error.usage, request_sent=error.request_sent)
+                cost, pending = self._record_usage(job, call_id, price, error.usage, request_sent=error.request_sent)
                 if error.unknown_outcome:
                     self._park_call(job, call_id)
                     raise ReconciliationRequired("upstream outcome unknown") from error
                 try:
                     self.queue.finish_call(
                         job.job_id, call_id, self.worker_id, job.generation, success=False,
-                        cost_units=cost, cost_pending=error.request_sent and cost is None, usage=error.usage,
+                        cost_units=cost, cost_pending=pending, usage=error.usage,
                     )
                 except (LeaseLost, InvalidTransition):
                     self._park_call(job, call_id, not_sent=not error.request_sent)
                     raise
                 raise
+            cost, pending = self._record_usage(job, call_id, price, response.usage)
             result = {
                 "text": response.text, "data": response.data, "usage": response.usage,
                 "request_id": response.request_id, "model": response.model,
                 "reasoning_effort": response.reasoning_effort, "provider": response.provider,
+                "request_sent": response.request_sent, "cost_pending": pending,
+                "billing_mode": billing_mode,
             }
-            cost = self._record_usage(job, call_id, price, response.usage)
             try:
                 self._current(job)
                 self.queue.finish_call(job.job_id, call_id, self.worker_id, job.generation,
                                        success=True, result=result, cost_units=cost,
-                                       cost_pending=cost is None, usage=response.usage)
+                                       cost_pending=pending, usage=response.usage)
             except (LeaseLost, InvalidTransition):
                 self._park_call(job, call_id)
                 raise

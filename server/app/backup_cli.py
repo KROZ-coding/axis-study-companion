@@ -124,6 +124,7 @@ def _manager(data: Path, shared: Path, originals: Path, max_bytes: int) -> Backu
     return BackupManager(
         {name: data / f"{name}.sqlite3" for name in REQUIRED_DATABASES}, shared,
         DEFAULT_DATABASE_CONTRACTS,
+        competition_database_path=data / "competition.sqlite3",
         additional_attachment_dirs={"material_originals": originals}, max_bytes=max_bytes,
     )
 
@@ -185,7 +186,7 @@ def _bundle_summary(inspection: dict[str, Any], bundle: bytes | Path) -> dict[st
         "databases": {
             name: {field: inspection["databases"][name][field]
                    for field in ("user_version", "application_id", "sha256", "size")}
-            for name in REQUIRED_DATABASES
+            for name in inspection["databases"]
         },
         "attachment_count": len(inspection["attachments"]),
         "member_count": inspection["member_count"],
@@ -205,6 +206,10 @@ def create_backup(
         path = data / f"{name}.sqlite3"
         if not path.is_file() or _linked(path):
             raise CLIError("All six existing, ordinary SQLite database files are required.")
+    competition = data / "competition.sqlite3"
+    if (competition.exists() or competition.is_symlink()) and (
+            _linked(competition) or not competition.is_file()):
+        raise CLIError("The optional competition database must be an ordinary SQLite file without links.")
     raw_output = Path(output).expanduser()
     target = raw_output.parent.resolve() / raw_output.name
     if target == data or target.is_relative_to(data):
@@ -307,7 +312,7 @@ def restore_bundle(
             if target.stat().st_size != entry["size"] or _sha256(target) != entry["sha256"]:
                 raise CLIError("Runtime attachment assembly failed checksum validation.")
         (runtime_data / "material_originals").mkdir(exist_ok=True, mode=0o700)
-        for name in REQUIRED_DATABASES:
+        for name in inspection["databases"]:
             target = runtime_data / f"{name}.sqlite3"
             target.chmod(0o600)
             if _sha256(target) != inspection["databases"][name]["sha256"]:

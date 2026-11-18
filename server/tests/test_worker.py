@@ -6,6 +6,7 @@ price calculation, parser, and question-pipeline persistence are all real.
 """
 
 import asyncio
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict
 import inspect
@@ -23,7 +24,7 @@ os.environ["SKIP_ENV_FILE"] = "1"
 from app.companion_store import CompanionStore
 from app.content_store import ContentStore
 from app.dispatcher import Dispatcher
-from app.job_queue import BudgetLedger, JobQueue, LeaseLost
+from app.job_queue import BudgetLedger, JobQueue, LeaseLost, ReconciliationRequired
 from app.platform_store import PlatformStore
 from app.services.model_gateway import GatewayError, GatewayResult, ModelGateway
 from app.services.material_parser import parse_material
@@ -471,6 +472,151 @@ class WorkerTests(unittest.TestCase):
                 self.assert_response_ended(posted["response_id"])
         self.assertEqual(self.gateway.calls, [])
 
+    def use_unmetered_queue_without_budgets(self):
+        # Replace the funded setUp queue with an empty real queue; no mocked
+        # reservation or settlement methods can hide accidental budget writes.
+        self.queue = JobQueue(self.root / "unmetered-jobs.sqlite3")
+        self.ledger = BudgetLedger(self.queue)
+        self.runtime.queue = self.queue
+        self.worker = Worker(self.runtime, worker_id="fixture-unmetered-worker")
+        self.settings.competition_unmetered = True
+        self.settings.llm_prices_json = ""
+        self.assertEqual(self.ledger.list_limits(), ())
+
+    def assert_no_monetary_artifacts(self, job_id):
+        job = self.queue.get_job(job_id)
+        self.assertEqual((job.budget_spent, job.budget_reserved), (0, 0))
+        self.assertIsNone(job.budget_account_id)
+        self.assertEqual(self.queue.call_costs(job_id), {})
+        self.assertEqual(self.ledger.entries(), ())
+        with closing(self.queue._connect()) as db:
+            for table in ("budgets", "call_charges", "call_budget_reservations", "budget_ledger_entries"):
+                with self.subTest(table=table):
+                    self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+
+    def test_unmetered_without_prices_or_budget_allowance_sends_and_records_actual_usage_without_money(self):
+        self.use_unmetered_queue_without_budgets()
+        for policy in ("missing", "zero_caps"):
+            with self.subTest(policy=policy):
+                if policy == "zero_caps":
+                    self.ledger.assign("project", "platform", 0)
+                    self.ledger.assign("student_daily", self.student["id"], 0)
+                limits = self.ledger.list_limits()
+                posted = self.posted_job()
+                sends_before = len(self.gateway.calls)
+                self.run_worker()
+
+                job = self.queue.get_job(posted["job_id"])
+                call, = self.queue.list_calls(job.job_id)
+                self.assertEqual(job.status, "succeeded")
+                self.assertFalse(job.cost_pending)
+                self.assertEqual(len(self.gateway.calls), sends_before + 1)
+                self.assertEqual(self.gateway.calls[-1]["call_id"], call.call_id)
+                self.assertEqual(call.status, "succeeded")
+                self.assertEqual(call.usage, USAGE)
+                self.assertIsNone(call.cost_units)
+                self.assertFalse(call.cost_pending)
+                self.assertEqual(call.reserved_units, 0)
+                self.assertEqual(call.price_version, "no-price")
+                self.assertEqual(call.metadata["billing_mode"], "unmetered_competition")
+                self.assertIsNone(call.metadata["price"])
+                self.assertEqual(call.metadata["provider"], "fixture")
+                self.assertEqual(call.result["usage"], USAGE)
+                self.assertEqual(call.result["billing_mode"], "unmetered_competition")
+                self.assertEqual(self.assert_response_ended(posted["response_id"])["text"], "complete answer")
+                self.assertEqual(self.ledger.list_limits(), limits)
+                self.assert_no_monetary_artifacts(job.job_id)
+
+    def test_unmetered_missing_usage_stays_pending_until_late_actual_usage_without_a_charge(self):
+        self.use_unmetered_queue_without_budgets()
+        self.gateway.handler = lambda purpose, messages, **options: FakeGateway.result(
+            purpose, text="saved unmetered answer", usage=None,
+        )
+        posted = self.posted_job()
+        self.run_worker()
+        call, = self.queue.list_calls(posted["job_id"])
+        self.assertEqual(self.queue.get_job(posted["job_id"]).status, "succeeded")
+        self.assertTrue(self.queue.get_job(posted["job_id"]).cost_pending)
+        self.assertIsNone(call.usage)
+        self.assertIsNone(call.cost_units)
+        self.assertTrue(call.cost_pending)
+        self.assertEqual(self.assert_response_ended(posted["response_id"])["text"], "saved unmetered answer")
+
+        # Usage can arrive after completion/restart, without a worker lease or
+        # a fake zero monetary settlement. A flag/partial usage is insufficient.
+        reopened = JobQueue(self.queue.database)
+        partial = reopened.record_call_usage(
+            posted["job_id"], call.call_id, usage={"prompt_tokens": USAGE["prompt_tokens"]},
+            cost_pending=False,
+        )
+        self.assertTrue(partial.cost_pending)
+        self.assertTrue(reopened.get_job(posted["job_id"]).cost_pending)
+        settled = reopened.record_call_usage(posted["job_id"], call.call_id, usage=USAGE)
+        self.assertEqual(settled.usage, USAGE)
+        self.assertIsNone(settled.cost_units)
+        self.assertFalse(settled.cost_pending)
+        self.assertFalse(reopened.get_job(posted["job_id"]).cost_pending)
+        self.assertEqual(settled.result, call.result)
+        reopened.record_call_usage(posted["job_id"], call.call_id, usage=USAGE)
+        self.assertEqual(len(reopened.list_calls(posted["job_id"])), 1)
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assert_no_monetary_artifacts(posted["job_id"])
+
+    def test_unmetered_unknown_outcome_with_complete_usage_still_requires_reconciliation_and_never_resends(self):
+        self.use_unmetered_queue_without_budgets()
+
+        async def unknown(*args, **options):
+            options["on_delta"]("partial")
+            raise GatewayError("disconnected", request_sent=True, unknown_outcome=True, usage=USAGE)
+
+        self.gateway.handler = unknown
+        posted = self.posted_job()
+        self.run_worker()
+        job = self.queue.get_job(posted["job_id"])
+        call, = self.queue.list_calls(job.job_id)
+        self.assertEqual(job.status, "reconciling")
+        self.assertTrue(job.reconciliation_required)
+        self.assertFalse(job.cost_pending)
+        self.assertEqual((call.status, call.usage), ("unknown", USAGE))
+        self.assertIsNone(call.cost_units)
+        self.assertFalse(call.cost_pending)
+        self.assertIsNone(call.result)
+        response = self.companion.get_response(posted["response_id"])
+        self.assertEqual(response["status"], "streaming")
+        self.assertFalse(any(event["event_type"] == "end" for event in self.companion.list_response_events(posted["response_id"])))
+
+        # Re-recording complete usage does not reconcile a business outcome.
+        reopened = JobQueue(self.queue.database)
+        reopened.record_call_usage(job.job_id, call.call_id, usage=USAGE)
+        self.assertTrue(reopened.get_job(job.job_id).reconciliation_required)
+        self.assertEqual(reopened.get_job(job.job_id).status, "reconciling")
+        self.assertFalse(self.worker.run_once(dispatch=False))
+        step, = self.queue.list_steps(job.job_id)
+        with self.assertRaises(ReconciliationRequired):
+            asyncio.run(self.worker._call(job, step, "student", MESSAGES))
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual(len(self.queue.list_calls(job.job_id)), 1)
+        self.assertEqual(self.queue.get_call(call.call_id).status, "unknown")
+        self.assert_no_monetary_artifacts(job.job_id)
+
+    def test_default_and_explicit_metered_modes_still_block_missing_prices_before_send(self):
+        self.settings.llm_prices_json = ""
+        for flag in (None, False):
+            with self.subTest(competition_unmetered=flag):
+                if flag is None:
+                    self.assertFalse(hasattr(self.settings, "competition_unmetered"))
+                else:
+                    self.settings.competition_unmetered = flag
+                limits = self.ledger.list_limits()
+                posted = self.posted_job()
+                self.run_worker()
+                self.assertEqual(self.queue.get_job(posted["job_id"]).status, "failed")
+                self.assertEqual(self.queue.list_calls(posted["job_id"]), ())
+                self.assertEqual(self.assert_response_ended(posted["response_id"])["status"], "failed")
+                self.assertEqual(self.gateway.calls, [])
+                self.assertEqual(self.ledger.list_limits(), limits)
+                self.assert_no_monetary_artifacts(posted["job_id"])
+
     def test_missing_usage_stays_pending_with_reservation_and_successful_response(self):
         posted = self.posted_job(wallet=True)
         self.gateway.handler = lambda purpose, messages, **options: FakeGateway.result(purpose, text="saved text", usage=None)
@@ -737,6 +883,40 @@ class WorkerTests(unittest.TestCase):
                          {"generate": "generate", "review": "review", "compare": "review"})
         self.assertEqual(self.queue.get_job(job.job_id).payload["purpose"], "generate")
         self.assertEqual(len(self.learning.versions), 1)
+
+    def test_unmetered_content_missing_usage_does_not_block_independent_review_or_compare(self):
+        self.use_unmetered_queue_without_budgets()
+        resource, job = self.make_content_job()
+        outputs = iter((
+            {"questions": [self.candidate()]},
+            {"solutions": [{"index": 0, "answer": 1, "reasoning": "Independent sum equals five.", "solvable": True}]},
+            {"comparisons": [{"index": 0, "agrees": True, "valid": True, "reason": "Both agree."}]},
+        ))
+        self.gateway.handler = lambda purpose, messages, **options: FakeGateway.result(purpose, data=next(outputs), usage=None)
+        self.run_worker()
+        self.assertEqual(self.queue.get_job(job.job_id).status, "succeeded")
+        self.assertEqual(self.content.get_job(resource["id"])["status"], "completed")
+        self.assertEqual([call["purpose"] for call in self.gateway.calls], ["generate", "review", "review"])
+        calls = self.queue.list_calls(job.job_id)
+        self.assertEqual([call.step_name for call in calls], ["generate", "review", "compare"])
+        self.assertEqual(len(self.learning.versions), 1)
+        reopened = JobQueue(self.queue.database)
+        for index, call in enumerate(calls):
+            self.assertEqual(call.status, "succeeded")
+            self.assertTrue(call.cost_pending)
+            self.assertIsNone(call.usage)
+            self.assertIsNone(call.cost_units)
+            self.assertEqual(call.metadata["billing_mode"], "unmetered_competition")
+            # Reusing a saved stage after restart must never send a second request.
+            self.assertEqual(asyncio.run(self.worker._call(job, self.queue.list_steps(job.job_id)[index],
+                                                         call.metadata["purpose"], MESSAGES)), call.result)
+            self.assertTrue(reopened.get_job(job.job_id).cost_pending)
+            settled = reopened.record_call_usage(job.job_id, call.call_id, usage=USAGE)
+            self.assertFalse(settled.cost_pending)
+            self.assertEqual(settled.result, call.result)
+        self.assertFalse(reopened.get_job(job.job_id).cost_pending)
+        self.assertEqual(len(self.gateway.calls), 3)
+        self.assert_no_monetary_artifacts(job.job_id)
 
     def test_objective_grading_smoke_reads_nested_scope_without_model_or_price(self):
         self.learning.grading = {

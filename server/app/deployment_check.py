@@ -64,19 +64,26 @@ def check_settings(config: Any, *, production: bool = False, require_models: boo
             "Production DATA_DIR must be absolute and outside the source checkout.")
 
     gateway = ModelGateway(config)
-    try:
-        prices = PriceRegistry(config.llm_prices_json)
-    except (PriceUnavailable, ValueError, TypeError):
-        prices = None
-        add("price_configuration", False, "LLM_PRICES_JSON must contain explicit versioned integer prices.")
+    unmetered = getattr(config, "competition_unmetered", False) is True
+    billing_mode = "unmetered_competition" if unmetered else "metered"
+    add("billing_mode", True,
+        "Competition mode records actual usage without monetary prices, caps or reservations."
+        if unmetered else "Metered mode requires versioned prices and budget authorization.")
+    prices = None
+    if not unmetered:
+        try:
+            prices = PriceRegistry(config.llm_prices_json)
+        except (PriceUnavailable, ValueError, TypeError):
+            add("price_configuration", False, "LLM_PRICES_JSON must contain explicit versioned integer prices.")
 
     configured = bool(config.llm_providers)
     add("grouped_models", configured, "Configure all four explicit model channels before real-model acceptance.",
         required=require_models)
     if configured or require_models:
         add("reasoning_effort", config.llm_reasoning_effort == "high", "LLM_REASONING_EFFORT must be high.")
-        add("budget_currency", isinstance(config.budget_currency, str) and bool(config.budget_currency.strip()),
-            "BUDGET_CURRENCY must name the agreed integer accounting unit.")
+        if not unmetered:
+            add("budget_currency", isinstance(config.budget_currency, str) and bool(config.budget_currency.strip()),
+                "BUDGET_CURRENCY must name the agreed integer accounting unit.")
         for channel in CHANNELS:
             try:
                 descriptor = gateway.describe(channel)
@@ -107,12 +114,14 @@ def check_settings(config: Any, *, production: bool = False, require_models: boo
                         matching = False
                     add(prefix + "_price", matching,
                         "Every configured provider/model needs a versioned price in BUDGET_CURRENCY.")
-    add("budget_limits", False, "Configure and verify project, teaching and applicable student daily limits before paid calls.",
-        required=False)
+    if not unmetered:
+        add("budget_limits", False, "Configure and verify project, teaching and applicable student daily limits before paid calls.",
+            required=False)
     add("external_acceptance", False,
         "Real provider quality/bills, HTTPS, backup drills, devices and authorized competition data require separate evidence.",
         required=False)
     return {"schema": "axis.deployment-check.v1", "profile": "production" if production else "local",
+            "billing_mode": billing_mode,
             "status": "configuration_valid" if not any(row["status"] == "fail" for row in checks) else "blocked",
             "network_requests": 0, "database_writes": 0, "checks": checks}
 
@@ -120,7 +129,7 @@ def check_settings(config: Any, *, production: bool = False, require_models: boo
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=("local", "production"), default="local")
-    parser.add_argument("--require-models", action="store_true", help="require all four routes and matching prices")
+    parser.add_argument("--require-models", action="store_true", help="require all four routes and prices in metered mode")
     args = parser.parse_args(argv)
     try:
         from .config import Settings

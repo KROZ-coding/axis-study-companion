@@ -790,6 +790,9 @@ class _LearningStoreCore:
                 if question["course_id"] is None and question["owner_id"] != actor_id:
                     raise PermissionError("question version is outside actor's authoring scope")
                 frozen = json.loads(question["content_json"])
+                if (frozen.get("generation_intent", "production") != "production"
+                        or frozen.get("usage_scope", "production") != "production"):
+                    raise ValueError("evaluation questions cannot be published to student tasks")
                 frozen["version"] = qversion
                 db.execute(
                     "INSERT INTO task_items(task_id,question_id,question_version,position,frozen_json) VALUES(?,?,?,?,?)",

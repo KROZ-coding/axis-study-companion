@@ -1,4 +1,11 @@
 /* Teacher library is self-contained: no login, student, or host drawer selectors. */
+.library-material-filters { display:flex; gap:16px; flex-wrap:wrap; margin:18px 0; }
+.library-material-filters .library-field { min-width:160px; flex:1; }
+.library-source-metadata, .library-material-management { padding:16px; margin:16px 0; border:1px solid var(--library-line); border-radius:8px; }
+.library-source-metadata .library-field { margin:12px 0; }
+.library-material-management .library-actions { margin-top:12px; }
+.library-source-provenance { overflow-wrap:anywhere; }
+
 .teacher-library {
   --library-ice: var(--ice, #e9f6fb);
   --library-ink: var(--ink, #14343f);

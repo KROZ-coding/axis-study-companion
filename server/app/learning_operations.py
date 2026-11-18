@@ -327,7 +327,8 @@ class LearningOperations:
         except GatewayError as error:
             raise ValueError("题目作答格式或数学条件无效或超出限制") from error
         for key in ("course_id", "class_id", "content_sha", "family_sha", "family_id", "source_anchors", "review_evidence",
-                    "external_processing_permission", "pipeline_job_id", "source_revision", "knowledge_points", "difficulty", "reference_answer", "provenance", "hint_action_ids"):
+                    "external_processing_permission", "pipeline_job_id", "source_revision", "knowledge_points", "difficulty", "reference_answer", "provenance", "hint_action_ids",
+                    "generation_intent", "usage_scope"):
             if key in question:
                 normalized[key] = question[key]
         return normalized

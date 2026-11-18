@@ -43,6 +43,17 @@ class LearningStoreTests(unittest.TestCase):
             task_id="task-1",
         )
 
+    def test_evaluation_question_is_never_published_even_with_approved_status(self):
+        self.store.create_question_version("teacher-1", "evaluation", 1, {
+            "type": "judge", "stem": "Evaluation only", "answer": True, "points": 1,
+            "generation_intent": "evaluation", "usage_scope": "evaluation",
+        }, status="approved")
+        with self.assertRaisesRegex(ValueError, "evaluation"):
+            self.store.create_task("teacher-1", "student-evaluation", "goal-1", "round-1",
+                                   [{"question_id": "evaluation", "version": 1}], task_id="evaluation-task")
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM learning_tasks WHERE id='evaluation-task'").fetchone()[0], 0)
+
     def _lease(self, device="device-1", *, now=100, takeover=False):
         return self.store.acquire_draft_lease(
             "task-1", "student-1", device, lease_seconds=60, now=now, takeover=takeover,

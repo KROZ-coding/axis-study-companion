@@ -20,9 +20,10 @@ class ContentConflict(ValueError):
 
 
 class ContentStore:
-    SCHEMA_VERSION = 1
-    _MIGRATIONS = {1: "_migration_1"}
+    SCHEMA_VERSION = 2
+    _MIGRATIONS = {1: "_migration_1", 2: "_migration_2"}
     LICENSES = frozenset({"own", "permission", "cc0", "cc_by", "cc_by_sa", "unknown", "restricted"})
+    USAGE_SCOPES = frozenset({"production", "evaluation"})
 
     def __init__(self, db_path: str | Path, *, timeout: float = 15.0) -> None:
         if str(db_path) == ":memory:":
@@ -92,6 +93,8 @@ class ContentStore:
                     getattr(self, self._MIGRATIONS[version])(db)
                     if version == 1:
                         db.execute("PRAGMA user_version=1")
+                    elif version == 2:
+                        db.execute("PRAGMA user_version=2")
                     else:
                         raise RuntimeError("no fixed schema version statement registered")
                 db.commit()
@@ -181,6 +184,24 @@ class ContentStore:
             db.execute(statement)
 
     @staticmethod
+    def _migration_2(db: sqlite3.Connection) -> None:
+        for statement in (
+            "ALTER TABLE material_files ADD COLUMN usage_scope TEXT NOT NULL DEFAULT 'production' CHECK(usage_scope IN ('production','evaluation'))",
+            "ALTER TABLE material_files ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle_status IN ('active','inactive','superseded'))",
+            "ALTER TABLE material_files ADD COLUMN replacement_material_id TEXT REFERENCES material_files(id)",
+            "ALTER TABLE material_files ADD COLUMN source_filename TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE material_files ADD COLUMN source_locator TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE material_files ADD COLUMN source_note TEXT NOT NULL DEFAULT ''",
+            "CREATE INDEX idx_material_usage ON material_files(course_id,lifecycle_status,usage_scope)",
+            """CREATE TABLE material_commands (
+                actor_id TEXT NOT NULL, request_id TEXT NOT NULL, file_id TEXT NOT NULL REFERENCES material_files(id),
+                operation TEXT NOT NULL CHECK(operation IN ('lifecycle','supersede')),
+                payload_json TEXT NOT NULL, result_json TEXT NOT NULL, created_at REAL NOT NULL,
+                PRIMARY KEY(actor_id,request_id))""",
+        ):
+            db.execute(statement)
+
+    @staticmethod
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
@@ -212,7 +233,8 @@ class ContentStore:
                         visibility: str = "private", license_code: str = "unknown", license_note: str = "",
                         rights_confirmed: bool = False, allow_generation: bool = False,
                         allow_retrieval: bool = False, allow_student_view: bool = False,
-                        external_processing_allowed: bool = False) -> dict[str, Any]:
+                        external_processing_allowed: bool = False, usage_scope: str = "production",
+                        source_filename: str = "", source_locator: str = "", source_note: str = "") -> dict[str, Any]:
         """Persist a parser result and an unexecutable, private original atomically w.r.t. SQLite."""
         from .services.material_parser import validate_filename
         validate_filename(filename)
@@ -222,6 +244,9 @@ class ContentStore:
             raise ValueError("source permission flags must be explicit booleans")
         if license_code not in self.LICENSES:
             raise ValueError("invalid license")
+        if usage_scope not in self.USAGE_SCOPES:
+            raise ValueError("invalid material usage scope")
+        self._validate_attribution(source_filename,source_locator,source_note)
         if rights_confirmed and license_code in {"unknown", "restricted"}:
             raise ValueError("source permission has not been established")
         if rights_confirmed and license_code in {"permission", "cc_by", "cc_by_sa"} and not license_note.strip():
@@ -253,6 +278,8 @@ class ContentStore:
                             payload.get("format", ""),hashlib.sha256(content).hexdigest(),len(content),storage_key,visibility,
                             license_code,license_note.strip(),int(rights_confirmed),int(allow_generation),int(allow_retrieval),
                             int(allow_student_view),int(external_processing_allowed),status,self._json(payload.get("metadata", {})),now,now))
+                db.execute("""UPDATE material_files SET usage_scope=?,source_filename=?,source_locator=?,source_note=? WHERE id=?""",
+                           (usage_scope,source_filename.strip(),source_locator.strip(),source_note.strip(),file_id))
                 self._insert_parse(db, file_id, batch_id, payload)
                 if not rights_confirmed:
                     self._insert_issue(db, file_id, batch_id, "source_permission_required", "来源许可尚未人工确认", "blocking")
@@ -260,6 +287,13 @@ class ContentStore:
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)
             raise
+
+    @staticmethod
+    def _validate_attribution(source_filename: str, source_locator: str, source_note: str) -> None:
+        # These are manually supplied labels, never filesystem paths or verified hashes.
+        for value,maximum in ((source_filename,1000),(source_locator,2000),(source_note,4000)):
+            if not isinstance(value,str) or len(value)>maximum or "\x00" in value:
+                raise ValueError("invalid manual source attribution")
 
     def _insert_issue(self, db: sqlite3.Connection, file_id: str, batch_id: str, code: str,
                       message: str, severity: str, block_id: str | None = None) -> str:
@@ -313,7 +347,8 @@ class ContentStore:
                 JOIN material_files f ON f.id=b.file_id WHERE b.file_id=?
                   AND (?=0 OR b.status='confirmed')
                   AND (?=0 OR (b.student_visible=1 AND b.kind IN ('text','table')
-                               AND f.allow_student_view=1 AND f.rights_confirmed=1))
+                               AND f.allow_student_view=1 AND f.rights_confirmed=1
+                               AND f.lifecycle_status='active' AND f.usage_scope='production'))
                 ORDER BY b.ordinal""", (file_id,int(bool(confirmed_only or student)),int(bool(student))))]
 
     def list_issues(self, file_id: str) -> list[dict[str, Any]]:
@@ -339,9 +374,12 @@ class ContentStore:
                      license_code: str | None = None, license_note: str | None = None,
                      rights_confirmed: bool | None = None, allow_generation: bool | None = None,
                      allow_retrieval: bool | None = None, allow_student_view: bool | None = None,
-                     external_processing_allowed: bool | None = None) -> dict[str, Any]:
+                     external_processing_allowed: bool | None = None, usage_scope: str | None = None,
+                     source_filename: str | None = None, source_locator: str | None = None,
+                     source_note: str | None = None) -> dict[str, Any]:
         changes = {k: v for k, v in locals().items() if k in {
-            "title","license_code","license_note","rights_confirmed","allow_generation","allow_retrieval","allow_student_view","external_processing_allowed"} and v is not None}
+            "title","license_code","license_note","rights_confirmed","allow_generation","allow_retrieval","allow_student_view","external_processing_allowed",
+            "usage_scope","source_filename","source_locator","source_note"} and v is not None}
         for name in {"rights_confirmed","allow_generation","allow_retrieval","allow_student_view","external_processing_allowed"} & changes.keys():
             if type(changes[name]) is not bool:
                 raise ValueError("source permission flags must be explicit booleans")
@@ -352,6 +390,9 @@ class ContentStore:
             effective.update(changes)
             if effective["license_code"] not in self.LICENSES:
                 raise ValueError("invalid license")
+            if effective["usage_scope"] not in self.USAGE_SCOPES:
+                raise ValueError("invalid material usage scope")
+            self._validate_attribution(effective["source_filename"],effective["source_locator"],effective["source_note"])
             if effective["rights_confirmed"] and (effective["license_code"] in {"unknown","restricted"} or
                     (effective["license_code"] in {"permission","cc_by","cc_by_sa"} and not effective["license_note"].strip())):
                 raise ValueError("source permission or attribution required")
@@ -373,6 +414,8 @@ class ContentStore:
                 db.execute("UPDATE material_files SET allow_student_view=? WHERE id=?", (allow_student_view,file_id))
             if external_processing_allowed is not None:
                 db.execute("UPDATE material_files SET external_processing_allowed=? WHERE id=?", (external_processing_allowed,file_id))
+            db.execute("UPDATE material_files SET usage_scope=?,source_filename=?,source_locator=?,source_note=? WHERE id=?",
+                       (effective["usage_scope"],effective["source_filename"].strip(),effective["source_locator"].strip(),effective["source_note"].strip(),file_id))
             if effective["rights_confirmed"]:
                 db.execute("""UPDATE material_issues SET status='resolved',resolution='许可由上传者确认',resolved_by=?,resolved_at=?
                               WHERE file_id=? AND code='source_permission_required' AND status='open'""", (actor_id,time.time(),file_id))
@@ -387,8 +430,83 @@ class ContentStore:
             raise PermissionError("only the uploader may manage their own draft")
         if row["revision"] != expected_revision:
             raise ContentConflict("material revision changed")
+        if row["lifecycle_status"] != "active":
+            raise ContentConflict("only active material drafts may be changed")
         if not allow_partial and db.execute("SELECT 1 FROM source_blocks WHERE file_id=? AND status='confirmed' LIMIT 1", (row["id"],)).fetchone():
             raise ContentConflict("confirmed content is immutable; import a new version")
+
+    @staticmethod
+    def _lifecycle_authorized(row: sqlite3.Row, actor_id: str, course_owner_authorized: bool) -> None:
+        if type(course_owner_authorized) is not bool or (row["owner_id"]!=actor_id and not (row["visibility"]=="shared" and course_owner_authorized)):
+            raise PermissionError("only the uploader or authorized shared-course owner may manage material lifecycle")
+
+    def _material_command(self, db: sqlite3.Connection, *, actor_id: str, request_id: str, file_id: str,
+                          operation: str, payload: Mapping[str,Any]) -> tuple[str,dict[str,Any] | None]:
+        if not isinstance(request_id,str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}",request_id) is None:
+            raise ValueError("a valid request_id is required")
+        encoded = json.dumps(dict(payload),ensure_ascii=False,sort_keys=True,separators=(",",":"),allow_nan=False)
+        prior = db.execute("SELECT * FROM material_commands WHERE actor_id=? AND request_id=?",(actor_id,request_id)).fetchone()
+        if prior is not None:
+            if prior["file_id"]!=file_id or prior["operation"]!=operation or prior["payload_json"]!=encoded:
+                raise ContentConflict("request_id was already used for a different material command")
+            return encoded,json.loads(prior["result_json"])
+        return encoded,None
+
+    def set_lifecycle(self, file_id: str, *, actor_id: str, request_id: str, expected_revision: int,
+                      lifecycle_status: str, note: str = "", course_owner_authorized: bool = False) -> dict[str,Any]:
+        if lifecycle_status not in {"active","inactive"} or type(expected_revision) is not int or expected_revision<1:
+            raise ValueError("lifecycle status and exact positive revision required")
+        if not isinstance(note,str) or len(note)>2000:
+            raise ValueError("invalid lifecycle note")
+        payload = {"expected_revision":expected_revision,"lifecycle_status":lifecycle_status,"note":note}
+        with self.transaction() as db:
+            row = db.execute("SELECT * FROM material_files WHERE id=?",(file_id,)).fetchone()
+            if row is None:
+                raise KeyError(file_id)
+            self._lifecycle_authorized(row,actor_id,course_owner_authorized)
+            encoded,replay = self._material_command(db,actor_id=actor_id,request_id=request_id,file_id=file_id,operation="lifecycle",payload=payload)
+            if replay is not None:
+                return replay
+            if row["revision"]!=expected_revision or row["lifecycle_status"]=="superseded":
+                raise ContentConflict("material revision changed or material has been superseded")
+            db.execute("UPDATE material_files SET lifecycle_status=?,revision=revision+1,updated_at=? WHERE id=?",(lifecycle_status,time.time(),file_id))
+            result = self._file(db.execute("SELECT * FROM material_files WHERE id=?",(file_id,)).fetchone())
+            db.execute("INSERT INTO material_commands VALUES (?,?,?,?,?,?,?)",(actor_id,request_id,file_id,"lifecycle",encoded,self._json(result),time.time()))
+        return result
+
+    def supersede_material(self, file_id: str, *, actor_id: str, request_id: str, expected_revision: int,
+                           replacement_material_id: str, expected_replacement_revision: int, note: str = "",
+                           course_owner_authorized: bool = False) -> dict[str,Any]:
+        if (file_id==replacement_material_id or type(expected_revision) is not int or expected_revision<1
+                or type(expected_replacement_revision) is not int or expected_replacement_revision<1):
+            raise ValueError("a distinct replacement and exact positive revisions are required")
+        if not isinstance(note,str) or len(note)>2000:
+            raise ValueError("invalid replacement note")
+        payload = {"expected_revision":expected_revision,"replacement_material_id":replacement_material_id,
+                   "expected_replacement_revision":expected_replacement_revision,"note":note}
+        with self.transaction() as db:
+            old = db.execute("SELECT * FROM material_files WHERE id=?",(file_id,)).fetchone()
+            replacement = db.execute("SELECT * FROM material_files WHERE id=?",(replacement_material_id,)).fetchone()
+            if old is None or replacement is None:
+                raise KeyError("material not found")
+            self._lifecycle_authorized(old,actor_id,course_owner_authorized)
+            self._lifecycle_authorized(replacement,actor_id,course_owner_authorized)
+            encoded,replay = self._material_command(db,actor_id=actor_id,request_id=request_id,file_id=file_id,operation="supersede",payload=payload)
+            if replay is not None:
+                return replay
+            if old["revision"]!=expected_revision or replacement["revision"]!=expected_replacement_revision or old["lifecycle_status"]=="superseded":
+                raise ContentConflict("material or replacement revision changed")
+            if any(old[name]!=replacement[name] for name in ("course_id","class_id","usage_scope","visibility")):
+                raise ValueError("replacement must have the same course, class, usage and visibility scope")
+            if (replacement["lifecycle_status"]!="active" or replacement["status"]!="confirmed"
+                    or not replacement["rights_confirmed"] or replacement["license_code"] in {"unknown","restricted"}
+                    or any(old[name] and not replacement[name] for name in ("allow_generation","allow_retrieval","allow_student_view","external_processing_allowed"))):
+                raise ContentConflict("replacement must be active, fully confirmed and eligible for the original uses")
+            db.execute("UPDATE material_files SET lifecycle_status='superseded',replacement_material_id=?,revision=revision+1,updated_at=? WHERE id=?",
+                       (replacement_material_id,time.time(),file_id))
+            result = self._file(db.execute("SELECT * FROM material_files WHERE id=?",(file_id,)).fetchone())
+            db.execute("INSERT INTO material_commands VALUES (?,?,?,?,?,?,?)",(actor_id,request_id,file_id,"supersede",encoded,self._json(result),time.time()))
+        return result
 
     def resolve_issue(self, file_id: str, issue_id: str, *, actor_id: str, expected_revision: int,
                       resolution: str, replacement_text: str | None = None) -> dict[str, Any]:
@@ -436,8 +554,8 @@ class ContentStore:
             row = db.execute("SELECT * FROM material_files WHERE id=?", (file_id,)).fetchone()
             if row is None:
                 raise KeyError(file_id)
-            if row["revision"] != expected_revision:
-                raise ContentConflict("material revision changed")
+            if row["revision"] != expected_revision or row["lifecycle_status"]!="active":
+                raise ContentConflict("material revision changed or material is inactive")
             if row["visibility"] == "shared" and not course_owner_confirmation:
                 raise PermissionError("shared materials require course-owner confirmation")
             if row["visibility"] == "private" and row["owner_id"] != actor_id:
@@ -473,18 +591,23 @@ class ContentStore:
         return {"confirmation_id":confirmation_id,"material":self.get_material(file_id),"confirmed_block_ids":sorted(selected)}
 
     def confirmed_sources(self, course_id: str, block_ids: Sequence[str], *, purpose: str,
-                          student: bool = False, class_id: str | None = None) -> list[dict[str, Any]]:
+                          student: bool = False, class_id: str | None = None,
+                          intent: str = "production") -> list[dict[str, Any]]:
         """Only this projection may enter generation/retrieval. Explicitly selected sources are all-or-nothing."""
-        if purpose not in {"generation","retrieval"} or not block_ids or len(set(block_ids)) != len(block_ids) or len(block_ids) > 500:
+        if purpose not in {"generation","retrieval"} or intent not in self.USAGE_SCOPES or not block_ids or len(set(block_ids)) != len(block_ids) or len(block_ids) > 500:
             raise ValueError("invalid confirmed source selection")
+        if student and intent!="production":
+            raise PermissionError("evaluation sources are restricted to teacher evaluation runs")
         queries = {
             "generation": """SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code,f.license_note,f.visibility,f.owner_id,f.revision source_revision,
-                        f.rights_confirmed,f.allow_generation,f.allow_retrieval,f.allow_student_view,f.external_processing_allowed
+                        f.rights_confirmed,f.allow_generation,f.allow_retrieval,f.allow_student_view,f.external_processing_allowed,
+                        f.usage_scope,f.lifecycle_status,f.title,f.filename,f.source_filename,f.source_locator,f.source_note
                     FROM source_blocks b JOIN material_files f ON f.id=b.file_id
                     WHERE b.id IN (SELECT value FROM json_each(?)) AND f.course_id=? AND b.status='confirmed'
                         AND f.rights_confirmed=1 AND f.allow_generation=1""",
             "retrieval": """SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code,f.license_note,f.visibility,f.owner_id,f.revision source_revision,
-                        f.rights_confirmed,f.allow_generation,f.allow_retrieval,f.allow_student_view,f.external_processing_allowed
+                        f.rights_confirmed,f.allow_generation,f.allow_retrieval,f.allow_student_view,f.external_processing_allowed,
+                        f.usage_scope,f.lifecycle_status,f.title,f.filename,f.source_filename,f.source_locator,f.source_note
                     FROM source_blocks b JOIN material_files f ON f.id=b.file_id
                     WHERE b.id IN (SELECT value FROM json_each(?)) AND f.course_id=? AND b.status='confirmed'
                         AND f.rights_confirmed=1 AND f.allow_retrieval=1""",
@@ -494,6 +617,8 @@ class ContentStore:
         result = []
         for row in rows:
             if row["class_id"] is not None and row["class_id"] != class_id:
+                continue
+            if row["lifecycle_status"]!="active" or row["usage_scope"]!=intent:
                 continue
             if student and (row["visibility"] != "shared" or not row["student_visible"] or not row["allow_student_view"] or row["kind"] not in {"text","table"}):
                 continue
@@ -506,19 +631,22 @@ class ContentStore:
         return sorted(result,key=lambda block:order[block["id"]])
 
     def search_confirmed(self, course_id: str, query: str, *, student: bool = False,
-                         class_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
-        if not query.strip() or len(query) > 200 or not 1 <= limit <= 100:
+                         class_id: str | None = None, limit: int = 20, intent: str = "production") -> list[dict[str, Any]]:
+        if not query.strip() or len(query) > 200 or not 1 <= limit <= 100 or intent not in self.USAGE_SCOPES:
             raise ValueError("invalid source search")
+        if student and intent!="production":
+            raise PermissionError("evaluation sources are restricted to teacher evaluation runs")
         # Literal matching: '%' and '_' are not wildcard instructions.
         with self.connect() as db:
-            return [self._block(r) for r in db.execute("""SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code
+            return [self._block(r) for r in db.execute("""SELECT b.*,f.course_id,f.class_id,f.sha256 original_sha256,f.license_code,f.usage_scope,f.lifecycle_status
                  FROM source_blocks b JOIN material_files f ON f.id=b.file_id
                  WHERE f.course_id=? AND (f.class_id IS NULL OR f.class_id=?)
                    AND b.status='confirmed' AND f.rights_confirmed=1 AND f.allow_retrieval=1
+                   AND f.lifecycle_status='active' AND f.usage_scope=?
                    AND f.license_code NOT IN ('unknown','restricted') AND instr(lower(b.text),lower(?))>0
                    AND (?=0 OR (b.student_visible=1 AND f.allow_student_view=1
                                 AND f.visibility='shared' AND b.kind IN ('text','table')))
-                 ORDER BY f.created_at,b.ordinal LIMIT ?""",(course_id,class_id,query.strip(),int(bool(student)),limit))]
+                 ORDER BY f.created_at,b.ordinal LIMIT ?""",(course_id,class_id,intent,query.strip(),int(bool(student)),limit))]
 
     def delete_draft(self, file_id: str, *, actor_id: str, expected_revision: int) -> None:
         with self.transaction() as db:
@@ -526,6 +654,7 @@ class ContentStore:
             self._assert_draft(db,row,actor_id,expected_revision)
             if db.execute("SELECT 1 FROM content_jobs WHERE input_json LIKE ? AND status IN ('pending','running')", (f'%"{file_id}"%',)).fetchone():
                 raise ContentConflict("material has pending jobs")
+            db.execute("DELETE FROM material_commands WHERE file_id=?", (file_id,))
             db.execute("DELETE FROM material_files WHERE id=?", (file_id,))
             db.execute("DELETE FROM import_batches WHERE id=?", (row["batch_id"],))
         directory = (self.originals_dir / row["storage_key"]).parent
@@ -540,7 +669,7 @@ class ContentStore:
         with self.transaction() as db:
             db.execute("INSERT INTO course_requirements(id,course_id,text,created_by,status,created_at) VALUES (?,?,?,?,'draft',?)", (record_id,course_id,text.strip(),created_by,time.time()))
             db.executemany("INSERT INTO requirement_blocks VALUES (?,?)", [(record_id,i) for i in source_block_ids])
-        return self.list_requirements(course_id,include_drafts=True,created_by=created_by)[-1]
+        return next(item for item in self.list_requirements(course_id,include_drafts=True,created_by=created_by) if item["id"] == record_id)
 
     def list_requirements(self, course_id: str, *, include_drafts: bool = False, created_by: str | None = None) -> list[dict[str, Any]]:
         with self.connect() as db:

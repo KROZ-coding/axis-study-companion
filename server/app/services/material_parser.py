@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import posixpath
 import re
 import tempfile
+import unicodedata
 from typing import Any, Mapping, Sequence
 from zipfile import BadZipFile, ZIP_DEFLATED, ZIP_STORED, ZipFile
 import zlib
@@ -275,6 +276,80 @@ class MaterialParser:
             raise MaterialParseError("table_limit", "表格行数、列数或单元格数超过限制")
         return self._block(anchor,"table","\n".join("\t".join("" if v is None else str(v) for v in row) for row in rows),{"rows":rows,**({"sheet":sheet} if sheet else {})})
 
+    @staticmethod
+    def _header(value: Any) -> str:
+        return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value or "")).lstrip("\ufeff"))
+
+    def _organizer_table(self, rows: list[list[Any]], *, anchor: str, sheet: str | None = None,
+                         line_ranges: Sequence[tuple[int,int]] | None = None) -> dict[str,Any] | None:
+        """Recognize the organizer's schemas by columns; values and filenames are never identities.
+
+        Raw rows live only in material metadata (the student projection excludes it).
+        Answer-free body blocks must not carry the answer again inside their data.
+        """
+        requirements = {"主题编号", "主题", "主题目标", "指标编号", "观察指标"}
+        materials = {"材料编号", "主题编号", "材料类型", "题干或内容", "参考答案", "参考解析"}
+        header_index = next((i for i,row in enumerate(rows) if any(v is not None and str(v).strip() for v in row)), None)
+        if header_index is None:
+            return None
+        headers = [self._header(value) for value in rows[header_index]]
+        columns = set(headers)
+        schema = "course_requirements" if requirements <= columns else "questions_and_materials" if materials <= columns else None
+        if schema is None:
+            return None
+        if len(set(headers)) != len(headers) or any(not name for name in headers):
+            raise MaterialParseError("ambiguous_headers", "结构化材料表头为空或重复，请人工核对")
+        blocks, issues, records, seen = [], [], [], set()
+        protected = {"参考答案", "参考解析", "评分点"}
+        for row_index,row in enumerate(rows[header_index+1:],header_index+2):
+            if not any(value is not None and str(value).strip() for value in row):
+                continue
+            values = {name:row[index] if index<len(row) else None for index,name in enumerate(headers)}
+            def value(name):
+                raw = values.get(name)
+                return "" if raw is None else str(raw)
+            identity = value("指标编号" if schema=="course_requirements" else "材料编号").strip()
+            record_anchor = f"{anchor}/row:{row_index}"
+            provenance: dict[str,Any] = {"schema":schema,"record_id":identity,"row_number":row_index,"header_row":header_index+1,
+                                        "topic_id":value("主题编号"),"indicator_id":value("指标编号")}
+            if sheet is not None:
+                provenance["sheet"] = sheet
+            if line_ranges is not None:
+                first,last = line_ranges[row_index-1]
+                provenance["line_start"],provenance["line_end"] = first,last
+            records.append({"provenance":provenance,"values":values,"raw_row":row})
+            start = len(blocks)
+            if schema=="course_requirements":
+                blocks.append(self._block(record_anchor+"/requirement","text",
+                    "\n".join(f"{name}：{value(name)}" for name in headers),
+                    {"component":"requirement","provenance":provenance,"fields":values}))
+            else:
+                body_fields = {name:values[name] for name in headers if name not in protected}
+                blocks.append(self._block(record_anchor+"/body","text",
+                    "\n".join(f"{name}：{value(name)}" for name in headers if name not in protected),
+                    {"component":"body","provenance":provenance,"fields":body_fields}))
+                for name,component in (("参考答案","reference_answer"),("参考解析","explanation"),("评分点","rubric")):
+                    if value(name).strip():
+                        blocks.append(self._block(record_anchor+"/"+component,"answer",f"{name}：{value(name)}",
+                            {"component":component,"provenance":provenance,"fields":{name:values[name]}}))
+            if not identity or identity in seen:
+                issues.append(self._issue("record_id_required" if not identity else "duplicate_record_id",
+                    "记录编号缺失或重复；请人工核对原始行", "blocking", blocks[start]["anchor"]))
+            if identity:
+                seen.add(identity)
+            if len(row)!=len(headers):
+                issues.append(self._issue("record_column_count", "记录列数与表头不一致；原始行已保留，需人工核对", "blocking", blocks[start]["anchor"]))
+            required_body = value("主题目标") if schema=="course_requirements" else value("题干或内容")
+            if not required_body.strip():
+                issues.append(self._issue("record_body_required", "记录正文为空；请人工核对", "blocking", blocks[start]["anchor"]))
+            if len(blocks)>self.limits.max_blocks:
+                raise MaterialParseError("content_limit", "结构化材料块数超过限制；未截断导入")
+        if not records:
+            return None
+        return {"blocks":blocks,"issues":issues,"metadata":{"schema":schema,"headers":rows[header_index],
+                "header_row":header_index+1,"record_count":len(records),"records":records,"raw_rows":rows,
+                **({"sheet":sheet} if sheet is not None else {})}}
+
     def _csv(self, content: bytes) -> dict[str,Any]:
         text = content.decode("utf-8-sig")
         if "\x00" in text:
@@ -283,15 +358,22 @@ class MaterialParser:
             dialect = csv.Sniffer().sniff(text[:8192],delimiters=",;\t|")
         except csv.Error:
             dialect = csv.excel
-        rows, cells = [], 0
-        for row in csv.reader(StringIO(text,newline=""),dialect=dialect,strict=True):
+        rows, cells, line_ranges, previous_line = [], 0, [], 0
+        reader = csv.reader(StringIO(text,newline=""),dialect=dialect,strict=True)
+        for row in reader:
             if len(rows)>=self.limits.max_rows or len(row)>self.limits.max_columns:
                 raise MaterialParseError("table_limit", "CSV 行列超过限制")
             # Formula-like CSV cells remain literal data; they are never evaluated or exported here.
             rows.append(row)
+            line_ranges.append((previous_line+1,reader.line_num))
+            previous_line = reader.line_num
             cells += len(row)
             if cells>self.limits.max_cells:
                 raise MaterialParseError("table_limit", "CSV 单元格超过限制")
+        structured = self._organizer_table(rows,anchor="csv",line_ranges=line_ranges)
+        if structured is not None:
+            structured["metadata"].update(encoding="utf-8-sig",formula_execution=False)
+            return structured
         return {"blocks":[self._table("csv:rows:1-"+str(len(rows)),rows)],"issues":[],"metadata":{"encoding":"utf-8-sig","formula_execution":False}}
 
     def _docx(self, archive: ZipFile) -> dict[str,Any]:
@@ -348,7 +430,8 @@ class MaterialParser:
         if "xl/workbook.xml" not in archive.namelist():
             raise MaterialParseError("invalid_xlsx", "Excel 缺少工作簿")
         workbook = load_workbook(BytesIO(content),read_only=True,data_only=False,keep_links=False)
-        blocks, issues, total_cells = [], [], 0
+        blocks, issues, total_cells, structured_sheets = [], [], 0, []
+        sheet_count = len(workbook.worksheets)
         try:
             if len(workbook.worksheets)>self.limits.max_pages:
                 raise MaterialParseError("page_limit", "工作表数量超过限制")
@@ -378,14 +461,23 @@ class MaterialParser:
                     rows.append(values)
                     if len(rows)>self.limits.max_rows:
                         raise MaterialParseError("table_limit", "Excel 行数超过限制")
-                blocks.append(self._table(anchor,rows,sheet=sheet.title))
-                if formulas:
-                    issues.append(self._issue("formula_not_evaluated","表格含公式，未执行且不可当作成绩；请人工核对或替换公式值","blocking",anchor))
-                if sheet.sheet_state != "visible":
-                    issues.append(self._issue("hidden_sheet","隐藏工作表需要人工核对","blocking",anchor))
+                structured = self._organizer_table(rows,anchor=anchor,sheet=sheet.title)
+                sheet_blocks = structured["blocks"] if structured is not None else [self._table(anchor,rows,sheet=sheet.title)]
+                blocks.extend(sheet_blocks)
+                if structured is not None:
+                    issues.extend(structured["issues"])
+                    structured_sheets.append({"sheet_index":index,**structured["metadata"]})
+                # Formula/hidden-sheet uncertainty applies to every extracted component.
+                # There is no synthetic whole-table block that could bypass these issues.
+                for block in sheet_blocks:
+                    if formulas:
+                        issues.append(self._issue("formula_not_evaluated","表格含公式，未执行且不可当作成绩；请人工核对或替换公式值","blocking",block["anchor"]))
+                    if sheet.sheet_state != "visible":
+                        issues.append(self._issue("hidden_sheet","隐藏工作表需要人工核对","blocking",block["anchor"]))
         finally:
             workbook.close()
-        return {"blocks":blocks,"issues":issues,"metadata":{"sheets":len(blocks),"read_only":True,"formula_execution":False}}
+        return {"blocks":blocks,"issues":issues,"metadata":{"sheets":sheet_count,"read_only":True,"formula_execution":False,
+                **({"structured_sheets":structured_sheets} if structured_sheets else {})}}
 
     def _pdf(self, content: bytes) -> dict[str,Any]:
         from pypdf import PdfReader

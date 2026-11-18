@@ -18,7 +18,8 @@ from io import BytesIO
 
 
 BUNDLE_FORMAT = "learning-platform-backup"
-BUNDLE_VERSION = 1
+BUNDLE_VERSION = 2
+LEGACY_BUNDLE_VERSION = 1
 REQUIRED_DATABASES = ("platform", "learning", "jobs", "content", "reports", "companion")
 MANIFEST_NAME = "manifest.json"
 DEFAULT_MAX_BYTES = 700 * 1024 * 1024
@@ -65,10 +66,10 @@ DEFAULT_DATABASE_CONTRACTS = {
         "queue_meta", "budgets", "jobs", "steps", "events", "upstream_calls", "call_charges",
         "funding_transactions", "budget_limits", "call_budget_reservations", "budget_ledger_entries",
     })),
-    "content": DatabaseContract(1, 0, frozenset({
+    "content": DatabaseContract(2, 0, frozenset({
         "import_batches", "material_files", "source_blocks", "material_issues", "confirmations",
         "confirmation_blocks", "course_requirements", "requirement_blocks", "knowledge_points",
-        "knowledge_sources", "knowledge_prerequisites", "content_jobs",
+        "knowledge_sources", "knowledge_prerequisites", "content_jobs", "material_commands",
     })),
     "reports": DatabaseContract(2, 0, frozenset({
         "reports", "report_snapshots", "report_revisions", "report_idempotency",
@@ -80,6 +81,13 @@ DEFAULT_DATABASE_CONTRACTS = {
         "notifications", "retention_policies", "legal_holds", "audit_events", "hint_checkpoints",
     })),
 }
+
+LEGACY_CONTENT_CONTRACT = DatabaseContract(1, 0, frozenset({
+    "import_batches", "material_files", "source_blocks", "material_issues", "confirmations",
+    "confirmation_blocks", "course_requirements", "requirement_blocks", "knowledge_points",
+    "knowledge_sources", "knowledge_prerequisites", "content_jobs",
+}))
+COMPETITION_DATABASE_CONTRACT = DatabaseContract(1, 0, frozenset({"competition_runs"}))
 
 
 def application_id_from_text(value: str) -> int:
@@ -214,6 +222,7 @@ class BackupManager:
         attachment_dir: str | Path,
         contracts: Mapping[str, DatabaseContract] | None = None,
         *,
+        competition_database_path: str | Path | None = None,
         additional_attachment_dirs: Mapping[str, str | Path] | None = None,
         max_bytes: int = DEFAULT_MAX_BYTES,
     ) -> None:
@@ -224,6 +233,9 @@ class BackupManager:
         if type(max_bytes) is not int or max_bytes < 1:
             raise ValueError("max_bytes must be a positive integer")
         self.database_paths = {name: Path(database_paths[name]).expanduser() for name in REQUIRED_DATABASES}
+        self.competition_database_path = (
+            None if competition_database_path is None else Path(competition_database_path).expanduser()
+        )
         self.attachment_dir = Path(attachment_dir).expanduser()
         additional = dict(additional_attachment_dirs or {})
         if any(not isinstance(name, str) or not name.isidentifier() or name in {"shared", "databases"} for name in additional):
@@ -231,20 +243,30 @@ class BackupManager:
         self.attachment_dirs = {"shared": self.attachment_dir,
                                 **{name: Path(path).expanduser() for name, path in additional.items()}}
         self.contracts = dict(selected_contracts)
+        self._legacy_content_supported = self.contracts["content"] == DEFAULT_DATABASE_CONTRACTS["content"]
         self.max_bytes = max_bytes
 
-    def _validate_live_databases(self) -> dict[str, dict[str, Any]]:
-        schemas: dict[str, dict[str, Any]] = {}
-        for name in REQUIRED_DATABASES:
-            path = _normal_path(self.database_paths[name])
-            schema = _schema(path)
-            _validate_contract(name, schema, self.contracts[name])
-            schemas[name] = schema
-        return schemas
+    def _database_sources(self) -> dict[str, Path]:
+        sources = dict(self.database_paths)
+        competition = self.competition_database_path
+        if competition is not None and (competition.exists() or competition.is_symlink()):
+            if competition.is_symlink():
+                raise BackupError("competition database must not be a symbolic link")
+            if not competition.is_file():
+                raise BackupError("competition database must be an ordinary file")
+            sources["competition"] = competition
+        return sources
+
+    def _validate_live_databases(self, sources: Mapping[str, Path]) -> None:
+        for name, source_path in sources.items():
+            schema = _schema(_normal_path(source_path))
+            contract = COMPETITION_DATABASE_CONTRACT if name == "competition" else self.contracts[name]
+            _validate_contract(name, schema, contract)
 
     def export_bytes(self) -> bytes:
         """Snapshot each live DB through SQLite's backup API, then build a checked bundle."""
-        schemas = self._validate_live_databases()
+        sources = self._database_sources()
+        self._validate_live_databases(sources)
         attachment_roots = {
             name: path.expanduser().resolve(strict=False)
             for name, path in self.attachment_dirs.items()
@@ -259,15 +281,15 @@ class BackupManager:
             if not root.is_dir():
                 raise BackupError("attachment root must be a directory")
             attachments[name] = _attachment_files(
-                root, self.database_paths,
+                root, sources,
                 tuple(other for other_name, other in attachment_roots.items() if other_name != name),
             )
         with tempfile.TemporaryDirectory(prefix="verified-backup-") as directory:
             temp_root = Path(directory)
             database_entries: dict[str, dict[str, Any]] = {}
             snapshot_paths: dict[str, Path] = {}
-            for name in REQUIRED_DATABASES:
-                source = _normal_path(self.database_paths[name])
+            for name, source_path in sources.items():
+                source = _normal_path(source_path)
                 snapshot = temp_root / f"{name}.sqlite3"
                 try:
                     with closing(_connect_readonly(source)) as source_connection, closing(sqlite3.connect(snapshot)) as target:
@@ -276,7 +298,8 @@ class BackupManager:
                     raise BackupError(f"could not snapshot {name} database") from error
                 snapshot_paths[name] = snapshot
                 schema = _schema(snapshot, immutable=True)
-                _validate_contract(name, schema, self.contracts[name])
+                contract = COMPETITION_DATABASE_CONTRACT if name == "competition" else self.contracts[name]
+                _validate_contract(name, schema, contract)
                 database_entries[name] = {
                     "path": f"databases/{name}.sqlite3", **schema,
                     "sha256": _hash_file(snapshot)[0], "size": snapshot.stat().st_size,
@@ -299,7 +322,7 @@ class BackupManager:
             try:
                 with ZipFile(output, "w", ZIP_DEFLATED) as archive:
                     archive.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-                    for name in REQUIRED_DATABASES:
+                    for name in snapshot_paths:
                         archive.write(snapshot_paths[name], database_entries[name]["path"])
                     for root_name, files in attachments.items():
                         for source, relative in files:
@@ -314,9 +337,12 @@ class BackupManager:
     def write_backup(self, destination: str | Path) -> Path:
         """Write a complete bundle to a new file without replacing an existing backup."""
         target = Path(destination).expanduser().resolve()
-        live_files = {path.expanduser().resolve(strict=False) for path in self.database_paths.values()}
+        live_paths = list(self.database_paths.values())
+        if self.competition_database_path is not None:
+            live_paths.append(self.competition_database_path)
+        live_files = {path.expanduser().resolve(strict=False) for path in live_paths}
         live_files.update(Path(str(path) + suffix).resolve(strict=False)
-                          for path in self.database_paths.values() for suffix in ("-wal", "-shm", "-journal"))
+                          for path in live_paths for suffix in ("-wal", "-shm", "-journal"))
         if target in live_files:
             raise BackupError("backup destination must not be a live database or SQLite sidecar")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -340,7 +366,9 @@ class BackupManager:
     def inspect(self, content: bytes | bytearray | str | Path) -> dict[str, Any]:
         """Validate a bundle completely without extracting or modifying any files."""
         data = _read_archive_bytes(content, self.max_bytes)
-        manifest, entries = _read_and_validate(data, self.contracts, self.max_bytes)
+        manifest, entries = _read_and_validate(
+            data, self.contracts, self.max_bytes, legacy_content=self._legacy_content_supported,
+        )
         return {"format": manifest["format"], "bundle_version": manifest["bundle_version"],
                 "databases": manifest["databases"], "attachments": manifest["attachments"],
                 "member_count": len(entries), "verified": True}
@@ -352,12 +380,16 @@ class BackupManager:
     ) -> Path:
         """Restore into a new isolated directory; never targets a configured live path."""
         data = _read_archive_bytes(content, self.max_bytes)
-        manifest, members = _read_and_validate(data, self.contracts, self.max_bytes)
+        manifest, members = _read_and_validate(
+            data, self.contracts, self.max_bytes, legacy_content=self._legacy_content_supported,
+        )
         parent = Path(staging_parent).expanduser().resolve()
         if not parent.is_dir():
             raise BackupError("staging_parent must already exist")
         live_roots = {path.expanduser().resolve() for path in self.attachment_dirs.values()}
         live_roots.update(path.expanduser().resolve().parent for path in self.database_paths.values())
+        if self.competition_database_path is not None:
+            live_roots.add(self.competition_database_path.expanduser().resolve().parent)
         for live in live_roots:
             if parent == live or parent.is_relative_to(live):
                 raise BackupError("restore staging must be outside every live data directory")
@@ -379,7 +411,11 @@ class BackupManager:
             for name, entry in manifest["databases"].items():
                 database = work / entry["path"]
                 schema = _schema(database, immutable=True)
-                _validate_contract(name, schema, self.contracts[name])
+                contract = COMPETITION_DATABASE_CONTRACT if name == "competition" else self.contracts[name]
+                if (name == "content" and self._legacy_content_supported
+                        and entry["user_version"] == LEGACY_CONTENT_CONTRACT.user_version):
+                    contract = LEGACY_CONTENT_CONTRACT
+                _validate_contract(name, schema, contract)
                 if _hash_file(database)[0] != entry["sha256"]:
                     raise BackupError(f"restored database hash mismatch for {name}")
             for entry in manifest["attachments"]:
@@ -426,6 +462,8 @@ def _read_and_validate(
     content: bytes,
     contracts: Mapping[str, DatabaseContract],
     max_bytes: int,
+    *,
+    legacy_content: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validate_contracts(contracts)
     try:
@@ -442,14 +480,20 @@ def _read_and_validate(
                                   parse_constant=_reject_json_constant)
             if not isinstance(manifest, dict) or manifest.get("format") != BUNDLE_FORMAT:
                 raise BackupError("unknown backup bundle format")
-            if type(manifest.get("bundle_version")) is not int or manifest["bundle_version"] != BUNDLE_VERSION:
+            if (type(manifest.get("bundle_version")) is not int
+                    or manifest["bundle_version"] not in {LEGACY_BUNDLE_VERSION, BUNDLE_VERSION}):
                 raise BackupError("unsupported backup bundle version")
+            bundle_version = manifest["bundle_version"]
             databases = manifest.get("databases")
             attachments = manifest.get("attachments")
-            if not isinstance(databases, dict) or set(databases) != set(REQUIRED_DATABASES) or not isinstance(attachments, list):
-                raise BackupError("backup manifest must describe all six databases and an attachment list")
+            valid_database_sets = {frozenset(REQUIRED_DATABASES)}
+            if bundle_version == BUNDLE_VERSION:
+                valid_database_sets.add(frozenset((*REQUIRED_DATABASES, "competition")))
+            if (not isinstance(databases, dict) or frozenset(databases) not in valid_database_sets
+                    or not isinstance(attachments, list)):
+                raise BackupError("backup manifest has an unsupported database set or attachment list")
             expected_paths = {MANIFEST_NAME}
-            for name in REQUIRED_DATABASES:
+            for name in databases:
                 entry = databases[name]
                 if not isinstance(entry, dict) or entry.get("path") != f"databases/{name}.sqlite3":
                     raise BackupError(f"invalid manifest entry for {name}")
@@ -485,23 +529,27 @@ def _read_and_validate(
             if total > max_bytes:
                 raise BackupError("backup archive expands beyond the configured size limit")
             by_name = {item.filename: item for item in files}
-            for name in REQUIRED_DATABASES:
+            for name in databases:
                 entry = databases[name]
                 info = by_name[entry["path"]]
                 payload = archive.read(info)
                 if len(payload) != entry.get("size") or hashlib.sha256(payload).hexdigest() != entry.get("sha256"):
                     raise BackupError(f"database checksum mismatch for {name}")
-                if entry.get("user_version") != contracts[name].user_version:
+                contract = COMPETITION_DATABASE_CONTRACT if name == "competition" else contracts[name]
+                if (name == "content" and legacy_content
+                        and entry.get("user_version") == LEGACY_CONTENT_CONTRACT.user_version):
+                    contract = LEGACY_CONTENT_CONTRACT
+                if entry.get("user_version") != contract.user_version:
                     raise BackupError(f"unsupported {name} schema version {entry.get('user_version')!r}")
-                if entry.get("application_id") != contracts[name].application_id:
+                if entry.get("application_id") != contract.application_id:
                     raise BackupError(f"unexpected {name} application_id")
-                if set(entry.get("tables", ())) != set(contracts[name].tables):
+                if set(entry.get("tables", ())) != set(contract.tables):
                     raise BackupError(f"unexpected {name} table set")
                 with tempfile.TemporaryDirectory(prefix="verify-db-") as directory:
                     temporary_path = Path(directory) / "database.sqlite3"
                     temporary_path.write_bytes(payload)
                     schema = _schema(temporary_path, immutable=True)
-                _validate_contract(name, schema, contracts[name])
+                _validate_contract(name, schema, contract)
                 if schema["user_version"] != entry["user_version"] or schema["application_id"] != entry["application_id"] or schema["tables"] != entry["tables"]:
                     raise BackupError(f"database schema manifest mismatch for {name}")
             for entry in attachments:

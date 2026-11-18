@@ -16,6 +16,7 @@ from .routers.study.legacy import router as legacy_router
 from .routers.study.teaching import router as teaching_router
 from .routers.v1_auth import router as v1_auth_router
 from .routers.v1_companion import router as v1_companion_router
+from .routers.v1_competition import router as v1_competition_router
 from .routers.v1_courses import router as v1_courses_router
 from .routers.v1_jobs import router as v1_jobs_router
 from .routers.v1_input import router as v1_input_router
@@ -75,7 +76,7 @@ def create_app(config: Settings | None = None, *, study_data: dict | None = None
         application.include_router(teaching_router)
     else:
         for router in (v1_auth_router, v1_courses_router, v1_learning_router, v1_jobs_router,
-                       v1_materials_router, v1_companion_router, v1_reports_router, v1_input_router,
+                       v1_materials_router, v1_companion_router, v1_competition_router, v1_reports_router, v1_input_router,
                        v1_teacher_planning_router, v1_teaching_insights_router):
             application.include_router(router)
 

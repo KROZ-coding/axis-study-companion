@@ -94,6 +94,48 @@ class MaterialParserTests(unittest.TestCase):
         self.assertFalse(numeric["ready"])
         self.assertIn("numeric_student_number",[i["code"] for i in numeric["issues"]])
 
+    def test_organizer_course_requirements_are_detected_by_headers_and_keep_record_provenance(self):
+        csv_data = ("主题编号,主题,主题目标,指标编号,观察指标,课标整理编号,课标文件页／正文页,教材正文页\n"
+                    "ALT-1,整式,能表示并化简代数式。,ALT-I2,去括号并合并同类项,CR-ALT,3／2,上册1-9\n").encode("utf-8-sig")
+        result = parse_material("arbitrary-name.csv",csv_data)
+        self.assertEqual(result["metadata"]["schema"],"course_requirements")
+        self.assertEqual(len(result["blocks"]),1)
+        self.assertIn("ALT-I2",result["blocks"][0]["data"]["provenance"]["indicator_id"])
+        self.assertEqual(result["blocks"][0]["data"]["provenance"]["line_start"],2)
+        self.assertEqual(result["metadata"]["raw_rows"][1][0],"ALT-1")
+
+    def test_organizer_question_and_answer_components_and_xlsx_anchors_are_separate(self):
+        header = ["材料编号","主题编号","材料类型","题型","题干或内容","选项","参考答案","参考解析","满分","评分点","指标编号","来源或资料文件"]
+        rows = [["ID-X","T-X","题目","填空题","先"+"题干"*1800,"","42","核对答案解析","1","正确 1 分","I-X","来源"]]
+        from csv import writer
+        from io import StringIO
+        stream = StringIO(newline=""); output = writer(stream); output.writerow(header); output.writerows(rows)
+        result = parse_material("different-name.csv",stream.getvalue().encode())
+        self.assertEqual(result["metadata"]["schema"],"questions_and_materials")
+        self.assertEqual([block["data"]["component"] for block in result["blocks"]],
+                         ["body","reference_answer","explanation","rubric"])
+        self.assertNotIn("参考答案",result["blocks"][0]["text"])
+        self.assertIn("42",result["blocks"][1]["text"])
+        self.assertIn(rows[0][4],result["blocks"][0]["text"])
+        self.assertEqual(result["blocks"][0]["data"]["provenance"]["record_id"],"ID-X")
+
+        from openpyxl import Workbook
+        workbook=Workbook(); sheet=workbook.active; sheet.title="题目页"
+        sheet.append(header); sheet.append(rows[0])
+        excel=BytesIO(); workbook.save(excel); workbook.close()
+        xlsx=parse_material("unrelated.xlsx",excel.getvalue())
+        self.assertEqual(xlsx["metadata"]["structured_sheets"][0]["schema"],"questions_and_materials")
+        self.assertEqual(xlsx["blocks"][0]["data"]["provenance"]["sheet"],"题目页")
+        self.assertEqual(xlsx["blocks"][0]["data"]["provenance"]["row_number"],2)
+
+    def test_table_limits_fail_loudly_instead_of_truncating_rows(self):
+        rows = ["header,topic,goal,indicator_id,indicator","T,A,goal,I,indicator"]
+        result = parse_material("requirements.csv",("\n".join(rows)).encode())
+        self.assertEqual(result["blocks"][0]["kind"],"table")
+        self.assertNotIn("schema",result["metadata"])
+        with self.assertRaises(MaterialParseError):
+            parse_material("large.csv",("a,b\n"+"x,y\n"*9).encode(),limits=replace(ParseLimits(),max_rows=5))
+
     def test_mapping_rejects_overlaps_nonfinite_negative_and_out_of_range_scores(self):
         rows = [["id","score"],["001",float("nan")],["002",-1],["003",101],["004",0]]
         preview = preview_grade_mapping(rows,{"student_number_column":0,"score_columns":{"math":1},"maximums":{"math":100}})

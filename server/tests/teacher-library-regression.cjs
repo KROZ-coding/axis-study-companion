@@ -418,6 +418,81 @@ test("content terminal status outranks queue success and only completed jobs wit
   }
 });
 
+test("CSV paste preserves exact text and filename and remains an unconfirmed material", async () => {
+  const pendingDoc = { material: { id: "pasted", status: "parsed", revision: 1, title: "原件" }, blocks: [], issues: [] };
+  const h = harness({ upload: async () => pendingDoc });
+  await h.library.load(); await h.click("paste-material");
+  const original = '材料编号,题干或内容\r\nX01,"多行\n原文"\r\n';
+  h.field("title", "原件"); h.field("paste_format", "csv"); h.field("paste_text", original);
+  h.field("source_filename", "题目与材料.csv"); h.field("license_code", "permission");
+  h.field("license_note", "本机已核对"); h.field("rights_confirmed", "", { type: "checkbox", checked: true });
+  await h.submit("material-upload");
+  const file = h.calls.find(([method]) => method === "UPLOAD")[2].get("file");
+  assert.equal(file.name, "题目与材料.csv"); assert.equal(await file.text(), original);
+  assert.equal(h.calls.filter(([method]) => method === "POST").length, 0);
+});
+
+test("material supersede accepts active and inactive originals and verifies both returned materials", async () => {
+  for (const lifecycle_status of ["active", "inactive"]) {
+    const replacement = { id: "m2", title: "修正版", revision: 4, lifecycle_status: "active", status: "confirmed", rights_confirmed: true, usage_scope: "production", visibility: "private", class_id: null };
+    const replacementDoc = { material: replacement, blocks: [{ id: "b2", status: "confirmed" }], issues: [] };
+    let replaced = false;
+    const h = harness({ material: { lifecycle_status, can_replace: true, visibility: "private", usage_scope: "production", revision: 3 }, call: (method, url, body, fallback) => {
+      if (url.includes("/materials?")) return { items: [h.doc.material, replacement] };
+      if (url === "/materials/m2") return replacementDoc;
+      if (method === "POST" && url === "/materials/m1/supersede") { replaced = true; return {}; }
+      if (method === "GET" && url === "/materials/m1" && replaced) return { ...h.doc, material: { ...h.doc.material, lifecycle_status: "superseded", replacement_material_id: "m2", revision: 4 } };
+      return fallback(method, url, body);
+    } });
+    await h.library.load(); await h.click("tab", "materials"); await h.click("material-detail", "m1");
+    assert.doesNotMatch(h.html().match(/<button[^>]*data-library-action="material-replace"[^>]*>/)?.[0] || "missing", /disabled|missing/);
+    await h.click("material-replace"); await h.field("replacement_material_id", "m2");
+    await h.submit("material-supersede");
+    assert.equal(replaced, false, "explicit confirmation remains required");
+    h.field("confirmed", "", { type: "checkbox", checked: true });
+    await h.submit("material-supersede");
+    const request = h.calls.find(([method, url]) => method === "POST" && url.endsWith("/supersede"));
+    assert.ok(request, `${lifecycle_status} original can be replaced`);
+    assert.equal(request[2].expected_revision, 3); assert.equal(request[2].expected_replacement_revision, 4);
+    assert.equal(request[2].replacement_material_id, "m2");
+    assert.ok(h.toasts.includes("材料替换已确认；旧材料历史与来源记录仍保留。"));
+    assert.equal(h.calls.filter(([method, url]) => method === "GET" && url === "/materials/m2").length, 2);
+    h.library.reset();
+  }
+});
+
+test("material supersede still rejects replaced originals and ineligible replacements", async () => {
+  for (const invalid of [{ old: "superseded" }, { old: "unknown" }, { lifecycle_status: "inactive" }, { status: "parsed" }, { rights_confirmed: false }, { usage_scope: "evaluation" }, { visibility: "course" }, { class_id: "other-class" }]) {
+    const replacementDoc = { material: { id: "m2", revision: 1, lifecycle_status: "active", status: "confirmed", rights_confirmed: true, usage_scope: "production", visibility: "private", class_id: null, ...invalid }, blocks: [], issues: [] };
+    const h = harness({ material: { lifecycle_status: "inactive", visibility: "private", usage_scope: "production" }, call: (method, url, body, fallback) => url === "/materials/m2" ? replacementDoc : fallback(method, url, body) });
+    await h.library.load(); await h.click("material-detail", "m1"); await h.click("material-replace");
+    await h.field("replacement_material_id", "m2");
+    if (invalid.old) h.doc.material.lifecycle_status = invalid.old;
+    h.field("confirmed", "", { type: "checkbox", checked: true }); await h.submit("material-supersede");
+    assert.equal(h.calls.filter(([method]) => method === "POST").length, 0, JSON.stringify(invalid));
+    assert.match(h.html(), /替代材料必须启用/);
+    h.library.reset();
+  }
+});
+
+test("evaluation completion stays a candidate and editing retains evaluation intent", async () => {
+  const row = fixtureQuestion("q1", { generation_intent: "evaluation", usage_scope: "evaluation" });
+  row.status = "candidate";
+  const jobs = [{ id: "evaluation-job", status: "completed", stage: "done", input: { intent: "evaluation" },
+    state: { published_versions: [{ question_id: "q1", version: 1 }] } }];
+  const h = harness({ questions: [row], jobs, material: { usage_scope: "evaluation" },
+    call: (method, url, body, fallback) => url.includes("/versions/1") ? { question: row, sources: [], reviews: {}, versions: [] } : fallback(method, url, body) });
+  await h.library.load(); await h.click("tab", "jobs");
+  assert.match(h.html(), /评测审查完成，未入正式题库/); assert.doesNotMatch(h.html(), /审查通过，已入库/);
+  await h.click("tab", "questions"); await h.click("question-detail", "q1@1"); await h.click("edit-question");
+  assert.match(h.html(), /当前用途：评测验证/);
+  await h.field("source_material_id", "m1");
+  h.field("external_processing_allowed", "", { type: "checkbox", checked: true });
+  await h.submit("question");
+  const request = h.calls.find(([method, url]) => method === "POST" && url.endsWith("edit-jobs"));
+  assert.ok(request); assert.equal(request[2].intent, "evaluation");
+});
+
 test("detail loading and repaint retain modal focus, close restores its exact entry, and background locks are reversible", async () => {
   const pending = deferred();
   const row = fixtureQuestion();

@@ -3,8 +3,10 @@
 Worker protocol: persist ``start_call`` before sending, accept results only with
 an active fencing lease, and reuse succeeded ``list_calls`` after a restart.
 Unknown provider results require ``reconcile_call``. Missing billing data keeps
-``cost_pending`` and its reservation. ``record_call_usage``/``settle_call_cost``
-can settle a late invoice without a lease; neither adopts a business result.
+``cost_pending`` and its reservation. Explicit ``unmetered_competition`` calls
+instead retain actual usage and a null monetary cost, without budget bindings.
+``record_call_usage``/``settle_call_cost`` can settle late metadata without a
+lease; neither adopts a business result.
 
 Budget limits gate future sends, never the recording of an already incurred
 bill. Necessary grading/summary work may reserve the configured teaching and
@@ -665,8 +667,25 @@ class JobQueue:
         return _json(existing)
 
     @classmethod
-    def _record_usage_tx(cls, db: sqlite3.Connection, call: sqlite3.Row, usage: Mapping[str, Any] | None, cost: int | None, cost_pending: bool, now: float) -> bool:
+    def _record_usage_tx(cls, db: sqlite3.Connection, call: sqlite3.Row, usage: Mapping[str, Any] | None, cost: int | None, cost_pending: bool, now: float, *, usage_not_required: bool = False) -> bool:
         encoded = cls._merge_usage(call["usage_json"], usage)
+        if (_loads(call["metadata_json"]) or {}).get("billing_mode") == "unmetered_competition":
+            if cost is not None:
+                raise ValueError("unmetered competition calls retain a null monetary cost")
+            known_usage = _loads(encoded) or {}
+            complete_usage = all(
+                type(known_usage.get(key)) is int and 0 <= known_usage[key] <= 10**12
+                for key in ("prompt_tokens", "completion_tokens")
+            )
+            pending = bool(call["cost_pending"] and not complete_usage and not usage_not_required)
+            db.execute("UPDATE upstream_calls SET usage_json=?,cost_pending=?,updated_at=? WHERE call_id=?",
+                       (encoded, int(pending), now, call["call_id"]))
+            if encoded != call["usage_json"] or pending != bool(call["cost_pending"]):
+                cls._event(db, call["job_id"], "call_usage_recorded", now,
+                           {"call_id": call["call_id"], "billing_mode": "unmetered_competition",
+                            "cost_pending": pending})
+            cls._refresh_pending(db, call["job_id"])
+            return False
         if cost is None and call["cost_units"] is None and not cost_pending:
             raise ValueError("a final integer cost is required to clear cost_pending")
         if call["cost_units"] is not None and cost is not None and call["cost_units"] != cost:
@@ -939,12 +958,15 @@ class JobQueue:
         self, job_id: str, call_id: str, worker_id: str, generation: int, *, step_name: str | None = None,
         reserve_units: int | None = None, model_name: str | None = None, model_version: str | None = None,
         price_version: str | None = None, input_version: str | None = None, metadata: Mapping[str, Any] | None = None,
-        now: float | None = None,
+        billing_mode: str | None = None, now: float | None = None,
     ) -> CallIntent:
         """Commit intent and conservative reservations before making one send.
 
         Omitted reserve_units uses the legacy job wallet's remaining allowance,
         otherwise zero. Paid scoped work requires a positive explicit estimate.
+        Only the trusted caller's explicit unmetered_competition mode bypasses
+        monetary caps/reservations; metadata alone cannot enable it. Its price
+        version is no-price and its monetary cost always remains null.
         Reusing a completed call_id returns should_send=False and its result.
         """
         call_id, step_name = _text(call_id, "call_id"), _optional_text(step_name)
@@ -952,7 +974,20 @@ class JobQueue:
             reserve_units = _integer(reserve_units, "reserve_units")
         if metadata is not None and not isinstance(metadata, Mapping):
             raise TypeError("metadata must be a mapping")
-        encoded_metadata = _json(dict(metadata or {}))
+        if billing_mode is not None and billing_mode not in {"metered", "unmetered_competition"}:
+            raise ValueError("unsupported billing mode")
+        unmetered = billing_mode == "unmetered_competition"
+        details = dict(metadata or {})
+        if "billing_mode" in details and details["billing_mode"] != (billing_mode or "metered"):
+            raise ValueError("billing mode must be selected explicitly by the caller")
+        if billing_mode is not None:
+            details["billing_mode"] = billing_mode
+        if unmetered:
+            if reserve_units not in (None, 0) or price_version not in (None, "no-price") or details.get("price") is not None:
+                raise ValueError("unmetered competition calls cannot reserve money or contain a price")
+            reserve_units, price_version = 0, "no-price"
+            details["price"] = None
+        encoded_metadata = _json(details)
         supplied = tuple(_optional_text(value) for value in (model_name, model_version, price_version, input_version))
         with self._transaction() as db:
             current = _now(now)
@@ -969,15 +1004,24 @@ class JobQueue:
                         raise IdempotencyConflict(f"call_id reused with a different {column}")
                 if reserve_units is not None and reserve_units != old["reserved_units"]:
                     raise IdempotencyConflict("call_id reused with a different reservation")
+                if billing_mode is not None and (_loads(old["metadata_json"]) or {}).get("billing_mode", "metered") != billing_mode:
+                    raise IdempotencyConflict("call_id reused with a different billing mode")
                 if metadata is not None and _loads(old["metadata_json"]) != _loads(encoded_metadata):
                     raise IdempotencyConflict("call_id reused with different metadata")
                 if old["status"] in ("in_flight", "unknown"):
                     raise ReconciliationRequired("unknown or in-flight call cannot be resent")
                 return CallIntent(call_id, job_id, step_name, old["status"], False, _loads(old["result_json"]))
-            if db.execute("SELECT 1 FROM upstream_calls WHERE job_id=? AND (status IN ('in_flight','unknown') OR cost_pending=1) LIMIT 1", (job_id,)).fetchone():
+            # Missing usage on a saved unmetered success must not block the next
+            # unmetered stage; unresolved outcomes and monetary bills still do.
+            if any(
+                call["status"] in ("in_flight", "unknown")
+                or not (unmetered and call["status"] == "succeeded"
+                        and (_loads(call["metadata_json"]) or {}).get("billing_mode") == "unmetered_competition")
+                for call in db.execute("SELECT status,metadata_json FROM upstream_calls WHERE job_id=? AND (status IN ('in_flight','unknown') OR cost_pending=1)", (job_id,))
+            ):
                 raise ReconciliationRequired("previous result or billing usage must be reconciled first")
             necessary = self._necessary(job)
-            if job["over_limit"] and not necessary:
+            if job["over_limit"] and not necessary and not unmetered:
                 raise InsufficientBudget("optional work stopped after an over-budget call")
             if job["attempts"] > job["max_attempts"]:
                 raise InvalidTransition("maximum attempts exhausted; only local recovery is allowed")
@@ -990,9 +1034,9 @@ class JobQueue:
             units = reserve_units
             if units is None:
                 units = max(0, job["budget_limit"] - job["budget_spent"]) if job["budget_account_id"] is not None else 0
-            if job["paid"] and units == 0:
+            if not unmetered and job["paid"] and units == 0:
                 raise InsufficientBudget("paid work requires a positive conservative reservation")
-            if job["budget_account_id"] is not None:
+            if not unmetered and job["budget_account_id"] is not None:
                 cap = _sum_units(job["budget_limit"], job["emergency_limit"] if necessary else 0)
                 if _sum_units(job["budget_spent"], units) > cap:
                     raise InsufficientBudget("job wallet and emergency cap exhausted")
@@ -1007,9 +1051,11 @@ class JobQueue:
             db.execute("""INSERT INTO upstream_calls(call_id,job_id,step_name,status,generation,created_at,updated_at,purpose,necessary,budget_day,
                 model_name,model_version,price_version,input_version,metadata_json,reserved_units)
                 VALUES(?,?,?,'in_flight',?,?,?,?,?,?,?,?,?,?,?,?)""", (call_id, job_id, step_name, generation, current, current, job["purpose"], int(necessary), day, *actual, encoded_metadata, units))
-            self._bind_scopes(db, job, call_id, day, units, current)
+            if not unmetered:
+                self._bind_scopes(db, job, call_id, day, units, current)
             self._refresh_pending(db, job_id)
-            self._event(db, job_id, "upstream_call_started", current, {"call_id": call_id, "step": step_name, "generation": generation, "reserved_units": units})
+            self._event(db, job_id, "upstream_call_started", current, {"call_id": call_id, "step": step_name, "generation": generation, "reserved_units": units,
+                                                                    "billing_mode": billing_mode or "metered"})
             return CallIntent(call_id, job_id, step_name, "in_flight", True)
 
     def get_call(self, call_id: str) -> Call:
@@ -1095,7 +1141,10 @@ class JobQueue:
             call = self._call_row(db, call_id, job_id)
             if call["status"] != "unknown":
                 raise InvalidTransition(f"call is not unknown: {call['status']}")
-            self._record_usage_tx(db, call, usage, cost, cost_pending, current)
+            if outcome == "not_executed" and (_loads(call["metadata_json"]) or {}).get("billing_mode") == "unmetered_competition":
+                cost = None
+            self._record_usage_tx(db, call, usage, cost, cost_pending, current,
+                                  usage_not_required=outcome == "not_executed")
             db.execute("UPDATE upstream_calls SET status=?,result_json=?,updated_at=? WHERE call_id=?", (outcome, encoded, current, call_id))
             self._event(db, job_id, "upstream_call_reconciled", current, {"call_id": call_id, "outcome": outcome})
             remaining = db.execute("SELECT 1 FROM upstream_calls WHERE job_id=? AND status IN ('in_flight','unknown') LIMIT 1", (job_id,)).fetchone()
@@ -1117,16 +1166,21 @@ class JobQueue:
 
     def record_call_usage(
         self, job_id: str, call_id: str, *, usage: Mapping[str, Any] | None = None, cost_units: int | None = None,
-        cost_pending: bool = True, now: float | None = None,
+        cost_pending: bool = True, request_sent: bool = True, now: float | None = None,
     ) -> Call:
-        """Persist late usage/cost with no lease, without accepting any result."""
+        """Persist late usage/cost with no lease, without accepting any result.
+
+        request_sent=False is affirmative no-send evidence; competition usage
+        otherwise remains pending until actual prompt/completion counts arrive.
+        """
         _boolean(cost_pending, "cost_pending")
+        _boolean(request_sent, "request_sent")
         _validate_usage(usage)
         cost = None if cost_units is None else _integer(cost_units, "cost_units")
         with self._transaction() as db:
             current = _now(now)
             call = self._call_row(db, call_id, job_id)
-            self._record_usage_tx(db, call, usage, cost, cost_pending, current)
+            self._record_usage_tx(db, call, usage, cost, cost_pending, current, usage_not_required=not request_sent)
             self._refresh_pending(db, job_id)
             return self._call(self._call_row(db, call_id))
 

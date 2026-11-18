@@ -238,7 +238,8 @@ class BackupTests(unittest.TestCase):
                          frozenset({"queue_meta", "budgets", "jobs", "steps", "events", "upstream_calls",
                                     "call_charges", "funding_transactions", "budget_limits",
                                     "call_budget_reservations", "budget_ledger_entries"}))
-        self.assertEqual(DEFAULT_DATABASE_CONTRACTS["content"].user_version, 1)
+        self.assertEqual(DEFAULT_DATABASE_CONTRACTS["content"].user_version, 2)
+        self.assertIn("material_commands", DEFAULT_DATABASE_CONTRACTS["content"].tables)
         self.assertEqual(DEFAULT_DATABASE_CONTRACTS["reports"].user_version, 2)
         self.assertEqual(DEFAULT_DATABASE_CONTRACTS["reports"].tables,
                          frozenset({"reports", "report_snapshots", "report_revisions", "report_idempotency",

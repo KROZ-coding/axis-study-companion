@@ -31,7 +31,7 @@ class ContentStoreTests(unittest.TestCase):
         return self.store.confirm_blocks(material["id"],[b["id"] for b in blocks],actor_id="teacher",expected_revision=material["revision"],**kwargs)
 
     def test_schema_wal_foreign_keys_and_reopen_are_explicit(self):
-        self.assertEqual(self.store.schema_version,1)
+        self.assertEqual(self.store.schema_version,2)
         self.assertEqual(self.store.journal_mode,"wal")
         with self.store.connect() as db:
             self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0],1)
@@ -40,7 +40,53 @@ class ContentStoreTests(unittest.TestCase):
             self.assertTrue({"material_files","import_batches","source_blocks","material_issues","confirmations","confirmation_blocks","course_requirements","knowledge_points","knowledge_prerequisites","content_jobs"} <= tables)
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute("INSERT INTO requirement_blocks VALUES ('missing','missing')")
-        self.assertEqual(ContentStore(self.path).schema_version,1)
+        self.assertEqual(ContentStore(self.path).schema_version,2)
+
+    def test_usage_scope_defaults_and_lifecycle_commands_are_cas_authorized_and_idempotent(self):
+        original = self._import(usage_scope="evaluation",source_filename="手工来源.xlsx",source_locator="第 2 页",source_note="演示许可记录")
+        replacement = self._import(usage_scope="evaluation")
+        self.assertEqual((original["usage_scope"],original["lifecycle_status"],original["revision"]),("evaluation","active",1))
+        with self.assertRaises(PermissionError):
+            self.store.set_lifecycle(original["id"],actor_id="intruder",request_id="lifecycle-denied",expected_revision=1,lifecycle_status="inactive")
+        inactive = self.store.set_lifecycle(original["id"],actor_id="teacher",request_id="lifecycle-off",expected_revision=1,lifecycle_status="inactive")
+        self.assertEqual(inactive["revision"],2)
+        self.assertEqual(self.store.set_lifecycle(original["id"],actor_id="teacher",request_id="lifecycle-off",expected_revision=1,lifecycle_status="inactive"),inactive)
+        with self.assertRaises(ContentConflict):
+            self.store.set_lifecycle(original["id"],actor_id="teacher",request_id="lifecycle-stale",expected_revision=1,lifecycle_status="active")
+        replacement = self.store.update_draft(replacement["id"],actor_id="teacher",expected_revision=1,
+            license_code="own",rights_confirmed=True,allow_generation=True,allow_retrieval=True,external_processing_allowed=True)
+        replacement = self._confirm(replacement)["material"]
+        superseded = self.store.supersede_material(original["id"],actor_id="teacher",request_id="replace-v1",expected_revision=2,
+            replacement_material_id=replacement["id"],expected_replacement_revision=replacement["revision"],note="替换来源")
+        self.assertEqual((superseded["lifecycle_status"],superseded["replacement_material_id"],superseded["revision"]),
+                         ("superseded",replacement["id"],3))
+        self.assertEqual(self.store.supersede_material(original["id"],actor_id="teacher",request_id="replace-v1",expected_revision=2,
+            replacement_material_id=replacement["id"],expected_replacement_revision=replacement["revision"],note="替换来源"),superseded)
+        with self.assertRaises(ContentConflict):
+            self.store.set_lifecycle(original["id"],actor_id="teacher",request_id="reactivate-old",expected_revision=3,lifecycle_status="active")
+
+    def test_lifecycle_draft_deletion_removes_commands_and_original_only_for_current_author_revision(self):
+        for states in (("inactive","active"),("active",)):
+            with self.subTest(states=states):
+                material = self._import()
+                original = self.store.originals_dir/material["storage_key"]
+                for index,status in enumerate(states):
+                    material = self.store.set_lifecycle(material["id"],actor_id="teacher",
+                        request_id=f"delete-{material['id']}-{index}",expected_revision=material["revision"],lifecycle_status=status)
+                with self.assertRaises(PermissionError):
+                    self.store.delete_draft(material["id"],actor_id="intruder",expected_revision=material["revision"])
+                with self.assertRaises(ContentConflict):
+                    self.store.delete_draft(material["id"],actor_id="teacher",expected_revision=material["revision"]-1)
+                with self.store.connect() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM material_commands WHERE file_id=?",(material["id"],)).fetchone()[0],len(states))
+                self.assertTrue(original.is_file())
+                self.store.delete_draft(material["id"],actor_id="teacher",expected_revision=material["revision"])
+                with self.store.connect() as db:
+                    self.assertIsNone(db.execute("SELECT 1 FROM material_files WHERE id=?",(material["id"],)).fetchone())
+                    self.assertIsNone(db.execute("SELECT 1 FROM material_commands WHERE file_id=?",(material["id"],)).fetchone())
+                    self.assertIsNone(db.execute("SELECT 1 FROM import_batches WHERE id=?",(material["batch_id"],)).fetchone())
+                    self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(),[])
+                self.assertFalse(original.parent.exists())
 
     def test_busy_timeout_comes_from_connection_timeout(self):
         store = ContentStore(self.path,timeout=0.125)
@@ -193,6 +239,26 @@ class ContentStoreTests(unittest.TestCase):
         result = self.store.confirmed_sources("course",ids,purpose="retrieval")
         self.assertEqual([block["id"] for block in result],ids)
 
+    def test_evaluation_sources_are_explicit_teacher_only_and_lifecycle_filtered(self):
+        production = self._import(text="production marker")
+        evaluation = self._import(text="evaluation marker",usage_scope="evaluation")
+        self._confirm(production); self._confirm(evaluation)
+        prod_id = self.store.list_blocks(production["id"])[0]["id"]
+        eval_id = self.store.list_blocks(evaluation["id"])[0]["id"]
+        self.assertEqual(self.store.confirmed_sources("course",[prod_id],purpose="generation")[0]["id"],prod_id)
+        with self.assertRaises(PermissionError):
+            self.store.confirmed_sources("course",[eval_id],purpose="generation")
+        self.assertEqual(self.store.confirmed_sources("course",[eval_id],purpose="generation",intent="evaluation")[0]["id"],eval_id)
+        self.assertEqual(self.store.search_confirmed("course","evaluation marker"),[])
+        self.assertEqual(self.store.search_confirmed("course","evaluation marker",intent="evaluation")[0]["id"],eval_id)
+        with self.assertRaises(PermissionError):
+            self.store.confirmed_sources("course",[eval_id],purpose="retrieval",student=True,intent="evaluation")
+        inactive = self.store.set_lifecycle(production["id"],actor_id="teacher",request_id="deactivate-prod",expected_revision=2,lifecycle_status="inactive")
+        self.assertEqual(inactive["lifecycle_status"],"inactive")
+        self.assertEqual(self.store.search_confirmed("course","production marker"),[])
+        with self.assertRaises(PermissionError):
+            self.store.confirmed_sources("course",[prod_id],purpose="generation")
+
     def test_generation_permission_does_not_grant_retrieval_permission(self):
         material = self._import(allow_retrieval=False)
         self._confirm(material)
@@ -257,13 +323,22 @@ class ContentStoreTests(unittest.TestCase):
                         ({"include_drafts":True,"created_by":""},[confirmed,own,other]),
                         ({"include_drafts":True,"created_by":author},[confirmed,own])):
                     result = list_records("course",**options)
-                    self.assertEqual([item["id"] for item in result],[item["id"] for item in expected])
+                    self.assertEqual([item["id"] for item in result],[item["id"] for item in sorted(expected,key=lambda item:(item["created_at"],item["id"]))])
                     self.assertTrue(all(item["source_block_ids"] == source_ids for item in result))
                 self.assertEqual(list_records("another course",include_drafts=True),[])
                 with self.assertRaises(KeyError):
                     self.store.confirm_curriculum(kind,"missing ' ; --",actor_id="owner")
                 with self.assertRaises(ContentConflict):
                     self.store.confirm_curriculum(kind,confirmed["id"],actor_id="owner")
+
+    def test_requirement_creation_returns_its_own_record_when_timestamps_tie(self):
+        material = self._import(); self._confirm(material)
+        block_ids = [self.store.list_blocks(material["id"])[0]["id"]]
+        with patch("app.content_store.time.time", return_value=1000), patch.object(self.store,"_id",side_effect=["req_z","req_a"]):
+            first = self.store.add_requirement("course","first",created_by="teacher",source_block_ids=block_ids)
+            second = self.store.add_requirement("course","second",created_by="teacher",source_block_ids=block_ids)
+        self.assertEqual((first["id"],first["text"]),("req_z","first"))
+        self.assertEqual((second["id"],second["text"]),("req_a","second"))
 
     def test_worker_generation_and_lease_guards_reject_old_callbacks(self):
         job = self.store.create_job("question_generate",course_id="course",owner_id="teacher",payload={})

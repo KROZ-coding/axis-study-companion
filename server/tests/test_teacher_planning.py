@@ -132,6 +132,13 @@ class PlanningFixture:
 
 
 class TeacherPlanningTests(PlanningFixture, unittest.TestCase):
+    def test_evaluation_versions_are_excluded_even_if_approved_without_sources(self):
+        self.seed(generation_intent="evaluation", usage_scope="evaluation")
+        preview = self.planning.preview("teacher", self.config)
+        self.assertFalse(preview["ready"])
+        self.assertTrue(preview["deficits"])
+        self.assertEqual(preview["questions"], [])
+
     def test_exact_selection_types_scores_frozen_publication_and_contract(self):
         self.seed()
         preview = self.planning.preview("teacher", self.config)

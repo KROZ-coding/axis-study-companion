@@ -1,7 +1,7 @@
-"""Single-attempt, purpose-routed Chat Completions with explicit accounting metadata.
+"""Single-attempt, purpose-routed model requests with explicit accounting metadata.
 
 ``complete`` is asynchronous. Supplying ``on_delta`` requests real SSE and calls
-that callback (sync or async) with *only* public ``delta.content`` strings. The
+that callback (sync or async) with *only* public text deltas. The
 caller owns authorization, conversation selection, durable call deduplication,
 and billing. No request or hidden model reasoning is logged or retained here.
 """
@@ -117,13 +117,13 @@ def _strict_json(text: str) -> Any:
     return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
 
 
-def _usage(value: Any) -> dict[str, int] | None:
+def _usage(value: Any, api_type: str = "chat_completions") -> dict[str, int] | None:
     if not isinstance(value, dict):
         return None
-    keys = ("prompt_tokens", "completion_tokens")
+    keys = ("input_tokens", "output_tokens") if api_type == "responses" else ("prompt_tokens", "completion_tokens")
     if any(type(value.get(key)) is not int or not 0 <= value[key] <= 10**12 for key in keys):
         return None
-    return {key: value[key] for key in keys}
+    return dict(zip(("prompt_tokens", "completion_tokens"), (value[key] for key in keys)))
 
 
 def _text(value: Any, *, maximum: int = _MAX_CONTEXT_CHARS) -> str:
@@ -357,14 +357,18 @@ class ModelGateway:
             raise GatewayError("model_mismatch", status_code=503)
         if any(not item.name or not item.api_key or not item.base_url for item in candidates):
             raise GatewayError("invalid_configuration", status_code=503)
+        if any(not isinstance(item.api_type, str) or item.api_type not in {"chat_completions", "responses"} for item in candidates):
+            raise GatewayError("invalid_configuration", status_code=503)
         return min(candidates, key=lambda item: (item.priority, item.name))
 
     def describe(self, purpose: str) -> dict[str, Any]:
-        """Read-only preflight for worker-side price lookup and reservation."""
+        """Read-only routing/limit preflight and explicit worker billing mode."""
         provider = self.provider_for(purpose)
         timeout, tokens = self._limits(purpose)
+        unmetered = getattr(self.settings, "competition_unmetered", False) is True
         return {"provider": provider, "model": provider.model, "reasoning_effort": "high",
-                "max_tokens": tokens, "timeout_seconds": timeout}
+                "max_tokens": tokens, "timeout_seconds": timeout,
+                "billing_mode": "unmetered_competition" if unmetered else "metered"}
 
     def configured_for(self, purpose: str) -> bool:
         try:
@@ -417,7 +421,11 @@ class ModelGateway:
             parsed.port
         except (TypeError, ValueError):
             raise GatewayError("unsafe_url", status_code=503) from None
-        return base if base.endswith("/chat/completions") else base + "/chat/completions"
+        suffix = "/responses" if provider.api_type == "responses" else "/chat/completions"
+        other = "/chat/completions" if provider.api_type == "responses" else "/responses"
+        if parsed.path.endswith(other):
+            raise GatewayError("invalid_configuration", status_code=503)
+        return base if parsed.path.endswith(suffix) else base + suffix
 
     @staticmethod
     def _check_pin(original: str, pinned: str, host: str, sni: str) -> None:
@@ -455,14 +463,22 @@ class ModelGateway:
                 except (ValueError, OSError):
                     raise GatewayError("unsafe_url", status_code=503) from None
                 self._check_pin(original, url, host, sni)
-                payload: dict[str, Any] = {
-                    "model": provider.model, "messages": validated, "temperature": 0.2 if json_mode else 0.3,
-                    "max_tokens": max_tokens, "reasoning_effort": "high", "stream": on_delta is not None,
-                }
-                if json_mode:
-                    payload["response_format"] = {"type": "json_object"}
-                if on_delta is not None:
-                    payload["stream_options"] = {"include_usage": True}
+                if provider.api_type == "responses":
+                    payload: dict[str, Any] = {
+                        "model": provider.model, "input": validated, "max_output_tokens": max_tokens,
+                        "reasoning": {"effort": "high"}, "store": False, "stream": on_delta is not None,
+                    }
+                    if json_mode:
+                        payload["text"] = {"format": {"type": "json_object"}}
+                else:
+                    payload = {
+                        "model": provider.model, "messages": validated, "temperature": 0.2 if json_mode else 0.3,
+                        "max_tokens": max_tokens, "reasoning_effort": "high", "stream": on_delta is not None,
+                    }
+                    if json_mode:
+                        payload["response_format"] = {"type": "json_object"}
+                    if on_delta is not None:
+                        payload["stream_options"] = {"include_usage": True}
                 options = dict(timeout=httpx.Timeout(timeout), follow_redirects=False, trust_env=False, verify=True)
                 if self._transport is not None:
                     options["transport"] = self._transport
@@ -487,7 +503,9 @@ class ModelGateway:
                             try:
                                 body = _strict_json(raw)
                                 if isinstance(body, dict):
-                                    state.usage = _usage(body.get("usage"))
+                                    state.usage = _usage(body.get("usage"), provider.api_type)
+                                    if not state.request_id and isinstance(body.get("id"), str):
+                                        state.request_id = body["id"]
                             except (ValueError, RecursionError):
                                 pass
                             code = "rate_limited" if response.status_code == 429 else "http_error"
@@ -497,15 +515,18 @@ class ModelGateway:
                                 await self._read(response, state)
                                 state.completed = True
                                 raise state.error("invalid_sse")
-                            text = await self._stream(response, state, on_delta)
+                            stream = self._responses_stream if provider.api_type == "responses" else self._stream
+                            text = await stream(response, state, on_delta)
                         else:
                             raw = await self._read(response, state)
-                            state.completed = True
+                            if provider.api_type != "responses":
+                                state.completed = True
                             try:
                                 body = _strict_json(raw)
                             except (ValueError, RecursionError):
                                 raise state.error("invalid_response") from None
-                            text = self._content(body, state)
+                            content = self._responses_content if provider.api_type == "responses" else self._content
+                            text = content(body, state)
                     finally:
                         await response.aclose()
             data = None
@@ -610,6 +631,71 @@ class ModelGateway:
             raise state.error("invalid_response") from None
 
     @staticmethod
+    def _responses_metadata(body: Any, state: _CallState) -> None:
+        if not isinstance(body, dict):
+            raise state.error("invalid_response")
+        # Capture accounting and terminal acknowledgement before interpreting
+        # output, model mismatches or upstream errors.
+        usage = _usage(body.get("usage"), "responses")
+        if usage is not None:
+            state.usage = usage
+        if not state.request_id and isinstance(body.get("id"), str):
+            state.request_id = body["id"]
+        status = body.get("status")
+        if isinstance(status, str) and status in {"completed", "incomplete", "failed", "cancelled"}:
+            state.completed = True
+        if body.get("error") is not None:
+            state.completed = True
+        if "model" in body and body["model"] != state.model:
+            raise state.error("model_mismatch")
+        if body.get("error") is not None or status == "failed":
+            raise state.error("upstream_error")
+        if status == "cancelled":
+            raise state.error("cancelled")
+        if status == "incomplete":
+            details = body.get("incomplete_details")
+            reason = details.get("reason") if isinstance(details, dict) else None
+            code = {"max_output_tokens": "output_truncated", "content_filter": "content_filtered"}.get(reason, "output_incomplete") if isinstance(reason, str) else "output_incomplete"
+            raise state.error(code)
+
+    @classmethod
+    def _responses_content(cls, body: Any, state: _CallState) -> str:
+        cls._responses_metadata(body, state)
+        if body.get("status") != "completed":
+            raise state.error("incomplete_response")
+        output = body.get("output")
+        if not isinstance(output, list):
+            raise state.error("invalid_response")
+        parts = []
+        for item in output:
+            if not isinstance(item, dict):
+                raise state.error("invalid_response")
+            kind = item.get("type")
+            if kind == "reasoning":
+                continue
+            if isinstance(kind, str) and (kind.endswith("_call") or kind.startswith("mcp_")):
+                raise state.error("unsupported_tool_call")
+            if kind != "message" or item.get("role") != "assistant":
+                raise state.error("invalid_response")
+            if item.get("status", "completed") != "completed":
+                raise state.error("output_incomplete")
+            content = item.get("content")
+            if not isinstance(content, list):
+                raise state.error("invalid_response")
+            for part in content:
+                if not isinstance(part, dict):
+                    raise state.error("invalid_response")
+                if part.get("type") == "refusal":
+                    raise state.error("refusal")
+                if part.get("type") != "output_text" or not isinstance(part.get("text"), str):
+                    raise state.error("invalid_response")
+                parts.append(part["text"])
+        text = "".join(parts)
+        if not text.strip():
+            raise state.error("invalid_response")
+        return text
+
+    @staticmethod
     async def _events(response: httpx.Response, state: _CallState):
         decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
         buffer = ""
@@ -642,8 +728,8 @@ class ModelGateway:
             buffer += decoder.decode(b"", final=True)
         except UnicodeError:
             raise state.error("invalid_sse") from None
-        # Some compatible servers omit the final empty line. A valid [DONE]
-        # frame remains necessary; EOF alone never means successful completion.
+        # Some compatible servers omit the final empty line. The protocol
+        # consumer still requires an explicit terminal acknowledgement.
         if buffer.endswith("\r"):
             buffer = buffer[:-1]
         if buffer.startswith("data:"):
@@ -651,6 +737,86 @@ class ModelGateway:
             data.append(value[1:] if value.startswith(" ") else value)
         if data:
             yield "\n".join(data)
+
+    @classmethod
+    async def _responses_stream(cls, response: httpx.Response, state: _CallState, on_delta: Callable[[str], Any]) -> str:
+        parts: list[str] = []
+        blocked: str | None = None
+
+        async def emit(text: str) -> None:
+            try:
+                result = on_delta(text)
+                if inspect.isawaitable(result):
+                    await result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise state.error("delta_callback_error") from None
+
+        async for event in cls._events(response, state):
+            # Responses terminates with response.completed/failed/incomplete,
+            # never with Chat Completions' [DONE] marker alone.
+            if event == "[DONE]":
+                raise state.error("incomplete_stream")
+            try:
+                body = _strict_json(event)
+            except (ValueError, RecursionError):
+                raise state.error("invalid_sse") from None
+            if not isinstance(body, dict) or not isinstance(body.get("type"), str):
+                raise state.error("invalid_sse")
+            kind = body["type"]
+            if kind in {"response.completed", "response.failed", "response.incomplete"}:
+                terminal = body.get("response")
+                if not isinstance(terminal, dict):
+                    raise state.error("invalid_sse")
+                state.completed = True
+                cls._responses_metadata(terminal, state)
+                if terminal.get("status") != kind.removeprefix("response."):
+                    raise state.error("invalid_sse")
+                text = cls._responses_content(terminal, state)
+                if blocked:
+                    raise state.error(blocked)
+                if parts and "".join(parts) != text:
+                    raise state.error("invalid_sse")
+                if not parts:
+                    await emit(text)
+                return text
+            nested = body.get("response")
+            if nested is not None:
+                cls._responses_metadata(nested, state)
+                if state.completed:
+                    raise state.error("invalid_sse")
+            if kind == "error":
+                state.completed = True
+                raise state.error("upstream_error")
+            if kind in {"response.output_item.added", "response.output_item.done"}:
+                item = body.get("item")
+                if not isinstance(item, dict):
+                    raise state.error("invalid_sse")
+                item_type = item.get("type")
+                if isinstance(item_type, str) and (item_type.endswith("_call") or item_type.startswith("mcp_")):
+                    blocked = "unsupported_tool_call"
+                elif item_type not in {"message", "reasoning"}:
+                    raise state.error("invalid_sse")
+                elif item_type == "message" and item.get("role") != "assistant":
+                    raise state.error("invalid_sse")
+            elif kind in {"response.refusal.delta", "response.refusal.done"}:
+                blocked = "refusal"
+            elif kind in {"response.content_part.added", "response.content_part.done"}:
+                part = body.get("part")
+                if not isinstance(part, dict):
+                    raise state.error("invalid_sse")
+                if part.get("type") == "refusal":
+                    blocked = "refusal"
+            elif kind == "response.output_text.delta":
+                delta = body.get("delta")
+                if not isinstance(delta, str):
+                    raise state.error("invalid_sse")
+                if delta and not blocked:
+                    parts.append(delta)
+                    await emit(delta)
+            # Reasoning, summary and lifecycle events never reach on_delta.
+        raise state.error("incomplete_stream")
 
     @classmethod
     async def _stream(cls, response: httpx.Response, state: _CallState, on_delta: Callable[[str], Any]) -> str:

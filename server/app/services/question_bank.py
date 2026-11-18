@@ -227,7 +227,8 @@ class QuestionBank:
                           class_id: str | None = None, count: int | None = None, instruction: str = "",
                           question_types: Mapping[str,int] | None = None, difficulty: str | None = None,
                           knowledge_points: Sequence[str] | None = None,
-                          external_processing_allowed: bool = False, request_id: str | None = None) -> dict[str,Any]:
+                          external_processing_allowed: bool = False, request_id: str | None = None,
+                          intent: str = "production") -> dict[str,Any]:
         if external_processing_allowed is not True:
             raise PermissionError("explicit external processing permission is required")
         if not isinstance(instruction,str) or len(instruction)>2000:
@@ -235,27 +236,28 @@ class QuestionBank:
         config = validate_generation_config(count=count,question_types=question_types,difficulty=difficulty,knowledge_points=knowledge_points)
         if "knowledge_points" in config:
             config["knowledge_points"] = normalize_knowledge_points(self.content,course_id,config["knowledge_points"])
-        sources = self.content.confirmed_sources(course_id,source_block_ids,purpose="generation",class_id=class_id)
+        sources = self.content.confirmed_sources(course_id,source_block_ids,purpose="generation",class_id=class_id,intent=intent)
         self._approved_blocks(sources,owner_id)
         return self._create_question_job("question_generate",operation="generation",request_id=request_id,
             course_id=course_id,owner_id=owner_id,class_id=class_id,
             payload={"source_block_ids":list(source_block_ids),**config,"instruction":instruction,
-                     "external_processing_allowed":True})
+                     "external_processing_allowed":True,"intent":intent,"frozen_sources":self._freeze_sources(sources)})
 
     def candidate_payload(self, *, course_id: str, owner_id: str, question: Mapping[str,Any],
                           source_block_ids: Sequence[str], class_id: str | None = None,
                           external_processing_allowed: bool = False, provenance: Mapping[str,Any] | None = None,
-                          check_duplicate: bool = True) -> dict[str,Any]:
+                          check_duplicate: bool = True, intent: str = "production") -> dict[str,Any]:
         if external_processing_allowed is not True:
             raise PermissionError("explicit external processing permission is required")
-        sources = self.content.confirmed_sources(course_id,source_block_ids,purpose="generation",class_id=class_id)
+        sources = self.content.confirmed_sources(course_id,source_block_ids,purpose="generation",class_id=class_id,intent=intent)
         self._approved_blocks(sources,owner_id)
         candidate = validate_course_question(self.content,course_id,question)
         candidate["source_refs"] = [f"B{i+1}" for i in range(len(sources))]
         if check_duplicate:
             self._require_new_candidate(course_id,candidate)
         return {"source_block_ids":list(source_block_ids),"count":1,"candidates":[candidate],
-                "external_processing_allowed":True,"provenance":dict(provenance or {"origin":"manual"})}
+                "external_processing_allowed":True,"intent":intent,"frozen_sources":self._freeze_sources(sources),
+                "provenance":dict(provenance or {"origin":"manual"})}
 
     def _require_new_candidate(self, course_id: str, candidate: Mapping[str,Any]) -> None:
         if self._duplicate({"course_id":course_id,"kind":"question_generate","input":{}},candidate):
@@ -269,7 +271,8 @@ class QuestionBank:
 
     def create_edit(self, *, course_id: str, owner_id: str, question_id: str, expected_version: int,
                     question: Mapping[str,Any], source_block_ids: Sequence[str], class_id: str | None = None,
-                    external_processing_allowed: bool = False, request_id: str | None = None) -> dict[str,Any]:
+                    external_processing_allowed: bool = False, request_id: str | None = None,
+                    intent: str = "production") -> dict[str,Any]:
         if external_processing_allowed is not True or type(expected_version) is not int or expected_version<1:
             raise PermissionError("edit requires current owned version and explicit processing permission")
         original = self.learning.get_question(question_id,expected_version,owner_id)
@@ -283,12 +286,15 @@ class QuestionBank:
             raise PermissionError("question course/ownership does not match this edit")
         if original_content.get("class_id") is not None and original_content["class_id"]!=class_id:
             raise PermissionError("edit class must match the original question scope")
-        sources = self.content.confirmed_sources(course_id,source_block_ids,purpose="generation",class_id=class_id)
+        if original_content.get("generation_intent","production")!=intent:
+            raise PermissionError("edit intent must match the original question scope")
+        sources = self.content.confirmed_sources(course_id,source_block_ids,purpose="generation",class_id=class_id,intent=intent)
         self._approved_blocks(sources,owner_id)
         candidate = validate_course_question(self.content,course_id,question)
         candidate["source_refs"] = [f"B{i+1}" for i in range(len(sources))]
         payload = {"source_block_ids":list(source_block_ids),"count":1,"external_processing_allowed":True,
-                   "question_id":question_id,"target_version":expected_version+1,"candidate":candidate}
+                   "question_id":question_id,"target_version":expected_version+1,"candidate":candidate,
+                   "intent":intent,"frozen_sources":self._freeze_sources(sources)}
         def require_latest():
             if callable(detail_getter):
                 current = detail_getter(course_id,question_id,expected_version,owner_id)
@@ -296,6 +302,13 @@ class QuestionBank:
                     raise ContentConflict("edit requires the latest question version")
         return self._create_question_job("question_edit",operation="edit",request_id=request_id,
             course_id=course_id,owner_id=owner_id,class_id=class_id,payload=payload,before_create=require_latest)
+
+    @staticmethod
+    def _freeze_sources(sources: Sequence[Mapping[str,Any]]) -> list[dict[str,Any]]:
+        keys = ("file_id","anchor","sha256","original_sha256","source_revision","license_code","license_note",
+                "title","filename","source_filename","source_locator","source_note","usage_scope","lifecycle_status","kind")
+        return [{"block_id":source["id"],**{key:source[key] for key in keys},
+                 "provenance":dict(source.get("data",{}).get("provenance",{})),"export_allowed":False} for source in sources]
 
     @staticmethod
     def _approved_blocks(sources: Sequence[Mapping[str,Any]], owner_id: str) -> list[dict[str,Any]]:
@@ -308,6 +321,8 @@ class QuestionBank:
             if source.get("visibility") == "private" and source.get("owner_id") != owner_id:
                 raise PermissionError("private source belongs to another uploader")
             text = str(source["text"])
+            if source.get("data",{}).get("provenance",{}).get("schema") and len(text)>3000:
+                raise ValueError("structured source record exceeds model context limit; select an explicit shorter excerpt")
             if source.get("kind")=="table" and re.search(r"姓名|学号|student[_ ]?(?:id|number)|身份证|手机号",text,re.I):
                 raise PermissionError("identity-bearing tables require a de-identified source excerpt")
             approved.append({"text":_redact(text[:3000]),"external_processing_permission":True})
@@ -322,7 +337,19 @@ class QuestionBank:
     def _sources(self, job: Mapping[str,Any]) -> list[dict[str,Any]]:
         if job["input"].get("external_processing_allowed") is not True:
             raise PermissionError("job external processing permission is not approved")
-        sources = self.content.confirmed_sources(job["course_id"],job["input"]["source_block_ids"],purpose="generation",class_id=job["class_id"])
+        intent = job["input"].get("intent","production")
+        if intent not in {"production","evaluation"}:
+            raise PermissionError("question generation intent is invalid")
+        try:
+            sources = self.content.confirmed_sources(job["course_id"],job["input"]["source_block_ids"],purpose="generation",class_id=job["class_id"],intent=intent)
+        except PermissionError as error:
+            if job["input"].get("frozen_sources") is not None:
+                raise ContentConflict("frozen source is no longer eligible for this question job") from error
+            raise
+        frozen = job["input"].get("frozen_sources")
+        expected = self._freeze_sources(sources)
+        if frozen is not None and frozen!=expected:
+            raise ContentConflict("source provenance or lifecycle changed after question request")
         for source in sources:
             material = self.content.get_material(source["file_id"])
             if material is None or (material["visibility"]=="private" and material["owner_id"]!=job["owner_id"]):
@@ -411,7 +438,7 @@ class QuestionBank:
 
     @staticmethod
     def _metadata(result: Any) -> dict[str,Any]:
-        keys = ("request_id","model","reasoning_effort","provider","usage","request_sent","cost_pending")
+        keys = ("request_id","model","reasoning_effort","provider","usage","request_sent","cost_pending","billing_mode")
         if isinstance(result,Mapping):
             return {key:result[key] for key in keys if key in result}
         return {key:getattr(result,key) for key in keys if hasattr(result,key)}
@@ -532,6 +559,7 @@ class QuestionBank:
             # Serialize only local adoption, after network I/O. LearningStore transaction rolls back a failed batch.
             with self.content.job_result_guard(current["id"],expected_revision=revision,expected_stage=stage,
                                                expected_generation=state.get("worker_generation"),is_current=self.is_current) as db:
+                sources = self._sources(current)
                 authority_transaction = getattr(self.learning,"transaction",None)
                 with authority_transaction() if callable(authority_transaction) else nullcontext():
                     if self.is_current is not None and self.is_current() is False:
@@ -557,13 +585,14 @@ class QuestionBank:
             question_id = self._question_id(job,index)
             version = job["input"]["target_version"] if job["kind"]=="question_edit" else 1
             selected = [refs[ref] for ref in candidate["source_refs"]]
-            question = {**dict(candidate),"course_id":job["course_id"],"class_id":job["class_id"],"status":"approved",
+            intent = job["input"].get("intent","production")
+            publish_status = "candidate" if intent=="evaluation" else "approved"
+            question = {**dict(candidate),"course_id":job["course_id"],"class_id":job["class_id"],"status":publish_status,
+                        "generation_intent":intent,"usage_scope":intent,
                         "content_sha":exact,"family_sha":family,"pipeline_job_id":job["id"],
                         "source_revision":max(s["source_revision"] for s in selected),
                         "external_processing_permission":"approved",
-                        "source_anchors":[{"block_id":s["id"],"file_id":s["file_id"],"anchor":s["anchor"],"sha256":s["sha256"],
-                                           "original_sha256":s["original_sha256"],"source_revision":s["source_revision"],
-                                           "license_code":s["license_code"],"license_note":s["license_note"]} for s in selected],
+                        "source_anchors":self._freeze_sources(selected),
                         "review_evidence":{"independent_solution":state["solutions"][index],"recheck_count":state.get("recheck_count",0),"calls":state.get("calls",{}),
                                            "reviews":[{"stage":entry["stage"],"solution":entry["solutions"][index]} for entry in state.get("review_history",[])],
                                            "comparisons":[{"stage":entry["stage"],"comparison":entry["comparisons"][index]} for entry in state.get("comparison_history",[])]},
@@ -579,7 +608,7 @@ class QuestionBank:
                     raise QuestionValidationError("existing immutable question version differs from this job")
             else:
                 self.learning.create_question_version(job["owner_id"],question_id,version,question,
-                                                      status="approved",course_id=job["course_id"])
+                                                      status=publish_status,course_id=job["course_id"])
             result.append({"question_id":question_id,"version":version,"content_sha":exact,"family_sha":family})
         return result
 

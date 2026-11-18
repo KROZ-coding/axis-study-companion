@@ -126,6 +126,9 @@ class TeacherPlanning:
 
     def _question(self, row, actor_id, config, knowledge, source_cache):
         question = json.loads(row["content_json"])
+        if (question.get("generation_intent", "production") != "production"
+                or question.get("usage_scope", "production") != "production"):
+            return None
         if question.get("type") not in TYPES or question.get("class_id") not in (None, config["class_id"]):
             return None
         normalized = validate_question({**question, "rubric": self._rubric(question)})

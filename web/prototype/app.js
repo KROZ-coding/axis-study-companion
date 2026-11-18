@@ -191,6 +191,7 @@ const teacherReview = window.createTeacherReview({
   onReports: (selection) => openTeacherReports(selection),
 });
 const teacherReportWorkspace = window.createTeacherReports({ api, state, render, toast });
+const teacherCompetition = window.createTeacherCompetition({ api, state, render, toast });
 const teacherInsightsWorkspace = window.createTeacherInsights({
   api, state, render, toast,
   onChanged: () => learningNotifications.load(),
@@ -210,6 +211,7 @@ function resetLearningWorkspaces({ preserveNotifications = false } = {}) {
   state.reviewSelection = null;
   teacherReview.reset();
   teacherReportWorkspace.reset();
+  teacherCompetition.reset();
   teacherInsightsWorkspace.reset();
   studentFeedback.reset();
   if (!preserveNotifications) learningNotifications.reset();
@@ -221,6 +223,7 @@ function leaveTeacherPage(nextView) {
   if (state.teacherView === "review") return teacherReview.leave();
   if (state.teacherView === "reports") return teacherReportWorkspace.leave();
   if (state.teacherView === "insights") return teacherInsightsWorkspace.leave();
+  if (state.teacherView === "competition") return teacherCompetition.leave();
   return true;
 }
 
@@ -667,6 +670,7 @@ function renderTeacher() {
     student: teacherStudent,
     review: () => teacherReview.render(),
     materials: teacherMaterials,
+    competition: () => teacherCompetition.render(),
     reports: teacherReports,
     insights: () => teacherInsightsWorkspace.render(),
     management: () => teacherManagement.render(),
@@ -675,7 +679,7 @@ function renderTeacher() {
     <div class="app teacher-app" ${state.drawer ? "inert" : ""}>
       <aside class="side">
         <div class="brand">伴星导学</div>
-        ${nav("home", "班级学情")}${nav("review", "批改与反馈")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("reports", "阶段成果")}${nav("insights", "总结与下一轮")}${nav("management", "课程与班级")}
+        ${nav("home", "班级学情")}${nav("review", "批改与反馈")}${nav("student", "学生依据")}${nav("materials", "题库与材料")}${nav("competition", "学情分析")}${nav("reports", "阶段成果")}${nav("insights", "总结与下一轮")}${nav("management", "课程与班级")}
         <div class="spacer"></div>
         <p class="who muted">${escapeHtml(state.who)} · ${escapeHtml(state.className || "教师工作区")}</p>
         <button class="nav-btn" data-action="logout">退出</button>
@@ -1419,6 +1423,7 @@ function bind() {
     notificationOpenSequence += 1;
     state.teacherView = node.dataset.view;
     render();
+    if (state.teacherView === "competition") teacherCompetition.load();
     if (state.teacherView === "materials") teacherLibrary.load();
     if (state.teacherView === "management") teacherManagement.load();
     if (state.teacherView === "review") teacherReview.load();
@@ -1545,7 +1550,7 @@ function bind() {
     render();
   }));
   view.querySelectorAll("form").forEach((form) => {
-    if (!form.closest?.("[data-admin-workspace], [data-teacher-management], [data-teacher-review], [data-teacher-reports], [data-student-feedback], [data-learning-notifications]")) form.addEventListener("submit", onSubmit);
+    if (!form.closest?.("[data-admin-workspace], [data-teacher-management], [data-teacher-review], [data-teacher-reports], [data-teacher-competition], [data-student-feedback], [data-learning-notifications]")) form.addEventListener("submit", onSubmit);
   });
   view.querySelectorAll("[data-chat-rename-input]").forEach((input) => input.addEventListener("input", () => {
     state.chatRenameTitle = input.value;
@@ -1586,6 +1591,7 @@ function bind() {
     node.innerHTML = masked ? EYE_CLOSED : EYE_OPEN;
   }));
   teacherLibrary.bind(view);
+  teacherCompetition.bind(view);
   teacherComposer.bind(view);
   adminWorkspace.bind(view);
   teacherManagement.bind(view);
@@ -2056,6 +2062,7 @@ async function loadWorkspace() {
     if (!current() || state.loggingOut) return;
     state.loading = false;
     if (role === "teacher") {
+      if (state.teacherView === "competition") await teacherCompetition.load();
       if (state.teacherView === "management") await teacherManagement.load();
       if (state.teacherView === "review") await teacherReview.load();
       if (state.teacherView === "reports") await teacherReportWorkspace.load();

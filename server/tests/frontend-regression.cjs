@@ -134,6 +134,7 @@ function harness(names, options = {}) {
     render: record("render"), toast: record("toast"),
     onAction: record("onAction"), onSubmit: record("onSubmit"),
     teacherLibrary: { bind: record("teacherLibrary.bind"), reset: record("teacherLibrary.reset") },
+    teacherCompetition: { bind: record("teacherCompetition.bind"), reset: record("teacherCompetition.reset"), leave: () => { calls.push(["teacherCompetition.leave"]); return true; }, load: record("teacherCompetition.load"), render: () => '<section data-teacher-competition>赛事任务</section>' },
     teacherComposer: { bind: record("teacherComposer.bind"), reset: record("teacherComposer.reset") },
     adminWorkspace: { bind: record("adminWorkspace.bind"), reset: record("adminWorkspace.reset"), load: record("adminWorkspace.load"), render: () => '<section data-admin-workspace>管理页面</section>' },
     teacherManagement: { bind: record("teacherManagement.bind"), reset: record("teacherManagement.reset"), leave: () => { calls.push(["teacherManagement.leave"]); return true; }, load: record("teacherManagement.load"), render: () => '<section data-teacher-management>班级管理</section>' },

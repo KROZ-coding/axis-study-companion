@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 from typing import Annotated, Any, Literal
 
@@ -13,6 +14,7 @@ from ..models import User
 from ..platform_store import PlatformStore
 from ..services.material_parser import MaterialParseError, ParseLimits, parse_material, preview_grade_mapping
 from ..services.question_bank import QuestionBank
+from ..services.question_exports import MAX_QUESTIONS, export_questions, selection_hash
 from ..services.question_library import (
     IMPORT_MAX_BYTES, confirm_import, import_preview, list_question_library, preview_view,
     question_detail, question_import_template, question_job_view,
@@ -36,6 +38,36 @@ class DraftUpdate(StrictModel):
     allow_retrieval: StrictBool | None = None
     allow_student_view: StrictBool | None = None
     external_processing_allowed: StrictBool | None = None
+    usage_scope: Literal["production","evaluation"] | None = None
+    source_filename: str | None = Field(default=None,max_length=1000)
+    source_locator: str | None = Field(default=None,max_length=2000)
+    source_note: str | None = Field(default=None,max_length=4000)
+
+
+class LifecycleChange(StrictModel):
+    request_id: str = Field(min_length=1,max_length=100,pattern=r"^[A-Za-z0-9_.:-]+$")
+    expected_revision: int = Field(ge=1)
+    lifecycle_status: Literal["active","inactive"]
+    note: str = Field(default="",max_length=2000)
+
+
+class SupersedeMaterial(StrictModel):
+    request_id: str = Field(min_length=1,max_length=100,pattern=r"^[A-Za-z0-9_.:-]+$")
+    expected_revision: int = Field(ge=1)
+    replacement_material_id: str = Field(min_length=1,max_length=100)
+    expected_replacement_revision: int = Field(ge=1)
+    note: str = Field(default="",max_length=2000)
+
+
+class QuestionExportReference(StrictModel):
+    question_id: str = Field(min_length=1,max_length=100)
+    version: int = Field(ge=1)
+
+
+class QuestionExportRequest(StrictModel):
+    class_id: str | None = Field(default=None,min_length=1,max_length=100)
+    questions: list[QuestionExportReference] = Field(min_length=1,max_length=MAX_QUESTIONS)
+    format: Literal["json","csv","html"]
 
 
 class Confirmation(StrictModel):
@@ -57,6 +89,7 @@ class ParseJobRequest(StrictModel):
 
 
 class GenerationRequest(StrictModel):
+    intent: Literal["production","evaluation"] = "production"
     request_id: str | None = Field(default=None,min_length=1,max_length=100,pattern=r"^[A-Za-z0-9_.:-]+$",strict=True)
     source_block_ids: list[str] = Field(min_length=1,max_length=8)
     class_id: str | None = Field(default=None,min_length=1,max_length=100)
@@ -69,6 +102,7 @@ class GenerationRequest(StrictModel):
 
 
 class QuestionCandidate(StrictModel):
+    intent: Literal["production","evaluation"] = "production"
     request_id: str | None = Field(default=None,min_length=1,max_length=100,pattern=r"^[A-Za-z0-9_.:-]+$",strict=True)
     source_block_ids: list[str] = Field(min_length=1,max_length=8)
     class_id: str | None = Field(default=None,min_length=1,max_length=100)
@@ -151,10 +185,11 @@ def _material(content: ContentStore, platform: PlatformStore, actor: User, file_
     if material is None:
         raise HTTPException(404,detail={"code":"material_not_found","message":"材料不存在"})
     course = _scope(platform,actor,material["course_id"],material["class_id"],teaching=write)
-    # Uploaders manage only their own unconfirmed drafts. Course owners may inspect shared drafts for confirmation.
+    # Uploaders manage their own material; the course owner can govern shared material lifecycle.
     is_course_owner = actor.role=="admin" or course["teacher_id"]==actor.id
     if actor.role=="student":
-        if (material["visibility"]!="shared" or material["status"] not in {"partial","confirmed"}
+        if (material["lifecycle_status"]!="active" or material["usage_scope"]!="production"
+                or material["visibility"]!="shared" or material["status"] not in {"partial","confirmed"}
                 or not material["allow_student_view"] or not material["rights_confirmed"]
                 or not content.list_blocks(file_id,student=True)):
             raise HTTPException(404,detail={"code":"material_not_found","message":"材料不存在"})
@@ -169,12 +204,20 @@ def _draft_reader(actor: User, material: dict[str,Any], course: dict[str,Any]) -
         material["owner_id"]==actor.id or actor.role=="admin" or course["teacher_id"]==actor.id)
 
 
-def _public_file(material: dict[str,Any], *, student: bool = False) -> dict[str,Any]:
+def _public_file(material: dict[str,Any], *, student: bool = False, can_manage_lifecycle: bool = False,
+                 can_replace: bool = False) -> dict[str,Any]:
     if student:
         keys = {"id","course_id","class_id","title","format","status","revision","license_code","license_note"}
-    else:
-        keys = set(material)-{"storage_key"}
-    return {key:material[key] for key in keys if key in material}
+        return {key:material[key] for key in keys if key in material}
+    result = {key:value for key,value in material.items() if key!="storage_key"}
+    result["can_manage_lifecycle"] = bool(can_manage_lifecycle)
+    result["can_replace"] = bool(can_replace)
+    return result
+
+
+def _lifecycle_capability(actor: User, material: dict[str,Any], course: dict[str,Any]) -> bool:
+    return actor.role=="admin" or material["owner_id"]==actor.id or (
+        material["visibility"]=="shared" and course["teacher_id"]==actor.id)
 
 
 def _public_block(block: dict[str,Any], *, student: bool = False) -> dict[str,Any]:
@@ -182,8 +225,10 @@ def _public_block(block: dict[str,Any], *, student: bool = False) -> dict[str,An
     return {key:block[key] for key in keys if key in block}
 
 
-def _assert_source_access(content: ContentStore, platform: PlatformStore, actor: User, course_id: str, block_ids: list[str], *, purpose: str, class_id: str | None = None) -> None:
-    sources = content.confirmed_sources(course_id,block_ids,purpose=purpose,class_id=class_id)
+def _assert_source_access(content: ContentStore, platform: PlatformStore, actor: User, course_id: str, block_ids: list[str], *, purpose: str, class_id: str | None = None, intent: str = "production") -> None:
+    if intent=="evaluation" and actor.role not in {"teacher","admin"}:
+        raise PermissionError("evaluation material is restricted to teacher evaluation runs")
+    sources = content.confirmed_sources(course_id,block_ids,purpose=purpose,class_id=class_id,intent=intent)
     for file_id in {s["file_id"] for s in sources}:
         _material(content,platform,actor,file_id)
 
@@ -201,6 +246,10 @@ async def upload_material(course_id: str, request: Request,
                           allow_retrieval: Annotated[Literal["true","false"],Form()] = "false",
                           allow_student_view: Annotated[Literal["true","false"],Form()] = "false",
                           external_processing_allowed: Annotated[Literal["true","false"],Form()] = "false",
+                          usage_scope: Annotated[Literal["production","evaluation"],Form()] = "production",
+                          source_filename: Annotated[str,Form(max_length=1000)] = "",
+                          source_locator: Annotated[str,Form(max_length=2000)] = "",
+                          source_note: Annotated[str,Form(max_length=4000)] = "",
                           actor: User = Depends(require_platform_roles("teacher","admin")),
                           platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
     _scope(platform,actor,course_id,class_id,teaching=True)
@@ -221,8 +270,11 @@ async def upload_material(course_id: str, request: Request,
                 filename=file.filename or "",title=title,content=data,parsed=parsed,visibility=visibility,
                 license_code=license_code,license_note=license_note,rights_confirmed=rights_confirmed=="true",
                 allow_generation=allow_generation=="true",allow_retrieval=allow_retrieval=="true",
-                allow_student_view=allow_student_view=="true",external_processing_allowed=external_processing_allowed=="true")
-        return {"material":_public_file(material),"blocks":content.list_blocks(material["id"]),"issues":content.list_issues(material["id"])}
+                allow_student_view=allow_student_view=="true",external_processing_allowed=external_processing_allowed=="true",
+                usage_scope=usage_scope,source_filename=source_filename,source_locator=source_locator,source_note=source_note)
+        course = _scope(platform,actor,course_id,class_id,teaching=True)
+        capability = _lifecycle_capability(actor,material,course)
+        return {"material":_public_file(material,can_manage_lifecycle=capability,can_replace=capability),"blocks":content.list_blocks(material["id"]),"issues":content.list_issues(material["id"])}
     finally:
         await file.close()
 
@@ -239,7 +291,9 @@ def list_materials(course_id: str, actor: User = Depends(get_platform_user),plat
             if error.status_code==404:
                 continue
             raise
-        result.append(_public_file(row,student=actor.role=="student"))
+        result.append(_public_file(row,student=actor.role=="student",
+            can_manage_lifecycle=actor.role!="student" and _lifecycle_capability(actor,row,_scope(platform,actor,course_id,row["class_id"])),
+            can_replace=actor.role!="student" and _lifecycle_capability(actor,row,_scope(platform,actor,course_id,row["class_id"])) and row["lifecycle_status"]!="superseded"))
     return {"items":result,"limit":limit,"offset":offset}
 
 
@@ -248,7 +302,10 @@ def get_material(file_id: str,actor: User = Depends(get_platform_user),platform:
     material,course = _material(content,platform,actor,file_id)
     student = actor.role=="student"
     draft_reader = _draft_reader(actor,material,course)
-    result = {"material":_public_file(material,student=student),"blocks":[_public_block(block,student=student) for block in content.list_blocks(file_id,confirmed_only=not draft_reader,student=student)]}
+    capability = _lifecycle_capability(actor,material,course) if not student else False
+    result = {"material":_public_file(material,student=student,can_manage_lifecycle=capability,
+                can_replace=capability and material["lifecycle_status"]!="superseded"),
+              "blocks":[_public_block(block,student=student) for block in content.list_blocks(file_id,confirmed_only=not draft_reader,student=student)]}
     if draft_reader:
         result["issues"] = content.list_issues(file_id)
     return result
@@ -273,7 +330,37 @@ def update_material(file_id: str,payload: DraftUpdate,actor: User = Depends(requ
     _material(content,platform,actor,file_id,write=True)
     with _content_errors():
         row = content.update_draft(file_id,actor_id=actor.id,**payload.model_dump(exclude_none=True))
-    return {"material":_public_file(row)}
+    material,course = _material(content,platform,actor,file_id)
+    return {"material":_public_file(row,can_manage_lifecycle=_lifecycle_capability(actor,material,course),
+                                   can_replace=_lifecycle_capability(actor,material,course) and row["lifecycle_status"]!="superseded")}
+
+
+@router.post("/materials/{file_id}/lifecycle")
+def change_material_lifecycle(file_id: str,payload: LifecycleChange,actor: User = Depends(require_platform_roles("teacher","admin")),
+                              platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
+    material,course = _material(content,platform,actor,file_id,write=True)
+    authorized = _lifecycle_capability(actor,material,course)
+    if not authorized:
+        raise HTTPException(403,detail={"code":"lifecycle_forbidden","message":"仅上传者或课程负责人可变更材料使用状态"})
+    with _content_errors():
+        row = content.set_lifecycle(file_id,actor_id=actor.id,course_owner_authorized=actor.role=="admin" or course["teacher_id"]==actor.id,
+                                    **payload.model_dump())
+    return {"material":_public_file(row,can_manage_lifecycle=True,can_replace=row["lifecycle_status"]!="superseded")}
+
+
+@router.post("/materials/{file_id}/supersede")
+def supersede_material(file_id: str,payload: SupersedeMaterial,actor: User = Depends(require_platform_roles("teacher","admin")),
+                       platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
+    material,course = _material(content,platform,actor,file_id,write=True)
+    replacement,replacement_course = _material(content,platform,actor,payload.replacement_material_id,write=True)
+    if (not _lifecycle_capability(actor,material,course) or
+            not _lifecycle_capability(actor,replacement,replacement_course)):
+        raise HTTPException(403,detail={"code":"replacement_forbidden","message":"仅有权管理两份材料的教师可执行替换"})
+    with _content_errors():
+        row = content.supersede_material(file_id,actor_id=actor.id,
+            course_owner_authorized=actor.role=="admin" or course["teacher_id"]==actor.id,
+            **payload.model_dump())
+    return {"material":_public_file(row,can_manage_lifecycle=True,can_replace=False)}
 
 
 @router.delete("/materials/{file_id}",status_code=status.HTTP_204_NO_CONTENT)
@@ -350,7 +437,7 @@ def search_sources(course_id: str,q: str = Query(min_length=1,max_length=200),cl
 def generate_questions(course_id: str,payload: GenerationRequest,request: Request,actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
     _scope(platform,actor,course_id,payload.class_id,teaching=True)
     with _content_errors():
-        _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id)
+        _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id,intent=payload.intent)
         job = _bank(request,content).create_generation(course_id=course_id,owner_id=actor.id,**payload.model_dump())
     return {"job":question_job_view(request.app.state.runtime,job)}
 
@@ -359,7 +446,7 @@ def generate_questions(course_id: str,payload: GenerationRequest,request: Reques
 def edit_question(course_id: str,question_id: str,payload: QuestionEdit,request: Request,actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),content: ContentStore = Depends(get_content_store)):
     _scope(platform,actor,course_id,payload.class_id,teaching=True)
     with _content_errors():
-        _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id)
+        _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id,intent=payload.intent)
         values = payload.model_dump(exclude={"count","instruction","question_types","difficulty","knowledge_points"})
         job = _bank(request,content).create_edit(course_id=course_id,owner_id=actor.id,question_id=question_id,**values)
     return {"job":question_job_view(request.app.state.runtime,job)}
@@ -388,13 +475,49 @@ def get_question_version(course_id: str,question_id: str,version: int,request: R
         return result
 
 
+@router.post("/courses/{course_id}/question-library/export")
+def export_question_library(course_id: str,payload: QuestionExportRequest,request: Request,
+                            actor: User = Depends(require_platform_roles("teacher","admin")),
+                            platform: PlatformStore = Depends(get_platform_store)):
+    _scope(platform,actor,course_id,payload.class_id,teaching=True)
+    selection = [item.model_dump() for item in payload.questions]
+    if len({(item["question_id"],item["version"]) for item in selection})!=len(selection):
+        raise HTTPException(422,detail={"code":"duplicate_question_version","message":"题目版本不得重复"})
+    details = []
+    # Read and authorize every exact version before serialization; failures never produce partial exports.
+    with _content_errors():
+        for reference in selection:
+            detail = question_detail(request.app.state.runtime.learning,course_id,reference["question_id"],reference["version"],actor.id)
+            qclass = detail["question"]["content"].get("class_id")
+            _scope(platform,actor,course_id,qclass,teaching=True)
+            if payload.class_id is not None and qclass not in (None,payload.class_id):
+                raise PermissionError("selected question is outside requested class scope")
+            sources = []
+            # Preserve only the immutable source snapshot stored with this question version.
+            for frozen in detail["sources"]:
+                source = {key:value for key,value in frozen.items() if key in {
+                    "block_id","file_id","anchor","sha256","original_sha256","source_revision","license_code","license_note",
+                    "title","filename","source_filename","source_locator","source_note","usage_scope","lifecycle_status","export_allowed","provenance"}}
+                # external-processing approval is not source-text export permission.
+                source["export_allowed"] = False
+                sources.append(source)
+            detail["sources"] = sources
+            details.append(detail)
+        body,media_type,filename = export_questions(details,payload.format)
+    headers = {"Content-Disposition":f'attachment; filename="{filename}"',
+               "Cache-Control":"no-store","X-Question-Export-Count":str(len(selection)),
+               "X-Question-Export-Selection":selection_hash(selection),
+               "X-Question-Export-SHA256":hashlib.sha256(body).hexdigest()}
+    return Response(content=body,media_type=media_type,headers=headers)
+
+
 @router.post("/courses/{course_id}/question-candidates",status_code=status.HTTP_202_ACCEPTED)
 def create_question_candidate(course_id: str,payload: QuestionCandidate,request: Request,
                               actor: User = Depends(require_platform_roles("teacher","admin")),platform: PlatformStore = Depends(get_platform_store),
                               content: ContentStore = Depends(get_content_store)):
     _scope(platform,actor,course_id,payload.class_id,teaching=True)
     with _content_errors():
-        _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id)
+        _assert_source_access(content,platform,actor,course_id,payload.source_block_ids,purpose="generation",class_id=payload.class_id,intent=payload.intent)
         job = _bank(request,content).create_candidate(course_id=course_id,owner_id=actor.id,**payload.model_dump())
     candidate_status = "approved" if job["status"]=="completed" else "quarantined" if job["status"]=="quarantined" else "reviewing"
     return {"job":question_job_view(request.app.state.runtime,job),"candidate_status":candidate_status}

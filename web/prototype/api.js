@@ -637,6 +637,92 @@ async function reportExport(reportId, format, revisionId, { signal, snapshotHash
   return response;
 }
 
+function canonicalSelection(selection) {
+  return JSON.stringify(selection.map((item) => ({ question_id: item.question_id, version: item.version })));
+}
+
+async function sha256Hex(bytes) {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new ApiError(0, "digest_unavailable", "无法核对题目包摘要，请使用支持安全摘要的浏览器重试");
+  const digest = await subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function materialLifecycle(materialId, { requestId, expectedRevision, lifecycleStatus, note = "" } = {}) {
+  if (!materialId || !requestId || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1 || !["active", "inactive"].includes(lifecycleStatus)) {
+    throw new ApiError(422, "invalid_material_lifecycle", "材料状态变更缺少有效修订号或操作信息");
+  }
+  return post(`/materials/${encodeURIComponent(materialId)}/lifecycle`, {
+    request_id: requestId, expected_revision: expectedRevision, lifecycle_status: lifecycleStatus, note,
+  });
+}
+
+function supersedeMaterial(materialId, { requestId, expectedRevision, replacementMaterialId, expectedReplacementRevision, note = "" } = {}) {
+  if (!materialId || !replacementMaterialId || materialId === replacementMaterialId || !requestId
+      || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1
+      || !Number.isSafeInteger(expectedReplacementRevision) || expectedReplacementRevision < 1) {
+    throw new ApiError(422, "invalid_material_supersede", "材料替换缺少有效材料编号、修订号或操作信息");
+  }
+  return post(`/materials/${encodeURIComponent(materialId)}/supersede`, {
+    request_id: requestId, expected_revision: expectedRevision, replacement_material_id: replacementMaterialId,
+    expected_replacement_revision: expectedReplacementRevision, note,
+  });
+}
+
+async function questionLibraryExport(courseId, selection, format, classId, { signal } = {}) {
+  if (typeof courseId !== "string" || !courseId || !Array.isArray(selection) || !selection.length || selection.length > 100
+      || !["json", "csv", "html"].includes(format)) {
+    throw new ApiError(422, "invalid_question_export", "请选择 1–100 个题目版本和支持的导出格式");
+  }
+  const seen = new Set();
+  for (const item of selection) {
+    if (!item || typeof item.question_id !== "string" || !item.question_id || !Number.isSafeInteger(item.version) || item.version < 1) {
+      throw new ApiError(422, "invalid_question_export", "题目导出必须指定有效的题目编号和版本");
+    }
+    const key = JSON.stringify([item.question_id, item.version]);
+    if (seen.has(key)) throw new ApiError(422, "invalid_question_export", "题目导出清单包含重复版本");
+    seen.add(key);
+  }
+  const ordered = selection.map(({ question_id, version }) => ({ question_id, version }));
+  const expectedSelection = await sha256Hex(new TextEncoder().encode(canonicalSelection(ordered)));
+  const headers = { Accept: format === "html" ? "text/html" : format === "csv" ? "text/csv" : "application/json", "Content-Type": "application/json" };
+  if (location.protocol === "http:" || location.protocol === "https:") headers.Origin = location.origin;
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/courses/${encodeURIComponent(courseId)}/question-library/export`, {
+      method: "POST", credentials: "same-origin", headers,
+      body: JSON.stringify({ ...(classId ? { class_id: classId } : {}), questions: ordered, format }),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    if (signal?.aborted || error?.name === "AbortError") throw error;
+    throw new ApiError(0, "network_unavailable", "题目包下载失败，请确认服务可用后重试", true);
+  }
+  if (!response.ok) {
+    let payload = null;
+    try { payload = await response.json(); } catch { /* Export errors may have an empty body. */ }
+    throw toApiError(response.status, payload);
+  }
+  const expectedType = { json: "application/json", csv: "text/csv", html: "text/html" }[format];
+  const actualType = (response.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+  const count = response.headers.get("X-Question-Export-Count");
+  const selected = response.headers.get("X-Question-Export-Selection");
+  const expectedDigest = response.headers.get("X-Question-Export-SHA256");
+  if (actualType !== expectedType || count !== String(ordered.length) || selected !== expectedSelection || !/^[a-f0-9]{64}$/.test(expectedDigest || "")) {
+    throw new ApiError(409, "question_export_mismatch", "题目包格式、题目数量或所选版本未核对一致，请重新读取后导出");
+  }
+  const bytes = await response.arrayBuffer();
+  if (await sha256Hex(bytes) !== expectedDigest) throw new ApiError(409, "question_export_digest_mismatch", "题目包内容摘要不匹配，文件未下载");
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i), quoted = disposition.match(/filename="([^"]+)"/i);
+  let filename = quoted?.[1] || "";
+  try { if (encoded) filename = decodeURIComponent(encoded[1]); } catch { /* Use the local filename fallback. */ }
+  filename = filename.replace(/[\/\\\\:\x00-\x1f\x7f]/g, "_").replace(/^\.+/, "");
+  if (!filename.toLowerCase().endsWith(`.${format}`)) filename = `questions.${format}`;
+  const blob = new Blob([bytes], { type: actualType });
+  return { blob, filename, count: ordered.length, selectionSha256: expectedSelection, sha256: expectedDigest };
+}
+
 async function reportPreview(reportId, revisionId, options = {}) {
   const response = await reportExport(reportId, "html", revisionId, options);
   return response.text();
@@ -666,6 +752,7 @@ export const api = {
   acquireLease, renewLease, saveDraft, submitTask,
   startDiagnostic, submitDiagnostic, answerPolicy, helpEvent,
   reportFormats, reportSource, reportList, reportRevisions, reportRevision, generateReport, exportUrl, reportPreview, reportDownload,
+  questionLibraryExport, materialLifecycle, supersedeMaterial,
   ApiError,
 };
 

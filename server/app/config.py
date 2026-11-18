@@ -70,6 +70,7 @@ class LLMProvider:
     quota_group: str
     rpm_limit: int = 0
     tpm_limit: int = 0
+    api_type: str = "chat_completions"
 
 
 def _llm_providers() -> tuple[LLMProvider, ...]:
@@ -92,6 +93,9 @@ def _llm_providers() -> tuple[LLMProvider, ...]:
         base_url = str(value.get("base_url") or "").strip().rstrip("/")
         model = str(value.get("model") or "").strip()
         key_env = str(value.get("api_key_env") or "").strip()
+        api_type = value.get("api_type", "chat_completions")
+        if not isinstance(api_type, str) or api_type not in {"chat_completions", "responses"}:
+            raise ValueError(f"LLM_PROVIDERS_JSON entry {index} has an invalid api_type")
         if not name or name in names or channel not in {"student", "teacher", "grading", "summary", "shared"}:
             raise ValueError(f"LLM_PROVIDERS_JSON entry {index} has an invalid name or channel")
         if not base_url or not model or not key_env.isidentifier():
@@ -115,7 +119,7 @@ def _llm_providers() -> tuple[LLMProvider, ...]:
             name=name, channel=channel, base_url=base_url, api_key=api_key, model=model,
             max_concurrency=concurrency, queue_size=queue_size, priority=priority,
             quota_group=str(value.get("quota_group") or name).strip() or name,
-            rpm_limit=rpm_limit, tpm_limit=tpm_limit,
+            rpm_limit=rpm_limit, tpm_limit=tpm_limit, api_type=api_type,
         ))
         names.add(name)
     return tuple(providers)
@@ -126,6 +130,7 @@ class Settings:
     app_name: str = os.getenv("APP_NAME", "智慧学伴 API")
     app_env: str = os.getenv("APP_ENV", "development")
     demo_enabled: bool = _bool("STUDY_DEMO_ENABLED", False)
+    competition_unmetered: bool = _bool("STUDY_COMPETITION_UNMETERED", False)
     worker_enabled: bool = _bool("STUDY_WORKER_ENABLED", True)
     worker_poll_seconds: float = 0.5
     worker_lease_seconds: float = 120.0

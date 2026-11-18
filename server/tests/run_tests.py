@@ -13,10 +13,11 @@ def main() -> int:
         # Never inherit provider routing/credentials from the calling shell.
         # Individual tests install explicit disposable doubles/configuration.
         for key in tuple(os.environ):
-            if key.startswith(("LLM_", "MAXKB_")):
+            if key.startswith(("LLM_", "MAXKB_", "POKE_")):
                 os.environ.pop(key)
         os.environ.update(
             SKIP_ENV_FILE="1", APP_ENV="test", DATA_DIR=directory, STUDY_DATA_DIR=directory,
+            STUDY_COMPETITION_UNMETERED="false",
             PERSISTENCE_ENABLED="false", STUDY_PERSISTENCE_ENABLED="false",
             LLM_PROVIDERS_JSON="", LLM_BASE_URL="", LLM_API_KEY="", LLM_MODEL="",
             MAXKB_URL="", MAXKB_API_KEY="", MAXKB_DATASET_IDS="", MAXKB_COURSE_DATASETS="",

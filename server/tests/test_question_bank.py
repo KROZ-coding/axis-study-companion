@@ -192,6 +192,43 @@ class QuestionBankTests(unittest.TestCase):
         self.assertEqual(len(self.authority.versions),1)
         self.assertEqual(final["status"],"completed")
 
+    def test_frozen_source_deactivation_is_rejected_before_and_after_model_output(self):
+        job = self._create()
+        self.assertEqual(job["input"]["intent"],"production")
+        self.assertEqual(job["input"]["frozen_sources"][0]["block_id"],self.source["id"])
+        self.assertFalse(job["input"]["frozen_sources"][0]["export_allowed"])
+        self.bank.prepare_input(job["id"])
+        inactive = self.content.set_lifecycle(self.material_id,actor_id="teacher",request_id="freeze-off",
+            expected_revision=2,lifecycle_status="inactive")
+        with self.assertRaises(ContentConflict):
+            self.bank.prepare_input(job["id"])
+        with self.assertRaises(ContentConflict):
+            self._apply(job,{"questions":[candidate()]})
+        self.assertEqual(self.authority.versions,{})
+        self.assertEqual(self.content.get_job(job["id"])["revision"],job["revision"])
+        self.content.set_lifecycle(self.material_id,actor_id="teacher",request_id="freeze-on",
+            expected_revision=inactive["revision"],lifecycle_status="active")
+        with self.assertRaises(ContentConflict):
+            self.bank.prepare_input(job["id"])
+
+    def test_evaluation_intent_requires_matching_sources_and_does_not_publish_approved(self):
+        data = "独立评测资料，二加三为五。".encode()
+        material = self.content.import_material(course_id="course",owner_id="teacher",filename="evaluation.txt",content=data,
+            parsed=parse_material("evaluation.txt",data),license_code="own",rights_confirmed=True,allow_generation=True,
+            allow_retrieval=True,external_processing_allowed=True,usage_scope="evaluation")
+        source = self.content.list_blocks(material["id"])[0]
+        self.content.confirm_blocks(material["id"],[source["id"]],actor_id="teacher",expected_revision=1)
+        with self.assertRaises(PermissionError):
+            self._create(source_block_ids=[source["id"]])
+        job = self._create(source_block_ids=[source["id"]],intent="evaluation")
+        self.assertEqual(job["input"]["frozen_sources"][0]["usage_scope"],"evaluation")
+        finished = self._finish(self._apply(job,{"questions":[candidate()]}))
+        self.assertEqual(finished["status"],"completed")
+        saved = next(iter(self.authority.versions.values()))["content"]
+        self.assertEqual(saved["generation_intent"],"evaluation")
+        self.assertEqual(saved["status"],"candidate")
+        self.assertFalse(saved["source_anchors"][0]["export_allowed"])
+
     def test_sha_and_family_duplicate_generation_is_quarantined(self):
         self.assertEqual(self._finish(self._generate())["status"],"completed")
         duplicate = self._generate()
@@ -328,6 +365,28 @@ class RealLearningQuestionBankTests(unittest.TestCase):
         self.assertEqual(tuple(row),("approved","course"))
         with self.assertRaises(LookupError):
             self._get(reference,actor="unrelated-teacher")
+
+    def test_real_learning_evaluation_preserves_intent_and_remains_candidate(self):
+        data = "评测材料：二加三等于五。".encode()
+        material = self.content.import_material(course_id="course",owner_id="teacher",filename="evaluation.txt",content=data,
+            parsed=parse_material("evaluation.txt",data),license_code="own",rights_confirmed=True,
+            allow_generation=True,allow_retrieval=True,external_processing_allowed=True,usage_scope="evaluation")
+        source = self.content.list_blocks(material["id"])[0]
+        self.content.confirm_blocks(material["id"],[source["id"]],actor_id="teacher",expected_revision=1)
+        job = self.bank.create_generation(course_id="course",owner_id="teacher",source_block_ids=[source["id"]],
+            external_processing_allowed=True,intent="evaluation")
+        final = self._review(self._apply(job,{"questions":[candidate()]}))
+        self.assertEqual(final["status"],"completed",final.get("error"))
+        ref = final["state"]["published_versions"][0]
+        content = self._get(ref)
+        self.assertEqual(content["generation_intent"],"evaluation")
+        self.assertEqual(content["usage_scope"],"evaluation")
+        self.assertFalse(content["source_anchors"][0]["export_allowed"])
+        with self.learning.connect() as db:
+            row = db.execute("SELECT status,content_json FROM question_versions WHERE question_id=? AND version=?",
+                             (ref["question_id"],ref["version"])).fetchone()
+        self.assertEqual(row["status"],"candidate")
+        self.assertEqual(json.loads(row["content_json"])["generation_intent"],"evaluation")
 
     def test_real_learning_dedup_and_owner_list_use_authoritative_metadata(self):
         reference = self._publish()["state"]["published_versions"][0]

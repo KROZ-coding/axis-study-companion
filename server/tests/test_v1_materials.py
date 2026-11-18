@@ -1,5 +1,6 @@
 """API authorization and projections with real relational PlatformStore/ContentStore."""
 from pathlib import Path
+import hashlib
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -176,6 +177,89 @@ class V1MaterialsTests(unittest.TestCase):
         self.assertFalse(preview.json()["committed"])
         self._login("student")
         self.assertEqual(self.client.post(f"/api/v1/materials/{result['material']['id']}/grade-mapping-preview",json={"block_id":result["blocks"][0]["id"],"mapping":{}}).status_code,403)
+
+    def test_lifecycle_api_cas_replay_permissions_and_supersede_preserve_original(self):
+        uploaded = self._upload(data="已确认原文")
+        self.assertEqual(self._confirm(uploaded).status_code,200)
+        original = uploaded.json()["material"]
+        file_id = original["id"]
+        before = self.content.original_bytes(file_id)
+        self.assertTrue(self.client.get(f"/api/v1/materials/{file_id}").json()["material"]["can_manage_lifecycle"])
+        self._login("manager")
+        denied = self.client.post(f"/api/v1/materials/{file_id}/lifecycle",json={
+            "request_id":"manager-off","expected_revision":2,"lifecycle_status":"inactive"})
+        self.assertEqual(denied.status_code,403,denied.text)
+        self._login("owner")
+        command = {"request_id":"owner-off","expected_revision":2,"lifecycle_status":"inactive"}
+        off = self.client.post(f"/api/v1/materials/{file_id}/lifecycle",json=command)
+        self.assertEqual(off.status_code,200,off.text)
+        self.assertEqual(off.json()["material"]["lifecycle_status"],"inactive")
+        self.assertEqual(self.client.post(f"/api/v1/materials/{file_id}/lifecycle",json=command).json(),off.json())
+        self.assertEqual(self.client.post(f"/api/v1/materials/{file_id}/lifecycle",json={
+            "request_id":"stale","expected_revision":2,"lifecycle_status":"active"}).status_code,409)
+        self._login("student")
+        self.assertEqual(self.client.get(f"/api/v1/materials/{file_id}").status_code,404)
+        self._login("owner")
+        replacement = self._upload(data="替代已确认原文")
+        confirmed = self._confirm(replacement)
+        self.assertEqual(confirmed.status_code,200,confirmed.text)
+        newer = confirmed.json()["material"]
+        replaced = self.client.post(f"/api/v1/materials/{file_id}/supersede",json={
+            "request_id":"owner-replace","expected_revision":3,"replacement_material_id":newer["id"],
+            "expected_replacement_revision":newer["revision"]})
+        self.assertEqual(replaced.status_code,200,replaced.text)
+        self.assertEqual(replaced.json()["material"]["replacement_material_id"],newer["id"])
+        self.assertEqual(self.content.original_bytes(file_id),before)
+
+    def test_evaluation_generation_route_requires_intent_and_freezes_attribution(self):
+        uploaded = self._upload(data="评测知识来源",usage_scope="evaluation",source_filename="原资料.pdf",source_locator="第5页")
+        self.assertEqual(uploaded.status_code,201,uploaded.text)
+        self.assertEqual(self._confirm(uploaded).status_code,200)
+        block_id = uploaded.json()["blocks"][0]["id"]
+        payload = {"source_block_ids":[block_id],"external_processing_allowed":True}
+        self.assertEqual(self.client.post("/api/v1/courses/course/question-jobs",json=payload).status_code,403)
+        created = self.client.post("/api/v1/courses/course/question-jobs",json={**payload,"intent":"evaluation"})
+        self.assertEqual(created.status_code,202,created.text)
+        frozen = self.content.get_job(created.json()["job"]["id"])["input"]
+        self.assertEqual(frozen["intent"],"evaluation")
+        self.assertEqual(frozen["frozen_sources"][0]["source_locator"],"第5页")
+        self.assertFalse(frozen["frozen_sources"][0]["export_allowed"])
+        self.gateway.complete.assert_not_called()
+
+    def test_exact_question_export_with_real_learning_is_all_or_error_and_teacher_only(self):
+        from app.learning_store import LearningStore
+        from app.services.question_exports import selection_hash
+        learning = LearningStore(Path(self.directory.name)/"export-learning.sqlite3")
+        self.client.app.state.runtime.learning = learning
+        question = {"type":"single_choice","stem":"导出第一版本题干","options":["一","二"],"answer":1,
+                    "explanation":"完整解析","points":1,"rubric":[],"course_id":"course",
+                    "source_anchors":[{"block_id":"frozen-block","anchor":"csv/row:2/body","sha256":"a"*64,
+                       "original_sha256":"b"*64,"export_allowed":False,"text":"原文不导出"}]}
+        learning.create_question_version(self.owner["id"],"export-q",1,question,status="approved",course_id="course")
+        learning.create_question_version(self.owner["id"],"export-q",2,{**question,"stem":"第二版本"},status="approved",course_id="course")
+        selection = [{"question_id":"export-q","version":1}]
+        payload = {"questions":selection,"format":"json"}
+        for format in ("json","csv","html"):
+            response = self.client.post("/api/v1/courses/course/question-library/export",json={**payload,"format":format})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.headers["X-Question-Export-Count"],"1")
+            self.assertEqual(response.headers["X-Question-Export-Selection"],selection_hash(selection))
+            self.assertEqual(response.headers["X-Question-Export-SHA256"],hashlib.sha256(response.content).hexdigest())
+            self.assertIn("导出第一版本题干",response.text)
+            self.assertIn("完整解析",response.text)
+            self.assertNotIn("原文不导出",response.text)
+            self.assertNotIn("第二版本",response.text)
+        partial = self.client.post("/api/v1/courses/course/question-library/export",json={
+            **payload,"questions":selection+[{"question_id":"missing-question","version":1}]})
+        self.assertEqual(partial.status_code,404,partial.text)
+        self.assertNotIn("X-Question-Export-Count",partial.headers)
+        duplicate = self.client.post("/api/v1/courses/course/question-library/export",json={**payload,"questions":selection*2})
+        self.assertEqual(duplicate.status_code,422,duplicate.text)
+        self._login("student")
+        self.assertEqual(self.client.post("/api/v1/courses/course/question-library/export",json=payload).status_code,403)
+        self._login("other")
+        self.assertEqual(self.client.post("/api/v1/courses/course/question-library/export",json=payload).status_code,404)
+        self.gateway.complete.assert_not_called()
 
     def test_an_answer_marked_text_cannot_be_attested_public(self):
         material = self.content.import_material(course_id="course",owner_id=self.owner["id"],filename="lesson.txt",content=b"answer data",parsed={"status":"parsed","format":"txt","blocks":[{"anchor":"p:1","kind":"text","text":"参考答案：秘密"}],"issues":[]},visibility="shared",license_code="own",rights_confirmed=True,allow_student_view=True)

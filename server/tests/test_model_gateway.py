@@ -47,6 +47,25 @@ def frame(delta=None, *, finish=None, **changes):
     return ("data: " + json.dumps(body, ensure_ascii=False) + "\n\n").encode()
 
 
+def responses_body(text="Answer", usage=None, **changes):
+    body = {
+        "id": "responses-request", "object": "response", "model": "gpt-5.6-sol", "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "private thought"}]},
+            {"type": "message", "role": "assistant", "status": "completed",
+             "content": [{"type": "output_text", "text": text}]},
+        ],
+    }
+    if usage is not None:
+        body["usage"] = usage
+    body.update(changes)
+    return body
+
+
+def responses_frame(kind, **changes):
+    return ("event: " + kind + "\ndata: " + json.dumps({"type": kind, **changes}, ensure_ascii=False) + "\n\n").encode()
+
+
 class ByteStream(httpx.AsyncByteStream):
     def __init__(self, parts):
         self.parts = parts
@@ -493,6 +512,236 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
                 await self.complete(gateway)
             self.assertEqual(caught.exception.code, "response_too_large")
             self.assertTrue(caught.exception.request_sent)
+
+
+    async def test_responses_exact_endpoint_payload_json_limits_and_pinned_tls(self):
+        requests = []
+        selected = provider(api_type="responses", base_url="https://www.poke2api.com/v1/responses")
+
+        def handler(request):
+            requests.append(request)
+            payload = json.loads(request.content)
+            return httpx.Response(200, json=responses_body('{"ok": true}', {"input_tokens": 19, "output_tokens": 11}, model=payload["model"]),
+                                  headers={"x-request-id": "responses-header"})
+
+        config = settings(selected, provider("student", "student", api_type="responses"),
+                          provider("grading", "grading", "gpt-5.6-terra", api_type="responses"),
+                          provider("summary", "summary", "gpt-5.6-terra", api_type="responses"), llm_reasoning_effort="low")
+        gateway = ModelGateway(config, transport=httpx.MockTransport(handler))
+        for purpose in ("teacher", "suggest", "generate", "review", "student", "hint", "grading", "summary"):
+            with self.subTest(purpose=purpose):
+                result = await self.complete(gateway, purpose, json_mode=True)
+                request = requests[-1]
+                payload = json.loads(request.content)
+                tokens = 4096 if purpose in {"teacher", "suggest", "student", "hint"} else 8192
+                self.assertEqual(payload, {"model": result.model, "input": MESSAGES, "max_output_tokens": tokens,
+                                          "reasoning": {"effort": "high"}, "store": False, "stream": False,
+                                          "text": {"format": {"type": "json_object"}}})
+                self.assertEqual(request.url.path, "/v1/responses")
+                self.assertEqual(request.url.host, "93.184.216.34")
+                host = "www.poke2api.com" if purpose in {"teacher", "suggest", "generate", "review"} else "relay.example"
+                self.assertEqual(request.headers["host"], host)
+                self.assertEqual(request.extensions["sni_hostname"], host)
+                self.assertEqual(request.extensions["timeout"]["read"], 180 if tokens == 4096 else 360)
+                self.assertEqual(result.usage, {"prompt_tokens": 19, "completion_tokens": 11})
+                self.assertEqual(result.data, {"ok": True})
+                self.assertEqual(result.request_id, "responses-header")
+                self.assertNotIn("private", repr(result))
+        self.assertEqual(len(requests), 8)
+
+    async def test_responses_collects_only_message_output_text_and_never_top_level_or_reasoning(self):
+        body = responses_body()
+        body["output"][1]["content"] = [{"type": "output_text", "text": "公开"}, {"type": "output_text", "text": "答案"}]
+        body["output"].append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "."}]})
+        body["output_text"] = "private alternate text"
+        gateway = ModelGateway(settings(provider(api_type="responses")), transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
+        result = await self.complete(gateway)
+        self.assertEqual(result.text, "公开答案.")
+        self.assertEqual(result.request_id, "responses-request")
+        self.assertIsNone(result.usage)
+        self.assertTrue(result.cost_pending)
+        body["output"] = body["output"][:1]
+        with self.assertRaises(GatewayError) as caught:
+            await self.complete(gateway)
+        self.assertEqual(caught.exception.code, "invalid_response")
+        self.assertFalse(caught.exception.unknown_outcome)
+        self.assertNotIn("private", str(caught.exception))
+
+    async def test_responses_usage_is_strict_and_never_inferred_from_totals_or_chat_fields(self):
+        values = (None, {}, {"input_tokens": 5}, {"input_tokens": "5", "output_tokens": 2},
+                  {"input_tokens": True, "output_tokens": 2}, {"input_tokens": -1, "output_tokens": 2},
+                  {"input_tokens": 1, "output_tokens": 1.0}, {"input_tokens": 10**12 + 1, "output_tokens": 2},
+                  {"total_tokens": 8}, {"prompt_tokens": 5, "completion_tokens": 3})
+        for usage in values:
+            with self.subTest(usage=usage):
+                gateway = ModelGateway(settings(provider(api_type="responses")), transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json=responses_body(usage=usage))))
+                result = await self.complete(gateway)
+                self.assertIsNone(result.usage)
+                self.assertTrue(result.cost_pending)
+        gateway = ModelGateway(settings(provider(api_type="responses")), transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=responses_body(usage={"input_tokens": 0, "output_tokens": 0}))))
+        self.assertEqual((await self.complete(gateway)).usage, {"prompt_tokens": 0, "completion_tokens": 0})
+
+    async def test_responses_terminal_errors_retain_metadata_and_are_never_retried(self):
+        cases = (
+            ({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, "output_truncated", False),
+            ({"status": "incomplete", "incomplete_details": {"reason": "content_filter"}}, "content_filtered", False),
+            ({"status": "incomplete", "incomplete_details": {"reason": "other"}}, "output_incomplete", False),
+            ({"status": "failed", "error": {"message": "private upstream failure"}}, "upstream_error", False),
+            ({"status": "cancelled"}, "cancelled", False),
+            ({"status": "in_progress"}, "incomplete_response", True),
+            ({"status": None}, "incomplete_response", True),
+            ({"model": "wrong-model"}, "model_mismatch", False),
+            ({"output": [{"type": "function_call", "arguments": "private"}]}, "unsupported_tool_call", False),
+            ({"output": [{"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": "private refusal"}]}]}, "refusal", False),
+        )
+        for changes, code, unknown in cases:
+            calls = []
+            body = responses_body(usage={"input_tokens": 13, "output_tokens": 7}, **changes)
+            gateway = ModelGateway(settings(provider(api_type="responses"), provider("backup", api_type="responses", priority=20)),
+                                   transport=httpx.MockTransport(lambda request: calls.append(request) or httpx.Response(200, json=body)))
+            with self.subTest(code=code, changes=changes), self.assertRaises(GatewayError) as caught:
+                await self.complete(gateway)
+            error = caught.exception
+            self.assertEqual((error.code, error.request_sent, error.unknown_outcome), (code, True, unknown))
+            self.assertEqual(error.usage, {"prompt_tokens": 13, "completion_tokens": 7})
+            self.assertEqual(error.request_id, "responses-request")
+            self.assertEqual(error.model, "gpt-5.6-sol")
+            self.assertFalse(error.cost_pending)
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn("private", str(error))
+
+    async def test_responses_strict_json_preserves_usage_on_invalid_output(self):
+        for text in ('prefix {"ok":true}', '```json\n{"ok":true}\n```', '{"a":1,"a":2}', '{"a":NaN}', '{"a":1e999}', '[]'):
+            with self.subTest(text=text):
+                gateway = ModelGateway(settings(provider(api_type="responses")), transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json=responses_body(text, {"input_tokens": 4, "output_tokens": 7}))))
+                with self.assertRaises(GatewayError) as caught:
+                    await self.complete(gateway, json_mode=True)
+                self.assertEqual(caught.exception.code, "invalid_json")
+                self.assertEqual(caught.exception.usage, {"prompt_tokens": 4, "completion_tokens": 7})
+                self.assertFalse(caught.exception.unknown_outcome)
+        raw = '{"id":"duplicate","status":"completed","status":"failed"}'
+        gateway = ModelGateway(settings(provider(api_type="responses")), transport=httpx.MockTransport(lambda request: httpx.Response(200, text=raw)))
+        with self.assertRaises(GatewayError) as caught:
+            await self.complete(gateway)
+        self.assertEqual(caught.exception.code, "invalid_response")
+        self.assertTrue(caught.exception.unknown_outcome)
+
+    async def test_responses_http_errors_map_usage_and_redact_body_without_retry(self):
+        selected = provider(api_type="responses")
+        requests = []
+        gateway = ModelGateway(settings(selected), transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(
+            429, json={"id": "failed-request", "error": {"message": selected.api_key}, "usage": {"input_tokens": 8, "output_tokens": 2}})))
+        with self.assertRaises(GatewayError) as caught:
+            await self.complete(gateway)
+        self.assertEqual((caught.exception.code, caught.exception.unknown_outcome), ("rate_limited", False))
+        self.assertEqual(caught.exception.usage, {"prompt_tokens": 8, "completion_tokens": 2})
+        self.assertEqual(caught.exception.request_id, "failed-request")
+        self.assertNotIn(selected.api_key, str(caught.exception))
+        self.assertEqual(len(requests), 1)
+
+    async def test_responses_sse_live_public_deltas_completed_usage_without_done(self):
+        observed = asyncio.Event()
+        visible = []
+        requests = []
+        terminal = responses_body("你好 world", {"input_tokens": 9, "output_tokens": 8})
+
+        class LiveResponsesStream(httpx.AsyncByteStream):
+            closed = False
+
+            async def __aiter__(self):
+                yield responses_frame("response.created", response={"id": "responses-request", "status": "in_progress", "model": "gpt-5.6-sol"})
+                yield responses_frame("response.reasoning_summary_text.delta", delta="private thought")
+                yield responses_frame("response.output_item.added", item={"type": "reasoning", "summary": []})
+                raw = responses_frame("response.output_text.delta", delta="你好", output_index=1, content_index=0)
+                split = raw.index("你".encode()) + 1
+                yield raw[:split]
+                yield raw[split:]
+                await asyncio.wait_for(observed.wait(), timeout=1)
+                yield responses_frame("response.output_text.delta", delta=" world", output_index=1, content_index=0)
+                yield responses_frame("response.output_text.done", text="你好 world", output_index=1, content_index=0)
+                yield responses_frame("response.completed", response=terminal).rstrip(b"\n")
+
+            async def aclose(self):
+                self.closed = True
+
+        async def callback(text):
+            visible.append(text)
+            observed.set()
+            await asyncio.sleep(0)
+
+        stream = LiveResponsesStream()
+        gateway = ModelGateway(settings(provider(api_type="responses")), transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(
+            200, stream=stream, headers={"content-type": "text/event-stream; charset=utf-8"})))
+        result = await self.complete(gateway, on_delta=callback)
+        self.assertEqual((visible, result.text), (["你好", " world"], "你好 world"))
+        self.assertEqual(result.usage, {"prompt_tokens": 9, "completion_tokens": 8})
+        self.assertFalse(result.cost_pending)
+        self.assertTrue(stream.closed)
+        payload = json.loads(requests[0].content)
+        self.assertTrue(payload["stream"])
+        self.assertNotIn("stream_options", payload)
+        self.assertNotIn("temperature", payload)
+        self.assertNotIn("private", repr(result))
+        self.assertEqual(len(requests), 1)
+
+    async def test_responses_sse_terminal_failure_refusal_tools_and_unknown_disconnect(self):
+        usage = {"input_tokens": 3, "output_tokens": 2}
+        created = responses_frame("response.created", response={"id": "responses-request", "status": "in_progress", "usage": usage})
+        text = responses_frame("response.output_text.delta", delta="partial")
+        cases = (
+            ([created, text], "incomplete_stream", True),
+            ([created, text, httpx.ReadError("private transport failure")], "transport_error", True),
+            ([created, text, b"data: [DONE]\n\n"], "incomplete_stream", True),
+            ([created, b"data: not-json\n\n"], "invalid_sse", True),
+            ([created, responses_frame("response.failed", response=responses_body(usage=usage, status="failed", error={"message": "private failure"}))], "upstream_error", False),
+            ([created, text, responses_frame("response.incomplete", response=responses_body(usage=usage, status="incomplete", incomplete_details={"reason": "max_output_tokens"}))], "output_truncated", False),
+            ([created, responses_frame("response.refusal.delta", delta="private refusal"), responses_frame("response.completed", response=responses_body(usage=usage, output=[{"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": "private refusal"}]}]))], "refusal", False),
+            ([created, responses_frame("response.output_item.added", item={"type": "function_call", "arguments": "private"}), responses_frame("response.completed", response=responses_body(usage=usage, output=[{"type": "function_call", "arguments": "private"}]))], "unsupported_tool_call", False),
+            ([created, text, responses_frame("response.completed", response=responses_body("different", usage))], "invalid_sse", False),
+            ([created, responses_frame("response.completed", response=responses_body(usage=usage, model="wrong"))], "model_mismatch", False),
+        )
+        for chunks, code, unknown in cases:
+            stream = ByteStream(chunks)
+            calls, visible = [], []
+            gateway = ModelGateway(settings(provider(api_type="responses")), transport=httpx.MockTransport(lambda request: calls.append(request) or httpx.Response(
+                200, stream=stream, headers={"content-type": "text/event-stream"})))
+            with self.subTest(code=code, unknown=unknown), self.assertRaises(GatewayError) as caught:
+                await self.complete(gateway, on_delta=visible.append)
+            self.assertEqual((caught.exception.code, caught.exception.unknown_outcome), (code, unknown))
+            self.assertEqual(caught.exception.usage, {"prompt_tokens": 3, "completion_tokens": 2})
+            self.assertEqual(caught.exception.request_id, "responses-request")
+            self.assertNotIn("private", str(caught.exception) + repr(visible))
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(stream.closed)
+
+    async def test_responses_sse_json_missing_usage_and_terminal_only_public_output(self):
+        for include_delta in (True, False):
+            terminal = responses_body('{"ok":true}')
+            chunks = [responses_frame("response.output_text.delta", delta='{"ok":true}')] if include_delta else []
+            chunks.append(responses_frame("response.completed", response=terminal))
+            stream = ByteStream(chunks)
+            visible, requests = [], []
+            gateway = ModelGateway(settings(provider(api_type="responses")), transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(
+                200, stream=stream, headers={"content-type": "text/event-stream"})))
+            with self.subTest(include_delta=include_delta):
+                result = await self.complete(gateway, on_delta=visible.append, json_mode=True)
+                self.assertEqual(result.data, {"ok": True})
+                self.assertEqual(visible, ['{"ok":true}'])
+                self.assertIsNone(result.usage)
+                self.assertTrue(result.cost_pending)
+                self.assertEqual(json.loads(requests[0].content)["text"], {"format": {"type": "json_object"}})
+
+    async def test_responses_wrong_protocol_configuration_fails_before_dns_or_send(self):
+        for changes in ({"api_type": "other"}, {"api_type": "responses", "base_url": "https://relay.example/v1/chat/completions"},
+                        {"base_url": "https://relay.example/v1/responses"}):
+            with self.subTest(changes=changes), patch("app.services.model_gateway.pin_remote_url", side_effect=AssertionError("no DNS")):
+                with self.assertRaises(GatewayError) as caught:
+                    await self.complete(ModelGateway(settings(provider(**changes))))
+                self.assertEqual(caught.exception.code, "invalid_configuration")
+                self.assertFalse(caught.exception.request_sent)
 
 
 class ContextTests(unittest.TestCase):

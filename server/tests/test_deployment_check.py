@@ -105,6 +105,19 @@ class DeploymentCheckTests(unittest.TestCase):
                 report = check_settings(replace(self.configured(), **changes), production=True, require_models=True)
                 self.assertIn(code, self.failed(report))
 
+    def test_competition_mode_skips_prices_budgets_but_keeps_routes_and_urls(self):
+        config = replace(self.config, competition_unmetered=True, llm_providers=self.providers,
+                         llm_prices_json="invalid unused value", budget_currency="")
+        report = check_settings(config, production=True, require_models=True)
+        self.assertEqual(report["status"], "configuration_valid")
+        self.assertEqual(report["billing_mode"], "unmetered_competition")
+        self.assertFalse(any("price" in row["code"] or "budget" in row["code"] for row in report["checks"]))
+        missing = check_settings(replace(config, llm_providers=self.providers[:-1]), require_models=True)
+        self.assertIn("summary_route", self.failed(missing))
+        providers = (replace(self.providers[0], base_url="http://relay.example/v1"), *self.providers[1:])
+        unsafe = check_settings(replace(config, llm_providers=providers), require_models=True)
+        self.assertIn("teacher_1_url", self.failed(unsafe))
+
     def test_cli_exit_status_matches_report_and_parse_failure_is_sanitized(self):
         for config, expected in ((self.config, 0), (replace(self.config, cookie_secure=False), 1)):
             output = StringIO()

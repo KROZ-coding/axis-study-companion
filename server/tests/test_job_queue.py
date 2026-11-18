@@ -379,6 +379,75 @@ class JobQueueTests(unittest.TestCase):
         self.queue.record_call_usage(job.job_id, "one", cost_units=0, cost_pending=False, now=6)
         self.assertTrue(self.queue.start_call(job.job_id, "two", "worker", job.generation, now=6).should_send)
 
+    def test_only_succeeded_unmetered_usage_pending_allows_another_unmetered_call(self) -> None:
+        for index, (previous_mode, success, next_mode, allowed) in enumerate((
+            ("unmetered_competition", True, "unmetered_competition", True),
+            ("unmetered_competition", False, "unmetered_competition", False),
+            ("unmetered_competition", True, "metered", False),
+            ("metered", True, "unmetered_competition", False),
+        )):
+            with self.subTest(previous_mode=previous_mode, success=success, next_mode=next_mode):
+                job_id = f"pending-{index}"
+                self.queue.enqueue("batch", job_id=job_id, available_at=1)
+                job = self.queue.claim("worker", now=2)
+                first, second = f"{job_id}:one", f"{job_id}:two"
+                self.queue.start_call(job_id, first, "worker", job.generation, billing_mode=previous_mode, now=2)
+                self.queue.finish_call(job_id, first, "worker", job.generation, success=success, result={"saved": True}, now=3)
+                if allowed:
+                    intent = self.queue.start_call(job_id, second, "worker", job.generation, billing_mode=next_mode, now=4)
+                    self.assertTrue(intent.should_send)
+                    self.queue.finish_call(job_id, second, "worker", job.generation, success=True,
+                                           usage={"prompt_tokens": 2, "completion_tokens": 1}, now=5)
+                    replay = self.queue.start_call(job_id, first, "worker", job.generation, billing_mode=previous_mode, now=5)
+                    self.assertFalse(replay.should_send)
+                    self.assertEqual(replay.result, {"saved": True})
+                    self.assertTrue(self.queue.get_call(first).cost_pending)
+                    self.assertTrue(self.queue.get_job(job_id).cost_pending)
+                    self.assertIsNone(self.queue.get_call(first).cost_units)
+                    self.assertEqual(self.queue.call_costs(job_id), {})
+                else:
+                    with self.assertRaises(ReconciliationRequired):
+                        self.queue.start_call(job_id, second, "worker", job.generation, billing_mode=next_mode, now=4)
+                    self.assertEqual(len(self.queue.list_calls(job_id)), 1)
+                self.queue.finish(job_id, "worker", job.generation, success=False, now=6)
+
+    def test_unmetered_in_flight_and_unknown_block_new_calls_even_with_complete_usage(self) -> None:
+        self.queue.enqueue("batch", job_id="unresolved", available_at=1)
+        job = self.queue.claim("worker", now=2)
+        self.queue.start_call(job.job_id, "one", "worker", job.generation, billing_mode="unmetered_competition", now=2)
+        self.queue.record_call_usage(job.job_id, "one", usage={"prompt_tokens": 2, "completion_tokens": 1}, now=3)
+        self.assertFalse(self.queue.get_call("one").cost_pending)
+        for call_id in ("one", "two"):
+            with self.assertRaises(ReconciliationRequired):
+                self.queue.start_call(job.job_id, call_id, "worker", job.generation, billing_mode="unmetered_competition", now=3)
+        self.queue.mark_call_unknown(job.job_id, "one", "worker", job.generation, now=4)
+        self.assertEqual(self.queue.get_job(job.job_id).status, "reconciling")
+        self.assertIsNone(self.queue.claim("other", now=5))
+        with self.assertRaises(LeaseLost):
+            self.queue.start_call(job.job_id, "two", "worker", job.generation, billing_mode="unmetered_competition", now=5)
+        self.assertEqual(len(self.queue.list_calls(job.job_id)), 1)
+
+    def test_unmetered_pending_recovery_still_requires_complete_usage_and_confirmation(self) -> None:
+        self.queue.enqueue("batch", job_id="recovery", paid=True, available_at=1)
+        job = self.queue.claim("worker", lease_seconds=5, now=2)
+        self.queue.start_call(job.job_id, "saved", "worker", job.generation, billing_mode="unmetered_competition", now=3)
+        self.queue.finish_call(job.job_id, "saved", "worker", job.generation, success=True, result={"saved": True}, now=4)
+        reopened = JobQueue(self.database)
+        reopened.recover_expired(now=8)
+        self.assertEqual(reopened.get_job(job.job_id).status, "awaiting_confirmation")
+        with self.assertRaises(ReconciliationRequired):
+            reopened.confirm_recovery(job.job_id, approved=True, now=9)
+        reopened.record_call_usage(job.job_id, "saved", usage={"prompt_tokens": 2}, cost_pending=False, now=9)
+        with self.assertRaises(ReconciliationRequired):
+            reopened.confirm_recovery(job.job_id, approved=True, now=9)
+        reopened.record_call_usage(job.job_id, "saved", usage={"completion_tokens": 1}, now=10)
+        self.assertFalse(reopened.get_job(job.job_id).cost_pending)
+        self.assertEqual(reopened.get_job(job.job_id).status, "awaiting_confirmation")
+        self.assertEqual(reopened.confirm_recovery(job.job_id, approved=True, now=11).status, "queued")
+        self.assertEqual(reopened.get_call("saved").result, {"saved": True})
+        self.assertIsNone(reopened.get_call("saved").cost_units)
+        self.assertEqual(reopened.call_costs(job.job_id), {})
+
     def test_call_metadata_versions_events_and_restart_result_reuse(self) -> None:
         self.queue.enqueue("grading", job_id="versions", steps=("grade",), model_name="terra", model_version="m1", price_version="p1", input_version="input-3", available_at=1)
         job = self.queue.claim("old", lease_seconds=5, now=2)

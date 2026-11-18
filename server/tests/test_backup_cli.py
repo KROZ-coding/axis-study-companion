@@ -18,7 +18,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 os.environ["SKIP_ENV_FILE"] = "1"
 
 from app import backup_cli
-from app.backup import BackupManager, REQUIRED_DATABASES
+from app.backup import (
+    BackupError, BackupManager, DEFAULT_DATABASE_CONTRACTS, LEGACY_CONTENT_CONTRACT,
+    REQUIRED_DATABASES,
+)
+from app.content_store import ContentStore
+from app.services.competition_runs import CompetitionRunStore
 from app.job_queue import InvalidTransition, ReconciliationRequired
 from app.runtime import Runtime
 from app.services.report_exports import build_report_snapshot
@@ -151,6 +156,111 @@ class BackupCLITests(unittest.TestCase):
         self.assertEqual(recovered.reports.get_snapshot(self.report["id"]), self.report)
         self.assertEqual(recovered.companion.get_conversation(self.conversation["id"], "student"), self.conversation)
         self.assertEqual({name: (self.live / f"{name}.sqlite3").read_bytes() for name in REQUIRED_DATABASES}, before)
+
+    def test_legacy_v1_six_database_bundle_restores_before_explicit_content_migration(self):
+        self.runtime.stop()
+        legacy_content = self.root / "content-v1.sqlite3"
+        with closing(sqlite3.connect(legacy_content)) as db:
+            ContentStore._migration_1(db)
+            db.execute("PRAGMA user_version=1")
+            db.commit()
+        shared = self.root / "legacy-shared"
+        shared.mkdir()
+        paths = {name: self.live / f"{name}.sqlite3" for name in REQUIRED_DATABASES}
+        paths["content"] = legacy_content
+        manager = BackupManager(paths, shared, {
+            **DEFAULT_DATABASE_CONTRACTS, "content": LEGACY_CONTENT_CONTRACT,
+        })
+        # Use the original manifest layout/version with a genuine pre-migration
+        # content schema, rather than only relabelling a v2 database.
+        output = BytesIO()
+        with ZipFile(BytesIO(manager.export_bytes())) as source, ZipFile(output, "w", ZIP_DEFLATED) as target:
+            for member in source.infolist():
+                payload = source.read(member.filename)
+                if member.filename == "manifest.json":
+                    manifest = json.loads(payload)
+                    manifest["bundle_version"] = 1
+                    payload = json.dumps(manifest).encode()
+                target.writestr(member.filename, payload)
+        self.bundle.write_bytes(output.getvalue())
+        with patch.object(Runtime, "initialize", side_effect=AssertionError("restore must not start Runtime")), \
+                patch.object(ContentStore, "_initialize", side_effect=AssertionError("restore must not migrate")):
+            verified = backup_cli.verify_bundle(self.bundle)
+            restored = backup_cli.restore_bundle(self.bundle, self.parent, self.live, stopped=True)
+        self.assertEqual(verified["bundle_version"], 1)
+        self.assertEqual(set(verified["databases"]), set(REQUIRED_DATABASES))
+        data = Path(restored["data_dir"])
+        content = data / "content.sqlite3"
+        self.assertEqual(backup_cli._sha256(content), verified["databases"]["content"]["sha256"])
+        self.assertFalse((data / "competition.sqlite3").exists())
+        with closing(sqlite3.connect(content.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='material_commands'").fetchone())
+        # Migration only occurs on the operator's later, explicit store startup.
+        reopened = ContentStore(content)
+        self.assertEqual(reopened.schema_version, 2)
+        with reopened.connect() as db:
+            self.assertIsNotNone(db.execute("SELECT name FROM sqlite_master WHERE name='material_commands'").fetchone())
+        with closing(sqlite3.connect(legacy_content)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+
+    def test_content_v2_and_optional_competition_roundtrip_preserve_rows_and_hashes(self):
+        competition = self.live / "competition.sqlite3"
+        CompetitionRunStore(competition)
+        source_hash = hashlib.sha256(b"competition-input").hexdigest()
+        inputs = json.dumps({"source_sha256": source_hash, "source_record": "fixture.csv:2"})
+        with closing(sqlite3.connect(competition)) as db:
+            db.execute("INSERT INTO competition_runs(id,course_id,created_by,title,status,revision,preview_json,inputs_json,created_at) "
+                       "VALUES(?,?,?,?,?,?,?,?,?)",
+                       ("fixture-run", "course", "teacher", "Fixture", "preview", 1, "{}", inputs, "2026-11-17"))
+            db.commit()
+        with self.runtime.content.connect() as db:
+            db.execute("INSERT INTO material_commands VALUES(?,?,?,?,?,?,?)",
+                       ("teacher", "fixture-command", self.material["id"], "lifecycle", "{}", "{}", 1.0))
+            db.commit()
+        created = self._backup()
+        self.assertEqual(created["bundle_version"], 2)
+        self.assertEqual(set(created["databases"]), {*REQUIRED_DATABASES, "competition"})
+        self.assertEqual(created["databases"]["content"]["user_version"], 2)
+        self.assertEqual(created["databases"]["competition"]["user_version"], 1)
+        # Offline verification/restore do not depend on any live competition file.
+        protected = self.root / "nonexistent-live"
+        with patch.object(Runtime, "initialize", side_effect=AssertionError("no Runtime startup")):
+            verified = backup_cli.verify_bundle(self.bundle)
+            restored = backup_cli.restore_bundle(self.bundle, self.parent, protected, stopped=True)
+        self.assertEqual(verified["databases"], created["databases"])
+        data = Path(restored["data_dir"])
+        for name, entry in created["databases"].items():
+            self.assertEqual(backup_cli._sha256(data / f"{name}.sqlite3"), entry["sha256"])
+        with closing(sqlite3.connect((data / "competition.sqlite3").as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+            self.assertEqual(db.execute("SELECT inputs_json FROM competition_runs WHERE id='fixture-run'").fetchone()[0], inputs)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+        with closing(sqlite3.connect((data / "content.sqlite3").as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+            self.assertEqual(db.execute("SELECT actor_id,request_id,file_id FROM material_commands").fetchall(),
+                             [("teacher", "fixture-command", self.material["id"])])
+        self.assertFalse(any(path.name.endswith(("-wal", "-shm", "-journal")) for path in data.rglob("*")))
+
+    def test_optional_competition_rejects_wrong_version_application_id_and_table_set(self):
+        competition = self.live / "competition.sqlite3"
+        for mutation in ("version", "application_id", "extra_table", "missing_table"):
+            with self.subTest(mutation=mutation):
+                CompetitionRunStore(competition)
+                with closing(sqlite3.connect(competition)) as db:
+                    if mutation == "version":
+                        db.execute("PRAGMA user_version=2")
+                    elif mutation == "application_id":
+                        db.execute("PRAGMA application_id=1")
+                    elif mutation == "extra_table":
+                        db.execute("CREATE TABLE unexpected(value TEXT)")
+                    else:
+                        db.execute("DROP TABLE competition_runs")
+                    db.commit()
+                before = competition.read_bytes()
+                with self.assertRaises(BackupError):
+                    self._backup()
+                self.assertFalse(self.bundle.exists())
+                self.assertEqual(competition.read_bytes(), before)
+                competition.unlink()
 
     def test_stopped_confirmation_is_required_before_any_backup_or_restore_io(self):
         with patch.object(BackupManager, "write_backup", side_effect=AssertionError("must not open stores")):
